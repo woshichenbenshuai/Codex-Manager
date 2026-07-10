@@ -1,8 +1,9 @@
 services:
   codexmanager:
     container_name: codexmanager
-    image: registry.cn-hangzhou.aliyuncs.com/kilimiao/codex-manager:latest
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.all-in-one
     restart: unless-stopped
     init: true
     # NAS Docker panels often create bind-mounted folders with host-only ownership
