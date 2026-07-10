@@ -13,6 +13,10 @@ services:
       CODEXMANAGER_SERVICE_ADDR: 0.0.0.0:48760
       CODEXMANAGER_WEB_ADDR: 0.0.0.0:48761
       CODEXMANAGER_WEB_NO_OPEN: "1"
+      # Route ChatGPT upstream traffic through the host-side curl_cffi proxy.
+      # Start it with:
+      # scripts/run-curl-cffi-chatgpt-proxy.sh --listen 0.0.0.0:8787 --proxy socks5h://127.0.0.1:40000 --install-deps --verbose
+      CODEXMANAGER_UPSTREAM_BASE_URL: http://host.docker.internal:8787/backend-api/codex
       TZ: ${TZ:-Asia/Shanghai}
       CODEXMANAGER_DB_PATH: /data/codexmanager.db
       CODEXMANAGER_RPC_TOKEN_FILE: /data/codexmanager.rpc-token
@@ -20,8 +24,7 @@ services:
       CODEXMANAGER_GATEWAY_ERROR_STDOUT: "1"
       # Optional mitigation for same key/path/model head-of-line gate waits:
       # CODEXMANAGER_REQUEST_GATE_WAIT_TIMEOUT_MS: "5000"
-      # If the host machine provides an HTTP proxy, use:
-      # CODEXMANAGER_UPSTREAM_PROXY_URL: http://host.docker.internal:7890
+      # Do not set CODEXMANAGER_UPSTREAM_PROXY_URL when using the curl_cffi proxy.
     volumes:
       # For normal Linux servers you can also run as UID/GID 10001 and chown this
       # folder, but NAS environments such as ZSpace are usually easier with root.
