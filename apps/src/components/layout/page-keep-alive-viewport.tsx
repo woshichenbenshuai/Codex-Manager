@@ -40,11 +40,14 @@ const LAZY_PAGE_COMPONENTS: Record<
   "/aggregate-api": lazy(() => import("@/app/aggregate-api/page")),
   "/apikeys": lazy(() => import("@/app/apikeys/page")),
   "/platform-mode": lazy(() => import("@/app/platform-mode/page")),
+  "/projects": lazy(() => import("@/app/projects/page")),
   "/models": lazy(() => import("@/app/models/page")),
   "/model-groups": lazy(() => import("@/app/model-groups/page")),
   "/plugins": lazy(() => import("@/app/plugins/page")),
+  "/skills": lazy(() => import("@/app/skills/page")),
   "/logs": lazy(() => import("@/app/logs/page")),
   "/settings": lazy(() => import("@/app/settings/page")),
+  "/proxy-settings": lazy(() => import("@/app/proxy-settings/page")),
   "/author": lazy(() => import("@/app/author/page")),
 };
 
@@ -58,7 +61,7 @@ function PagePanelFallback({ title }: { title: string }) {
     <div
       className={cn(
         "fixed inset-y-0 right-0 z-40 overflow-hidden bg-background/70",
-        isSidebarOpen ? "left-56" : "left-16",
+        isSidebarOpen ? "left-60" : "left-16",
       )}
     >
       <div className="relative flex h-full w-full items-start justify-center px-8 pt-[31vh]">
@@ -120,11 +123,15 @@ export function PageKeepAliveViewport({
   );
   const pruneShellTabs = useAppStore((state) => state.pruneShellTabs);
   const { isDesktopRuntime } = useRuntimeCapabilities();
-  const { data: session, isLoading: isSessionLoading } = useAppSession();
+  const {
+    data: session,
+    isLoading: isSessionLoading,
+    isSessionQueryEnabled,
+  } = useAppSession();
   const role = resolveSessionRole(session, isSessionLoading, isDesktopRuntime);
   const routeAccess = useMemo(
-    () => ({ role, mode: session?.mode ?? null }),
-    [role, session?.mode],
+    () => ({ role, mode: session?.mode ?? null, isDesktopRuntime }),
+    [isDesktopRuntime, role, session?.mode],
   );
 
   useEffect(() => {
@@ -147,10 +154,21 @@ export function PageKeepAliveViewport({
   }, [currentShellPath, routeAccess, t]);
 
   useEffect(() => {
-    if (isSessionLoading) return;
+    if (
+      !isDesktopRuntime &&
+      (!isSessionQueryEnabled || isSessionLoading)
+    ) {
+      return;
+    }
     const allowedPaths = getAllowedTopLevelRoutes(routeAccess).map((route) => route.path);
     pruneShellTabs(allowedPaths, getFirstAllowedTopLevelRoutePath(routeAccess));
-  }, [isSessionLoading, pruneShellTabs, routeAccess]);
+  }, [
+    isDesktopRuntime,
+    isSessionLoading,
+    isSessionQueryEnabled,
+    pruneShellTabs,
+    routeAccess,
+  ]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

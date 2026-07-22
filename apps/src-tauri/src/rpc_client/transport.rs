@@ -10,6 +10,7 @@ const RPC_CONNECT_TIMEOUT: Duration = Duration::from_millis(400);
 const RPC_DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_BULK_USAGE_REFRESH_IO_TIMEOUT: Duration = Duration::from_secs(600);
 const RPC_ACCOUNT_IMPORT_IO_TIMEOUT: Duration = Duration::from_secs(600);
+const RPC_CODEX_SKILLS_MUTATION_IO_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// 函数 `rpc_io_timeout`
 ///
@@ -26,6 +27,18 @@ const RPC_ACCOUNT_IMPORT_IO_TIMEOUT: Duration = Duration::from_secs(600);
 fn rpc_io_timeout(method: &str, params: Option<&serde_json::Value>) -> Duration {
     if method == "account/import" {
         return RPC_ACCOUNT_IMPORT_IO_TIMEOUT;
+    }
+
+    // Marketplace mutations can run several Codex CLI commands in sequence. Each command has its
+    // own bounded timeout, so the desktop transport must keep the single RPC socket open for the
+    // complete list/add/refresh/install transaction.
+    if method.starts_with("codexSkills/marketplace")
+        || matches!(
+            method,
+            "codexSkills/installZip" | "codexSkills/importDirectory" | "codexSkills/delete"
+        )
+    {
+        return RPC_CODEX_SKILLS_MUTATION_IO_TIMEOUT;
     }
 
     if method == "account/usage/refresh"
@@ -209,7 +222,10 @@ pub(crate) fn rpc_call(
 
 #[cfg(test)]
 mod tests {
-    use super::{rpc_io_timeout, RPC_BULK_USAGE_REFRESH_IO_TIMEOUT, RPC_DEFAULT_IO_TIMEOUT};
+    use super::{
+        rpc_io_timeout, RPC_BULK_USAGE_REFRESH_IO_TIMEOUT, RPC_CODEX_SKILLS_MUTATION_IO_TIMEOUT,
+        RPC_DEFAULT_IO_TIMEOUT,
+    };
 
     /// 函数 `bulk_usage_refresh_uses_extended_timeout`
     ///
@@ -246,6 +262,38 @@ mod tests {
             Some(&serde_json::json!({ "accountId": "acc-1" })),
         );
         assert_eq!(timeout, RPC_DEFAULT_IO_TIMEOUT);
+    }
+
+    #[test]
+    fn codex_marketplace_rpcs_use_extended_timeout() {
+        for method in [
+            "codexSkills/marketplaceList",
+            "codexSkills/marketplaceAdd",
+            "codexSkills/marketplaceRefresh",
+            "codexSkills/marketplacePluginInstall",
+        ] {
+            assert_eq!(
+                rpc_io_timeout(method, None),
+                RPC_CODEX_SKILLS_MUTATION_IO_TIMEOUT,
+                "unexpected timeout for {method}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_skill_file_mutations_use_extended_timeout() {
+        for method in [
+            "codexSkills/installZip",
+            "codexSkills/importDirectory",
+            "codexSkills/delete",
+        ] {
+            assert_eq!(
+                rpc_io_timeout(method, None),
+                RPC_CODEX_SKILLS_MUTATION_IO_TIMEOUT,
+                "unexpected timeout for {method}"
+            );
+        }
+        assert_eq!(rpc_io_timeout("codexSkills/list", None), RPC_DEFAULT_IO_TIMEOUT);
     }
 
     /// 函数 `unrelated_rpc_keeps_default_timeout`

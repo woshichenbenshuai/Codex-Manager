@@ -13,6 +13,7 @@ import {
   toTopLevelRoutePath,
 } from "../app-shell/top-level-routes";
 import { buildStaticRouteUrl } from "../utils/static-routes";
+import { DEFAULT_GATEWAY_TRANSPORT_VALUES } from "../gateway/transport-settings";
 
 interface AppState {
   serviceStatus: ServiceStatus;
@@ -104,7 +105,6 @@ export const useAppStore = create<AppState>((set) => ({
       "gpt-5.4-mini",
       "gpt-5.4",
     ],
-    modelCatalogAutoRemoteFetch: true,
     modelForwardRules: "",
     compactModelForwardRules: "",
     accountMaxInflight: 1,
@@ -127,9 +127,7 @@ export const useAppStore = create<AppState>((set) => ({
     authorServerRecommendations: DEFAULT_AUTHOR_SERVER_RECOMMENDATIONS,
     upstreamProxyUrl: "",
     upstreamProxyBypassHosts: "",
-    upstreamStreamTimeoutMs: 300000,
-    upstreamTotalTimeoutMs: 0,
-    sseKeepaliveIntervalMs: 15000,
+    ...DEFAULT_GATEWAY_TRANSPORT_VALUES,
     backgroundTasks: {
       usagePollingEnabled: true,
       usagePollIntervalSecs: 600,

@@ -16,8 +16,6 @@ pub const APP_SETTING_GATEWAY_FREE_ACCOUNT_MAX_MODEL_KEY: &str = "gateway.free_a
 pub const APP_SETTING_GATEWAY_MODEL_FORWARD_RULES_KEY: &str = "gateway.model_forward_rules";
 pub const APP_SETTING_GATEWAY_COMPACT_MODEL_FORWARD_RULES_KEY: &str =
     "gateway.compact_model_forward_rules";
-pub const APP_SETTING_GATEWAY_MODEL_CATALOG_AUTO_REMOTE_FETCH_KEY: &str =
-    "gateway.model_catalog_auto_remote_fetch";
 pub const APP_SETTING_GATEWAY_ACCOUNT_MAX_INFLIGHT_KEY: &str = "gateway.account_max_inflight";
 pub const APP_SETTING_GATEWAY_THREAD_AWARE_ACCOUNT_DISTRIBUTION_ENABLED_KEY: &str =
     "gateway.thread_aware_account_distribution_enabled";
@@ -34,6 +32,7 @@ pub const APP_SETTING_GATEWAY_UPSTREAM_STREAM_TIMEOUT_MS_KEY: &str =
     "gateway.upstream_stream_timeout_ms";
 pub const APP_SETTING_GATEWAY_UPSTREAM_TOTAL_TIMEOUT_MS_KEY: &str =
     "gateway.upstream_total_timeout_ms";
+pub const APP_SETTING_GATEWAY_SSE_KEEPALIVE_ENABLED_KEY: &str = "gateway.sse_keepalive_enabled";
 pub const APP_SETTING_GATEWAY_SSE_KEEPALIVE_INTERVAL_MS_KEY: &str =
     "gateway.sse_keepalive_interval_ms";
 pub const APP_SETTING_GATEWAY_BACKGROUND_TASKS_KEY: &str = "gateway.background_tasks";

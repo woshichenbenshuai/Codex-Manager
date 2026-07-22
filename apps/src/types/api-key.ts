@@ -1,5 +1,3 @@
-import type { ManagedModelSourceModel } from "@/types/model";
-
 export interface ApiKey {
   id: string;
   name: string;
@@ -10,6 +8,7 @@ export interface ApiKey {
   rotationStrategy: string;
   aggregateApiId: string | null;
   accountPlanFilter: string | null;
+  accountGroupFilter: string | null;
   aggregateApiUrl: string | null;
   quotaLimitTokens: number | null;
   protocol: string;
@@ -36,7 +35,6 @@ export interface AggregateApi {
   authType: string;
   authParams: Record<string, unknown> | null;
   action: string | null;
-  modelOverride: string | null;
   status: string;
   createdAt: number | null;
   updatedAt: number | null;
@@ -95,21 +93,6 @@ export interface AggregateApiBalanceRefreshResult {
   message: string | null;
   queriedAt: number;
   latencyMs: number;
-}
-
-export interface AggregateApiSupplierModel {
-  supplierKey: string;
-  providerType: string;
-  upstreamModel: string;
-  displayName: string | null;
-  status: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface AggregateApiSupplierModelImportResult {
-  imported: number;
-  items: ManagedModelSourceModel[];
 }
 
 export interface ApiKeyUsageStat {

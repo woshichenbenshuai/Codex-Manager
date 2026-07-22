@@ -5,7 +5,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import { appClient } from "@/lib/api/app-client";
-import { accountClient } from "@/lib/api/account-client";
 import type {
   UpdateCheckResult,
   UpdatePrepareResult,
@@ -69,6 +68,7 @@ import { EnvTabContent } from "@/app/settings/components/env-tab-content";
 import { GatewayTabContent } from "@/app/settings/components/gateway-tab-content";
 import { ThemePreviewSwatch } from "@/app/settings/components/theme-preview-swatch";
 import {
+  AboutCodexManagerCard,
   AccessControlCard,
   ServiceListenCard,
 } from "@/app/settings/components/general-tab-cards";
@@ -1036,25 +1036,6 @@ function AdminSettingsPage() {
    * # 返回
    * 返回函数执行结果
    */
-  const handleModelCatalogAutoRemoteFetchChange = (checked: boolean) => {
-    void updateSettings
-      .mutateAsync({ modelCatalogAutoRemoteFetch: checked })
-      .then(async () => {
-        if (!checked) return;
-        try {
-          const catalog = await accountClient.listManagedModels(false);
-          queryClient.setQueryData(["managed-model-catalog"], catalog);
-          await Promise.all([
-            queryClient.invalidateQueries({ queryKey: ["managed-model-catalog"] }),
-            queryClient.invalidateQueries({ queryKey: ["startup-snapshot"] }),
-            queryClient.invalidateQueries({ queryKey: ["apikey-models"] }),
-          ]);
-        } catch (error) {
-          toast.error(`${t("刷新模型失败")}: ${getAppErrorMessage(error)}`);
-        }
-      })
-      .catch(() => undefined);
-  };
   const saveTransportField = (
     key:
       | "sseKeepaliveIntervalMs"
@@ -1395,7 +1376,9 @@ function AdminSettingsPage() {
         </TabsList>
 
         <TabsContent value="general" className="space-y-6">
-                    <GeneralBasicsCard
+          <AboutCodexManagerCard t={t} />
+
+          <GeneralBasicsCard
             t={t}
             updateActionLabel={updateActionLabel}
             updateActionDescription={updateActionDescription}
@@ -1431,7 +1414,6 @@ function AdminSettingsPage() {
             webAuthModeLabel={webAuthModeLabel}
             onOpen={() => setWebPasswordModalOpen(true)}
           />
-
         </TabsContent>
 
         <TabsContent value="appearance" className="space-y-6">
@@ -1449,7 +1431,6 @@ function AdminSettingsPage() {
             t={t}
             snapshot={snapshot}
             updateSettings={updateSettings}
-            onModelCatalogAutoRemoteFetchChange={handleModelCatalogAutoRemoteFetchChange}
             quotaGuardInputValues={quotaGuardInputValues}
             setQuotaGuardDraft={setQuotaGuardDraft}
             saveQuotaGuardField={saveQuotaGuardField}

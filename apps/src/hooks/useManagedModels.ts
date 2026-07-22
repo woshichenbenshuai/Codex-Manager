@@ -3,34 +3,74 @@
 import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import {
-  accountClient,
-  ManagedModelPayload,
-  ManagedModelSourceMappingPayload,
-  ManagedModelSourceModelPayload,
-  ManagedModelSourceSyncPayload,
-  ModelPriceRuleUpsertPayload,
-} from "@/lib/api/account-client";
-import { serviceClient } from "@/lib/api/service-client";
-import {
-  buildCodexModelsCachePayload,
-  serializeManagedModelCatalogForCodexCache,
-} from "@/lib/api/model-catalog";
-import { getAppErrorMessage } from "@/lib/api/transport";
-import { useDesktopPageActive } from "@/hooks/useDesktopPageActive";
+
 import { useDeferredDesktopActivation } from "@/hooks/useDeferredDesktopActivation";
+import { useDesktopPageActive } from "@/hooks/useDesktopPageActive";
 import { useRuntimeCapabilities } from "@/hooks/useRuntimeCapabilities";
+import {
+  buildCodexModelsCachePayloadV2,
+  managedModelsV2Client,
+  serializeManagedModelsV2ForCodexCache,
+} from "@/lib/api/managed-models-v2";
+import { serviceClient } from "@/lib/api/service-client";
+import { getAppErrorMessage } from "@/lib/api/transport";
 import { useI18n } from "@/lib/i18n/provider";
 import { useAppStore } from "@/lib/store/useAppStore";
-import { ManagedModelCatalog, ManagedModelRouting } from "@/types";
+import type {
+  ManagedModelBatchRouteAssignmentV2,
+  ManagedModelBatchRouteResultV2,
+  ManagedModelBatchStateV2Update,
+  ManagedModelImportPreviewV2Result,
+  ManagedModelImportV2Params,
+  ManagedModelListV2Result,
+  ManagedModelV2,
+  ManagedModelV2Upsert,
+  ModelCatalogV2Stats,
+  ModelRouteV2,
+  ModelVisibilityV2,
+} from "@/types/model-v2";
 
-const MANAGED_MODEL_QUERY_KEY = ["managed-model-catalog"];
-const MANAGED_MODEL_ROUTING_QUERY_KEY = ["managed-model-routing"];
+export const MANAGED_MODELS_V2_QUERY_KEY = ["managed-models-v2"] as const;
+
+const EMPTY_STATS: ModelCatalogV2Stats = {
+  total: 0,
+  enabled: 0,
+  builtin: 0,
+  custom: 0,
+  priceMissing: 0,
+  missingRoute: 0,
+};
 
 type BatchDeleteManagedModelsResult = {
+  hidden: string[];
   deleted: string[];
   failed: Array<{ slug: string; reason: string }>;
 };
+
+type UpdateManagedModelStateInput = {
+  model: ManagedModelV2;
+  enabled: boolean;
+  visibility: ModelVisibilityV2;
+};
+
+function routeAssignmentKey(sourceKind: string, sourceId: string): string {
+  return `${sourceKind}\u0000${sourceId}`;
+}
+
+function buildCatalogStats(items: ManagedModelV2[]): ModelCatalogV2Stats {
+  return {
+    total: items.length,
+    enabled: items.filter((model) => model.enabled).length,
+    builtin: items.filter((model) => model.origin === "builtin").length,
+    custom: items.filter((model) => model.origin === "custom").length,
+    priceMissing: items.filter(
+      (model) => model.price.priceStatus === "missing",
+    ).length,
+    missingRoute: items.filter(
+      (model) => !model.routes.some((route) => route.enabled),
+    ).length,
+  };
+}
 
 export function useManagedModels() {
   const queryClient = useQueryClient();
@@ -43,30 +83,423 @@ export function useManagedModels() {
   } = useRuntimeCapabilities();
   const isServiceReady = canAccessManagementRpc && serviceStatus.connected;
   const isPageActive = useDesktopPageActive("/models/");
-  const isQueryEnabled = useDeferredDesktopActivation(isServiceReady && isPageActive);
+  const isQueryEnabled = useDeferredDesktopActivation(
+    isServiceReady && isPageActive,
+  );
   const codexUserAgentRef = useRef("");
-  const syncedCatalogFingerprintRef = useRef("");
 
   const ensureServiceReady = (actionLabel: string): boolean => {
-    if (isServiceReady) {
-      return true;
-    }
+    if (isServiceReady) return true;
     toast.info(`${t("服务未连接，暂时无法")} ${t(actionLabel)}`);
     return false;
   };
 
+  const query = useQuery({
+    queryKey: MANAGED_MODELS_V2_QUERY_KEY,
+    queryFn: () => managedModelsV2Client.list(true),
+    enabled: isQueryEnabled,
+    retry: 1,
+  });
+
+  const invalidateConsumers = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["model-groups"] }),
+      queryClient.invalidateQueries({ queryKey: ["startup-snapshot"] }),
+    ]);
+  };
+
+  const reloadCatalog = async (): Promise<ManagedModelListV2Result> => {
+    const result = await query.refetch();
+    if (result.error) throw result.error;
+    if (!result.data) throw new Error(t("读取模型失败"));
+    return result.data;
+  };
+
+  const refreshCatalogAfterCommittedMutation = async (): Promise<void> => {
+    try {
+      await reloadCatalog();
+      await invalidateConsumers();
+    } catch (error) {
+      toast.error(`${t("读取模型失败")}: ${getAppErrorMessage(error)}`);
+    }
+  };
+
+  const applyCommittedDeletesToCache = (
+    hiddenSlugs: string[],
+    deletedSlugs: string[],
+  ): void => {
+    const hidden = new Set(hiddenSlugs);
+    const deleted = new Set(deletedSlugs);
+    queryClient.setQueryData<ManagedModelListV2Result>(
+      MANAGED_MODELS_V2_QUERY_KEY,
+      (current) => {
+        if (!current) return current;
+        const items = current.items
+          .filter((model) => !deleted.has(model.slug))
+          .map((model) =>
+            hidden.has(model.slug)
+              ? {
+                  ...model,
+                  enabled: false,
+                  visibility: "hide" as const,
+                  userEdited: true,
+                }
+              : model,
+          );
+        return { items, stats: buildCatalogStats(items) };
+      },
+    );
+  };
+
+  const applyCommittedModelsToCache = (
+    savedModels: ManagedModelV2[],
+  ): void => {
+    if (savedModels.length === 0) return;
+    const savedBySlug = new Map(
+      savedModels.map((model) => [model.slug, model] as const),
+    );
+    queryClient.setQueryData<ManagedModelListV2Result>(
+      MANAGED_MODELS_V2_QUERY_KEY,
+      (current) => {
+        if (!current) return current;
+        const items = current.items.map((model) =>
+          savedBySlug.get(model.slug) ?? model,
+        );
+        return { items, stats: buildCatalogStats(items) };
+      },
+    );
+  };
+
+  const saveMutation = useMutation({
+    mutationFn: (input: ManagedModelV2Upsert) =>
+      managedModelsV2Client.upsert(input),
+    onSuccess: async () => {
+      await reloadCatalog();
+      await invalidateConsumers();
+      toast.success(t("模型已保存"));
+    },
+    onError: (error: unknown) => {
+      toast.error(`${t("保存模型失败")}: ${getAppErrorMessage(error)}`);
+    },
+  });
+
+  const modelStateMutation = useMutation({
+    mutationFn: ({
+      model,
+      enabled,
+      visibility,
+    }: UpdateManagedModelStateInput) =>
+      managedModelsV2Client.updateState({
+        slug: model.slug,
+        enabled,
+        visibility,
+      }),
+    onSuccess: (savedModel, input) => {
+      applyCommittedModelsToCache([savedModel]);
+      if (input.visibility === "hide") {
+        toast.success(
+          input.enabled
+            ? t("模型 {slug} 已隐藏但保持启用", { slug: savedModel.slug })
+            : t("模型 {slug} 已隐藏并禁用", { slug: savedModel.slug }),
+        );
+      } else if (input.enabled) {
+        toast.success(
+          input.model.visibility === "hide"
+            ? t("模型 {slug} 已恢复并启用", { slug: savedModel.slug })
+            : t("模型 {slug} 已启用并显示", { slug: savedModel.slug }),
+        );
+      } else {
+        toast.success(
+          input.model.visibility === "hide"
+            ? t("模型 {slug} 已恢复显示但保持禁用", {
+                slug: savedModel.slug,
+              })
+            : t("模型 {slug} 已禁用但保留显示", { slug: savedModel.slug }),
+        );
+      }
+      void refreshCatalogAfterCommittedMutation();
+    },
+    onError: (error: unknown) => {
+      toast.error(`${t("更新模型状态失败")}: ${getAppErrorMessage(error)}`);
+    },
+  });
+
+  const batchModelStateMutation = useMutation({
+    mutationFn: async ({
+      slugs,
+      enabled,
+      visibility,
+    }: ManagedModelBatchStateV2Update): Promise<ManagedModelV2[]> => {
+      const normalizedSlugs = Array.from(
+        new Set(slugs.map((slug) => slug.trim()).filter(Boolean)),
+      );
+      if (normalizedSlugs.length === 0) return [];
+      return managedModelsV2Client.updateStates({
+        slugs: normalizedSlugs,
+        enabled,
+        visibility,
+      });
+    },
+    onSuccess: (updated) => {
+      if (updated.length > 0) {
+        applyCommittedModelsToCache(updated);
+      }
+      if (updated.length > 0) {
+        toast.success(
+          t("已更新 {count} 个模型的状态", {
+            count: updated.length,
+          }),
+        );
+      }
+      if (updated.length > 0) {
+        void refreshCatalogAfterCommittedMutation();
+      }
+    },
+    onError: (error: unknown) => {
+      toast.error(
+        `${t("批量更新模型状态失败")}: ${getAppErrorMessage(error)}`,
+      );
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (slug: string) => {
+      const catalog =
+        queryClient.getQueryData<ManagedModelListV2Result>(
+          MANAGED_MODELS_V2_QUERY_KEY,
+        ) ?? query.data;
+      const isBuiltin =
+        catalog?.items.find((model) => model.slug === slug)?.origin ===
+        "builtin";
+      await managedModelsV2Client.delete(slug);
+      return { isBuiltin, slug };
+    },
+    onSuccess: ({ isBuiltin, slug }) => {
+      applyCommittedDeletesToCache(
+        isBuiltin ? [slug] : [],
+        isBuiltin ? [] : [slug],
+      );
+      toast.success(
+        isBuiltin
+          ? t("已隐藏内置模型 {slug}", { slug })
+          : t("已删除自定义模型 {slug}", { slug }),
+      );
+      void refreshCatalogAfterCommittedMutation();
+    },
+    onError: (error: unknown) => {
+      toast.error(`${t("删除模型失败")}: ${getAppErrorMessage(error)}`);
+    },
+  });
+
+  const batchDeleteMutation = useMutation({
+    mutationFn: async (slugs: string[]): Promise<BatchDeleteManagedModelsResult> => {
+      const normalizedSlugs = Array.from(
+        new Set(slugs.map((slug) => slug.trim()).filter(Boolean)),
+      );
+      const catalog =
+        queryClient.getQueryData<ManagedModelListV2Result>(
+          MANAGED_MODELS_V2_QUERY_KEY,
+        ) ?? query.data;
+      const hidden: string[] = [];
+      const deleted: string[] = [];
+      const failed: Array<{ slug: string; reason: string }> = [];
+      for (const slug of normalizedSlugs) {
+        try {
+          await managedModelsV2Client.delete(slug);
+          if (
+            catalog?.items.find((model) => model.slug === slug)?.origin ===
+            "builtin"
+          ) {
+            hidden.push(slug);
+          } else {
+            deleted.push(slug);
+          }
+        } catch (error) {
+          failed.push({ slug, reason: getAppErrorMessage(error) });
+        }
+      }
+      return { hidden, deleted, failed };
+    },
+    onSuccess: (result) => {
+      const processedCount = result.hidden.length + result.deleted.length;
+      if (processedCount > 0) {
+        applyCommittedDeletesToCache(result.hidden, result.deleted);
+      }
+      if (processedCount > 0 && result.failed.length === 0) {
+        if (result.hidden.length > 0 && result.deleted.length > 0) {
+          toast.success(
+            t("已隐藏 {hidden} 个内置模型，并删除 {deleted} 个自定义模型", {
+              hidden: result.hidden.length,
+              deleted: result.deleted.length,
+            }),
+          );
+        } else if (result.hidden.length > 0) {
+          toast.success(
+            t("已隐藏 {count} 个内置模型", {
+              count: result.hidden.length,
+            }),
+          );
+        } else {
+          toast.success(
+            t("已删除 {count} 个自定义模型", {
+              count: result.deleted.length,
+            }),
+          );
+        }
+      } else if (processedCount > 0) {
+        toast.warning(
+          t("批量处理完成：隐藏{hidden}个，删除{deleted}个，失败{failed}个", {
+            hidden: result.hidden.length,
+            deleted: result.deleted.length,
+            failed: result.failed.length,
+          }),
+        );
+      } else if (result.failed.length > 0) {
+        toast.error(
+          `${t("批量删除失败")}: ${result.failed[0].slug} - ${result.failed[0].reason}`,
+        );
+      }
+      if (processedCount > 0) {
+        void refreshCatalogAfterCommittedMutation();
+      }
+    },
+    onError: (error: unknown) => {
+      toast.error(`${t("批量删除失败")}: ${getAppErrorMessage(error)}`);
+    },
+  });
+
+  const batchAssignRoutesMutation = useMutation({
+    mutationFn: async (
+      input: ManagedModelBatchRouteAssignmentV2,
+    ): Promise<ManagedModelBatchRouteResultV2> => {
+      const catalog =
+        queryClient.getQueryData<ManagedModelListV2Result>(
+          MANAGED_MODELS_V2_QUERY_KEY,
+        ) ?? query.data;
+      const normalizedSlugs = Array.from(
+        new Set(input.slugs.map((slug) => slug.trim()).filter(Boolean)),
+      );
+      const templates = input.routes.map((route) => ({
+        ...route,
+        sourceId:
+          route.sourceKind === "account_pool" ? "default" : route.sourceId.trim(),
+      }));
+      if (normalizedSlugs.length === 0 || templates.length === 0) {
+        throw new Error(t("请选择模型并至少配置一条路由"));
+      }
+
+      const updated: string[] = [];
+      const failed: Array<{ slug: string; reason: string }> = [];
+      for (const slug of normalizedSlugs) {
+        const model = catalog?.items.find((item) => item.slug === slug);
+        if (!model) {
+          failed.push({ slug, reason: t("模型不存在") });
+          continue;
+        }
+
+        const existingRoutes = new Map<string, ModelRouteV2>();
+        for (const route of model.routes) {
+          const key = routeAssignmentKey(route.sourceKind, route.sourceId);
+          if (!existingRoutes.has(key)) existingRoutes.set(key, route);
+        }
+        const assignmentKeys = new Set(
+          templates.map((route) =>
+            routeAssignmentKey(route.sourceKind, route.sourceId),
+          ),
+        );
+        const assignedRoutes: ModelRouteV2[] = templates.map((route) => {
+          const existing = existingRoutes.get(
+            routeAssignmentKey(route.sourceKind, route.sourceId),
+          );
+          return {
+            id: existing?.id || "",
+            sourceKind: route.sourceKind,
+            sourceId: route.sourceId,
+            upstreamModel: model.slug,
+            enabled: true,
+            priority: route.priority,
+            weight: route.weight,
+          };
+        });
+        const routes =
+          input.mode === "replace"
+            ? assignedRoutes
+            : [
+                ...model.routes.filter(
+                  (route) =>
+                    !assignmentKeys.has(
+                      routeAssignmentKey(route.sourceKind, route.sourceId),
+                    ),
+                ),
+                ...assignedRoutes,
+              ];
+
+        try {
+          await managedModelsV2Client.upsert({
+            previousSlug: model.slug,
+            model: { ...model, routes },
+          });
+          updated.push(slug);
+        } catch (error) {
+          failed.push({ slug, reason: getAppErrorMessage(error) });
+        }
+      }
+      return { updated, failed };
+    },
+    onSuccess: async (result) => {
+      await reloadCatalog();
+      await invalidateConsumers();
+      if (result.updated.length > 0 && result.failed.length === 0) {
+        toast.success(
+          t("已为 {count} 个模型分配路由", { count: result.updated.length }),
+        );
+      } else if (result.updated.length > 0) {
+        toast.warning(
+          t("批量分配完成：成功{success}个，失败{failed}个", {
+            success: result.updated.length,
+            failed: result.failed.length,
+          }),
+        );
+      } else if (result.failed.length > 0) {
+        toast.error(
+          `${t("批量分配路由失败")}: ${result.failed[0].slug} - ${result.failed[0].reason}`,
+        );
+      }
+    },
+    onError: (error: unknown) => {
+      toast.error(`${t("批量分配路由失败")}: ${getAppErrorMessage(error)}`);
+    },
+  });
+
+  const previewImportMutation = useMutation({
+    mutationFn: (input: ManagedModelImportV2Params) =>
+      managedModelsV2Client.previewImport(input),
+    onError: (error: unknown) => {
+      toast.error(`${t("导入预览失败")}: ${getAppErrorMessage(error)}`);
+    },
+  });
+
+  const commitImportMutation = useMutation({
+    mutationFn: (input: ManagedModelImportV2Params) =>
+      managedModelsV2Client.commitImport(input),
+    onSuccess: async (result) => {
+      await reloadCatalog();
+      await invalidateConsumers();
+      toast.success(t("已导入 {count} 个模型", { count: result.committed }));
+    },
+    onError: (error: unknown) => {
+      toast.error(`${t("导入提交失败")}: ${getAppErrorMessage(error)}`);
+    },
+  });
+
   const resolveCodexUserAgent = async (): Promise<string> => {
     const cachedUserAgent = codexUserAgentRef.current.trim();
-    if (cachedUserAgent.includes("codex_cli_rs/")) {
-      return cachedUserAgent;
-    }
-
+    if (cachedUserAgent.includes("codex_cli_rs/")) return cachedUserAgent;
     const initializeResult = await serviceClient.initialize(serviceStatus.addr);
     const userAgent = String(initializeResult.userAgent || "").trim();
     if (!userAgent.includes("codex_cli_rs/")) {
       throw new Error(t("当前服务未返回可用的 Codex CLI 标识"));
     }
-
     codexUserAgentRef.current = userAgent;
     return userAgent;
   };
@@ -75,7 +508,6 @@ export function useManagedModels() {
     if (typeof document === "undefined") {
       throw new Error(t("当前环境不支持浏览器导出"));
     }
-
     const blob = new Blob([content], {
       type: "application/json;charset=utf-8",
     });
@@ -90,353 +522,78 @@ export function useManagedModels() {
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   };
 
-  const syncCatalogToCodexCache = async (
-    catalog: ManagedModelCatalog | null | undefined,
-    options?: { force?: boolean },
-  ): Promise<string | null> => {
-    if (!catalog) {
-      return null;
-    }
-
-    if (!isDesktopRuntime) {
-      return null;
-    }
-
-    if (!isServiceReady) {
-      return t("服务未连接");
-    }
-
-    const models = serializeManagedModelCatalogForCodexCache(catalog.items || []);
-
-    const fingerprint = JSON.stringify(models);
-    if (!options?.force && syncedCatalogFingerprintRef.current === fingerprint) {
-      return null;
-    }
-
-    try {
-      const userAgent = await resolveCodexUserAgent();
-      await serviceClient.syncCodexModelsCache({
-        userAgent,
-        models,
-      });
-      syncedCatalogFingerprintRef.current = fingerprint;
-      return null;
-    } catch (error) {
-      return getAppErrorMessage(error);
-    }
-  };
-
-  const reloadManagedCatalog = async (): Promise<ManagedModelCatalog> => {
-    const catalog = await accountClient.listManagedModels(false);
-    queryClient.setQueryData(MANAGED_MODEL_QUERY_KEY, catalog);
-    return catalog;
-  };
-
-  const reloadManagedRouting = async (): Promise<ManagedModelRouting> => {
-    const routing = await accountClient.listManagedModelRouting();
-    queryClient.setQueryData(MANAGED_MODEL_ROUTING_QUERY_KEY, routing);
-    return routing;
-  };
-
-  const query = useQuery({
-    queryKey: MANAGED_MODEL_QUERY_KEY,
-    queryFn: () => accountClient.listManagedModels(false),
-    enabled: isQueryEnabled,
-    retry: 1,
-  });
-
-  const routingQuery = useQuery({
-    queryKey: MANAGED_MODEL_ROUTING_QUERY_KEY,
-    queryFn: () => accountClient.listManagedModelRouting(),
-    enabled: isQueryEnabled,
-    retry: 1,
-  });
-
-  const invalidateAll = async () => {
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: MANAGED_MODEL_QUERY_KEY }),
-      queryClient.invalidateQueries({ queryKey: MANAGED_MODEL_ROUTING_QUERY_KEY }),
-      queryClient.invalidateQueries({ queryKey: ["apikey-models"] }),
-      queryClient.invalidateQueries({ queryKey: ["startup-snapshot"] }),
-    ]);
-  };
-
-  const refreshMutation = useMutation({
-    mutationFn: (refreshRemote: boolean) => accountClient.listManagedModels(refreshRemote),
-    onSuccess: async (catalog) => {
-      queryClient.setQueryData(MANAGED_MODEL_QUERY_KEY, catalog);
-      const cacheSyncError = await syncCatalogToCodexCache(catalog);
-      await invalidateAll();
-      if (cacheSyncError) {
-        toast.error(`${t("模型目录已刷新，但同步 Codex 模型缓存失败")}: ${cacheSyncError}`);
-      } else {
-        toast.success(t("模型目录已刷新"));
-      }
-    },
-    onError: (error: unknown) => {
-      toast.error(`${t("刷新模型失败")}: ${getAppErrorMessage(error)}`);
-    },
-  });
-
-  const pruneStaleRemoteMutation = useMutation({
-    mutationFn: () => accountClient.pruneStaleRemoteManagedModels(),
-    onSuccess: async (catalog) => {
-      queryClient.setQueryData(MANAGED_MODEL_QUERY_KEY, catalog);
-      const cacheSyncError = await syncCatalogToCodexCache(catalog);
-      await invalidateAll();
-      if (cacheSyncError) {
-        toast.error(`${t("远端旧模型已清理，但同步 Codex 模型缓存失败")}: ${cacheSyncError}`);
-      } else {
-        toast.success(t("远端旧模型已清理"));
-      }
-    },
-    onError: (error: unknown) => {
-      toast.error(`${t("清理远端旧模型失败")}: ${getAppErrorMessage(error)}`);
-    },
-  });
-
-  const saveMutation = useMutation({
-    mutationFn: (params: ManagedModelPayload) => accountClient.saveManagedModel(params),
-    onSuccess: async () => {
-      const catalog = await reloadManagedCatalog();
-      const cacheSyncError = await syncCatalogToCodexCache(catalog);
-      await invalidateAll();
-      if (cacheSyncError) {
-        toast.error(`${t("模型已保存，但同步 Codex 模型缓存失败")}: ${cacheSyncError}`);
-      } else {
-        toast.success(t("模型已保存"));
-      }
-    },
-    onError: (error: unknown) => {
-      toast.error(`${t("保存模型失败")}: ${getAppErrorMessage(error)}`);
-    },
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: (slug: string) => accountClient.deleteManagedModel(slug),
-    onSuccess: async () => {
-      const catalog = await reloadManagedCatalog();
-      const cacheSyncError = await syncCatalogToCodexCache(catalog);
-      await invalidateAll();
-      if (cacheSyncError) {
-        toast.error(`${t("模型已删除，但同步 Codex 模型缓存失败")}: ${cacheSyncError}`);
-      } else {
-        toast.success(t("模型已删除"));
-      }
-    },
-    onError: (error: unknown) => {
-      toast.error(`${t("删除模型失败")}: ${getAppErrorMessage(error)}`);
-    },
-  });
-
-  const batchDeleteMutation = useMutation({
-    mutationFn: async (slugs: string[]): Promise<BatchDeleteManagedModelsResult> => {
-      const normalizedSlugs = Array.from(
-        new Set(
-          slugs
-            .map((slug) => String(slug || "").trim())
-            .filter(Boolean)
-        )
-      );
-      const deleted: string[] = [];
-      const failed: Array<{ slug: string; reason: string }> = [];
-
-      for (const slug of normalizedSlugs) {
-        try {
-          await accountClient.deleteManagedModel(slug);
-          deleted.push(slug);
-        } catch (error) {
-          failed.push({
-            slug,
-            reason: getAppErrorMessage(error),
-          });
-        }
-      }
-
-      return {
-        deleted,
-        failed,
-      };
-    },
-    onSuccess: async (result) => {
-      const catalog = await reloadManagedCatalog();
-      const cacheSyncError = await syncCatalogToCodexCache(catalog);
-      await invalidateAll();
-
-      if (cacheSyncError) {
-        toast.error(`${t("模型已删除，但同步 Codex 模型缓存失败")}: ${cacheSyncError}`);
-      } else if (result.deleted.length > 0 && result.failed.length === 0) {
-        toast.success(t("已删除 {count} 个模型", { count: result.deleted.length }));
-      } else if (result.deleted.length > 0) {
-        toast.warning(
-          t("批量删除完成：成功{success}个，失败{failed}个", {
-            success: result.deleted.length,
-            failed: result.failed.length,
-          })
-        );
-      } else if (result.failed.length > 0) {
-        const firstFailed = result.failed[0];
-        toast.error(
-          `${t("批量删除失败")}: ${firstFailed.slug} - ${firstFailed.reason}`
-        );
-      }
-    },
-    onError: (error: unknown) => {
-      toast.error(`${t("批量删除失败")}: ${getAppErrorMessage(error)}`);
-    },
-  });
-
   const exportMutation = useMutation({
     mutationFn: async () => {
-      if (!isServiceReady) {
-        throw new Error(t("服务未连接"));
-      }
-
-      const catalog = query.data ?? (await reloadManagedCatalog());
-      const models = catalog.items || [];
-      if (!models.length) {
-        throw new Error(t("模型目录为空"));
-      }
+      const catalog = query.data ?? (await reloadCatalog());
+      const models = serializeManagedModelsV2ForCodexCache(catalog.items);
+      if (models.length === 0) throw new Error(t("模型目录为空"));
+      const userAgent = await resolveCodexUserAgent();
 
       if (isDesktopRuntime) {
-        const cacheSyncError = await syncCatalogToCodexCache(catalog, { force: true });
-        if (cacheSyncError) {
-          throw new Error(cacheSyncError);
-        }
-        return { mode: "desktop" as const };
+        await serviceClient.exportCodexModelsCache({ userAgent, models });
+        return "desktop" as const;
       }
-
       if (!canUseBrowserDownloadExport) {
         throw new Error(t("当前环境不支持导出 Codex 缓存"));
       }
-
-      const userAgent = await resolveCodexUserAgent();
-      const payload = buildCodexModelsCachePayload(models, userAgent);
-      triggerBrowserDownload("models_cache.json", `${JSON.stringify(payload, null, 2)}\n`);
-      return { mode: "browser" as const };
+      const payload = buildCodexModelsCachePayloadV2(catalog.items, userAgent);
+      triggerBrowserDownload(
+        "models_cache.json",
+        `${JSON.stringify(payload, null, 2)}\n`,
+      );
+      return "browser" as const;
     },
-    onSuccess: (result) => {
+    onSuccess: (mode) => {
       toast.success(
-        result?.mode === "browser"
+        mode === "browser"
           ? t("Codex 缓存已下载，请保存到 `~/.codex/models_cache.json`")
-          : t("已导出到本地 Codex 缓存")
+          : t("已导出到本地 Codex 缓存"),
       );
     },
-    onError: (error) => {
+    onError: (error: unknown) => {
       toast.error(`${t("导出失败")}: ${getAppErrorMessage(error)}`);
-    },
-  });
-
-  const sourceSyncMutation = useMutation({
-    mutationFn: (params: ManagedModelSourceSyncPayload) =>
-      accountClient.syncManagedModelSourceModels(params),
-    onSuccess: async (routing) => {
-      queryClient.setQueryData(MANAGED_MODEL_ROUTING_QUERY_KEY, routing);
-      await invalidateAll();
-      toast.success(t("来源模型已同步"));
-    },
-    onError: (error: unknown) => {
-      toast.error(`${t("同步来源模型失败")}: ${getAppErrorMessage(error)}`);
-    },
-  });
-
-  const sourceModelMutation = useMutation({
-    mutationFn: (params: ManagedModelSourceModelPayload) =>
-      accountClient.saveManagedModelSourceModel(params),
-    onSuccess: async () => {
-      await reloadManagedRouting();
-      await invalidateAll();
-      toast.success(t("来源模型已保存"));
-    },
-    onError: (error: unknown) => {
-      toast.error(`${t("保存来源模型失败")}: ${getAppErrorMessage(error)}`);
-    },
-  });
-
-  const sourceMappingMutation = useMutation({
-    mutationFn: (params: ManagedModelSourceMappingPayload) =>
-      accountClient.saveManagedModelSourceMapping(params),
-    onSuccess: async () => {
-      await reloadManagedRouting();
-      await invalidateAll();
-      toast.success(t("模型映射已保存"));
-    },
-    onError: (error: unknown) => {
-      toast.error(`${t("保存模型映射失败")}: ${getAppErrorMessage(error)}`);
-    },
-  });
-
-  const sourceMappingDeleteMutation = useMutation({
-    mutationFn: (params: {
-      id: string;
-      sourceKind: string;
-      sourceId: string;
-      upstreamModel: string;
-    }) => accountClient.deleteManagedModelSourceMapping(params),
-    onSuccess: async () => {
-      await reloadManagedRouting();
-      await invalidateAll();
-      toast.success(t("模型映射已删除"));
-    },
-    onError: (error: unknown) => {
-      toast.error(`${t("删除模型映射失败")}: ${getAppErrorMessage(error)}`);
     },
   });
 
   useEffect(() => {
     codexUserAgentRef.current = "";
-    syncedCatalogFingerprintRef.current = "";
   }, [serviceStatus.addr]);
-
-  useEffect(() => {
-    if (!isDesktopRuntime || !isServiceReady || !query.data || query.dataUpdatedAt === 0) {
-      return;
-    }
-
-    void syncCatalogToCodexCache(query.data).then((errorMessage) => {
-      if (errorMessage) {
-        console.warn("sync codex models cache failed", errorMessage);
-      }
-    });
-  }, [
-    isDesktopRuntime,
-    isServiceReady,
-    query.data,
-    query.dataUpdatedAt,
-  ]);
 
   return {
     models: query.data?.items || [],
-    catalog: query.data || { items: [] },
-    routing: routingQuery.data || { sourceModels: [], mappings: [] },
+    catalog: query.data || { items: [], stats: EMPTY_STATS },
+    stats: query.data?.stats || EMPTY_STATS,
     isLoading: isServiceReady && (!isQueryEnabled || query.isLoading),
-    isRoutingLoading: isServiceReady && (!isQueryEnabled || routingQuery.isLoading),
     isServiceReady,
-    refreshRemote: async () => {
-      if (!ensureServiceReady("刷新模型")) return null;
-      return refreshMutation.mutateAsync(true);
-    },
     refreshLocal: async () => {
       if (!ensureServiceReady("读取模型")) return null;
-      return refreshMutation.mutateAsync(false);
-    },
-    pruneStaleRemoteModels: async () => {
-      if (!ensureServiceReady("清理远端旧模型")) return null;
-      return pruneStaleRemoteMutation.mutateAsync();
-    },
-    saveModel: async (params: ManagedModelPayload) => {
-      if (!ensureServiceReady("保存模型")) return null;
-      return saveMutation.mutateAsync(params);
-    },
-    saveModelPriceRule: async (params: ModelPriceRuleUpsertPayload) => {
-      if (!ensureServiceReady("保存模型价格")) {
-        throw new Error(t("服务未就绪，无法保存模型价格"));
+      try {
+        const result = await reloadCatalog();
+        toast.success(t("模型目录已重新读取"));
+        return result;
+      } catch (error) {
+        toast.error(`${t("读取模型失败")}: ${getAppErrorMessage(error)}`);
+        return null;
       }
-      await accountClient.upsertModelPriceRule(params);
     },
-    readModelPriceRule: async (modelPattern: string) => {
-      if (!ensureServiceReady("读取模型价格")) return null;
-      return accountClient.readModelPriceRule(modelPattern);
+    saveModel: async (input: ManagedModelV2Upsert) => {
+      if (!ensureServiceReady("保存模型")) return null;
+      return saveMutation.mutateAsync(input);
+    },
+    updateModelState: async (input: UpdateManagedModelStateInput) => {
+      if (!ensureServiceReady("更新模型状态")) return false;
+      try {
+        await modelStateMutation.mutateAsync(input);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    updateModelStates: async (input: ManagedModelBatchStateV2Update) => {
+      if (!ensureServiceReady("批量更新模型状态")) {
+        return [];
+      }
+      return batchModelStateMutation.mutateAsync(input);
     },
     deleteModel: async (slug: string) => {
       if (!ensureServiceReady("删除模型")) return false;
@@ -445,53 +602,49 @@ export function useManagedModels() {
     },
     deleteModels: async (slugs: string[]) => {
       if (!ensureServiceReady("批量删除模型")) {
-        return { deleted: [], failed: [] };
+        return { hidden: [], deleted: [], failed: [] };
       }
       return batchDeleteMutation.mutateAsync(slugs);
+    },
+    assignModelRoutes: async (input: ManagedModelBatchRouteAssignmentV2) => {
+      if (!ensureServiceReady("批量分配模型路由")) {
+        return null;
+      }
+      return batchAssignRoutesMutation.mutateAsync(input);
+    },
+    previewImport: async (
+      input: ManagedModelImportV2Params,
+    ): Promise<ManagedModelImportPreviewV2Result | null> => {
+      if (!ensureServiceReady("导入模型")) return null;
+      return previewImportMutation.mutateAsync(input);
+    },
+    commitImport: async (
+      input: ManagedModelImportV2Params,
+    ): Promise<ManagedModelImportPreviewV2Result | null> => {
+      if (!ensureServiceReady("导入模型")) return null;
+      return commitImportMutation.mutateAsync(input);
     },
     exportCodexCache: async () => {
       if (!ensureServiceReady("导出模型目录")) return false;
       await exportMutation.mutateAsync();
       return true;
     },
-    syncSourceModels: async (params: ManagedModelSourceSyncPayload) => {
-      if (!ensureServiceReady("同步来源模型")) return null;
-      return sourceSyncMutation.mutateAsync(params);
-    },
-    saveSourceModel: async (params: ManagedModelSourceModelPayload) => {
-      if (!ensureServiceReady("保存来源模型")) return null;
-      return sourceModelMutation.mutateAsync(params);
-    },
-    saveSourceMapping: async (params: ManagedModelSourceMappingPayload) => {
-      if (!ensureServiceReady("保存模型映射")) return null;
-      return sourceMappingMutation.mutateAsync(params);
-    },
-    deleteSourceMapping: async (
-      mappingId: string,
-      sourceKind: string,
-      sourceId: string,
-      upstreamModel: string,
-    ) => {
-      if (!ensureServiceReady("删除模型映射")) return false;
-      await sourceMappingDeleteMutation.mutateAsync({
-        id: mappingId,
-        sourceKind,
-        sourceId,
-        upstreamModel,
-      });
-      return true;
-    },
-    isRefreshing: refreshMutation.isPending,
-    isPruningStaleRemote: pruneStaleRemoteMutation.isPending,
+    isRefreshing: query.isRefetching,
     isSaving: saveMutation.isPending,
+    isUpdatingModelState:
+      modelStateMutation.isPending || batchModelStateMutation.isPending,
+    isBatchUpdatingModelState: batchModelStateMutation.isPending,
+    updatingModelStateSlug: modelStateMutation.isPending
+      ? (modelStateMutation.variables?.model.slug ?? null)
+      : null,
     isDeleting: deleteMutation.isPending || batchDeleteMutation.isPending,
+    isAssigningRoutes: batchAssignRoutesMutation.isPending,
+    isImporting:
+      previewImportMutation.isPending || commitImportMutation.isPending,
     isExporting: exportMutation.isPending,
-    isRoutingSaving:
-      sourceSyncMutation.isPending ||
-      sourceModelMutation.isPending ||
-      sourceMappingMutation.isPending ||
-      sourceMappingDeleteMutation.isPending,
     canExportCodexCache:
-      !isDesktopRuntime && isServiceReady && Boolean(query.data?.items?.length),
+      isServiceReady &&
+      Boolean(query.data?.items?.length) &&
+      (isDesktopRuntime || canUseBrowserDownloadExport),
   };
 }

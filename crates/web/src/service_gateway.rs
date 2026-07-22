@@ -143,12 +143,14 @@ pub(super) async fn tcp_probe(addr: &str) -> bool {
     let addr = addr.strip_prefix("http://").unwrap_or(addr);
     let addr = addr.strip_prefix("https://").unwrap_or(addr);
     let addr = addr.split('/').next().unwrap_or(addr);
-    tokio::time::timeout(
-        Duration::from_millis(250),
-        tokio::net::TcpStream::connect(addr),
+    matches!(
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await,
+        Ok(Ok(_))
     )
-    .await
-    .is_ok()
 }
 
 /// 函数 `service_bin_path`
@@ -297,6 +299,9 @@ pub(super) async fn rpc_proxy(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if body.len() > codexmanager_service::RPC_BODY_LIMIT_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "{}").into_response();
+    }
     if !is_json_content_type(&headers) {
         return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "{}").into_response();
     }
@@ -545,6 +550,12 @@ pub(super) async fn gateway_proxy(
     request: Request,
 ) -> Response {
     let (parts, body) = request.into_parts();
+    if parts.method == axum::http::Method::GET
+        && super::gateway_websocket::is_upgrade_request(&parts.headers)
+    {
+        drop(body);
+        return super::gateway_websocket::proxy(state, parts).await;
+    }
     let target_url = gateway_proxy_target_url(state.service_addr.as_str(), &parts.uri);
     let max_body_bytes = gateway_proxy_max_body_bytes();
 

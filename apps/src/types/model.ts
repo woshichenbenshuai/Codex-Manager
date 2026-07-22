@@ -49,6 +49,9 @@ export interface ModelInfo {
   effectiveContextWindowPercent: number | null;
   experimentalSupportedTools: string[];
   inputModalities: string[];
+  outputModalities: string[];
+  supportedEndpoints: string[];
+  supportsTextGeneration: boolean;
   minimalClientVersion: unknown | null;
   supportsSearchTool: boolean | null;
   availableInPlans: string[];
@@ -58,49 +61,6 @@ export interface ModelInfo {
 export interface ModelCatalog {
   models: ModelInfo[];
   [key: string]: unknown;
-}
-
-export interface ManagedModelInfo extends ModelInfo {
-  sourceKind: string;
-  userEdited: boolean;
-  sortIndex: number;
-  updatedAt: number;
-}
-
-export interface ManagedModelCatalog {
-  items: ManagedModelInfo[];
-  [key: string]: unknown;
-}
-
-export interface ManagedModelSourceModel {
-  sourceKind: string;
-  sourceId: string;
-  upstreamModel: string;
-  displayName: string | null;
-  status: string;
-  discoveryKind: string;
-  lastSyncedAt: number | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface ManagedModelSourceMapping {
-  id: string;
-  platformModelSlug: string;
-  sourceKind: string;
-  sourceId: string;
-  upstreamModel: string;
-  enabled: boolean;
-  priority: number;
-  weight: number;
-  billingModelSlug: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface ManagedModelRouting {
-  sourceModels: ManagedModelSourceModel[];
-  mappings: ManagedModelSourceMapping[];
 }
 
 export interface ModelGroup {
@@ -120,7 +80,6 @@ export interface ModelGroupModel {
   platformModelSlug: string;
   enabled: boolean;
   rateMultiplierMillis: number | null;
-  billingModelSlug: string | null;
   note: string | null;
   createdAt: number;
   updatedAt: number;

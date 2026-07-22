@@ -4,8 +4,10 @@ use serde_json::{Map, Value};
 use crate::gateway::runtime_config;
 
 const INSTALLATION_ID_KEY: &str = "x-codex-installation-id";
-const DEFAULT_CODEX_COMPAT_INSTRUCTIONS: &str =
-    "You are Codex, a helpful AI assistant. Follow the user's instructions.";
+// The Codex Responses backend requires non-empty instructions. Keep this
+// transport fallback deliberately neutral: it must not assign a persona or
+// replace any non-empty client-provided instructions.
+const MINIMAL_CODEX_COMPAT_INSTRUCTIONS: &str = "Follow the user's instructions.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct OfficialResponsesHttpRequest {
@@ -85,7 +87,7 @@ fn ensure_non_empty_instructions(path: &str, obj: &mut Map<String, Value>) -> bo
     }
     obj.insert(
         "instructions".to_string(),
-        Value::String(DEFAULT_CODEX_COMPAT_INSTRUCTIONS.to_string()),
+        Value::String(MINIMAL_CODEX_COMPAT_INSTRUCTIONS.to_string()),
     );
     true
 }
@@ -153,10 +155,7 @@ fn ensure_input_list(path: &str, obj: &mut Map<String, Value>) -> bool {
 
 fn extract_instruction_text_from_content(content: &Value) -> Option<String> {
     match content {
-        Value::String(text) => {
-            let trimmed = text.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        }
+        Value::String(text) => (!text.trim().is_empty()).then(|| text.to_string()),
         Value::Array(parts) => {
             let texts = parts
                 .iter()
@@ -166,8 +165,8 @@ fn extract_instruction_text_from_content(content: &Value) -> Option<String> {
                     if !matches!(kind, "input_text" | "output_text" | "text") {
                         return None;
                     }
-                    let text = obj.get("text").and_then(Value::as_str)?.trim();
-                    (!text.is_empty()).then(|| text.to_string())
+                    let text = obj.get("text").and_then(Value::as_str)?;
+                    (!text.trim().is_empty()).then(|| text.to_string())
                 })
                 .collect::<Vec<_>>();
             (!texts.is_empty()).then(|| texts.join("\n\n"))
@@ -359,6 +358,33 @@ fn should_skip_image_generation_tool_for_model(obj: &Map<String, Value>) -> bool
         .is_some_and(|model| model.to_ascii_lowercase().ends_with("spark"))
 }
 
+fn is_local_image_gen_tool(tool: &Value) -> bool {
+    let Some(tool_type) = tool
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|tool_type| !tool_type.is_empty())
+    else {
+        return false;
+    };
+    let Some(name) = tool
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    if tool_type.eq_ignore_ascii_case("namespace") {
+        return name == "image_gen";
+    }
+    tool_type.eq_ignore_ascii_case("function")
+        && (name == "image_gen"
+            || name.starts_with("image_gen.")
+            || name.starts_with("image_gen__"))
+}
+
 fn ensure_image_generation_tool(path: &str, obj: &mut Map<String, Value>) -> bool {
     if !is_responses_path(path) {
         return false;
@@ -379,6 +405,9 @@ fn ensure_image_generation_tool(path: &str, obj: &mut Map<String, Value>) -> boo
     let Some(tools_array) = tools.as_array_mut() else {
         return false;
     };
+    if tools_array.iter().any(is_local_image_gen_tool) {
+        return false;
+    }
     if tools_array.iter().any(|tool| {
         tool.get("type")
             .and_then(Value::as_str)
@@ -673,7 +702,7 @@ pub(crate) fn apply_codex_http_request_rules(
     if promote_leading_instruction_messages_to_instructions(path, obj) {
         result.changed = true;
     }
-    if use_codex_compat_rewrite && ensure_non_empty_instructions(path, obj) {
+    if ensure_non_empty_instructions(path, obj) {
         result.changed = true;
     }
     if normalize_compact_instructions(path, obj) {

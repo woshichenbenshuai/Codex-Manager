@@ -25,15 +25,14 @@ struct CodexNpmLatestResponse {
 }
 
 use super::{
-    get_persisted_app_setting, normalize_optional_text, parse_bool_with_default,
-    save_persisted_app_setting, save_persisted_bool_setting,
+    normalize_optional_text, save_persisted_app_setting, save_persisted_bool_setting,
     APP_SETTING_GATEWAY_ACCOUNT_MAX_INFLIGHT_KEY, APP_SETTING_GATEWAY_BACKGROUND_TASKS_KEY,
     APP_SETTING_GATEWAY_COMPACT_MODEL_FORWARD_RULES_KEY,
-    APP_SETTING_GATEWAY_FREE_ACCOUNT_MAX_MODEL_KEY,
-    APP_SETTING_GATEWAY_MODEL_CATALOG_AUTO_REMOTE_FETCH_KEY,
-    APP_SETTING_GATEWAY_MODEL_FORWARD_RULES_KEY, APP_SETTING_GATEWAY_ORIGINATOR_KEY,
-    APP_SETTING_GATEWAY_QUOTA_GUARD_KEY, APP_SETTING_GATEWAY_REQUEST_COMPRESSION_ENABLED_KEY,
+    APP_SETTING_GATEWAY_FREE_ACCOUNT_MAX_MODEL_KEY, APP_SETTING_GATEWAY_MODEL_FORWARD_RULES_KEY,
+    APP_SETTING_GATEWAY_ORIGINATOR_KEY, APP_SETTING_GATEWAY_QUOTA_GUARD_KEY,
+    APP_SETTING_GATEWAY_REQUEST_COMPRESSION_ENABLED_KEY,
     APP_SETTING_GATEWAY_RESIDENCY_REQUIREMENT_KEY, APP_SETTING_GATEWAY_ROUTE_STRATEGY_KEY,
+    APP_SETTING_GATEWAY_SSE_KEEPALIVE_ENABLED_KEY,
     APP_SETTING_GATEWAY_SSE_KEEPALIVE_INTERVAL_MS_KEY,
     APP_SETTING_GATEWAY_THREAD_AWARE_ACCOUNT_DISTRIBUTION_ENABLED_KEY,
     APP_SETTING_GATEWAY_UPSTREAM_PROXY_BYPASS_HOSTS_KEY,
@@ -223,20 +222,6 @@ pub fn set_gateway_compact_model_forward_rules(raw: &str) -> Result<String, Stri
 
 pub fn current_gateway_compact_model_forward_rules() -> String {
     gateway::current_compact_model_forward_rules()
-}
-
-pub fn set_gateway_model_catalog_auto_remote_fetch(enabled: bool) -> Result<bool, String> {
-    save_persisted_bool_setting(
-        APP_SETTING_GATEWAY_MODEL_CATALOG_AUTO_REMOTE_FETCH_KEY,
-        enabled,
-    )?;
-    Ok(enabled)
-}
-
-pub fn current_gateway_model_catalog_auto_remote_fetch() -> bool {
-    get_persisted_app_setting(APP_SETTING_GATEWAY_MODEL_CATALOG_AUTO_REMOTE_FETCH_KEY)
-        .map(|value| parse_bool_with_default(&value, true))
-        .unwrap_or(true)
 }
 
 /// 函数 `set_gateway_account_max_inflight`
@@ -642,7 +627,7 @@ pub fn set_gateway_sse_keepalive_interval_ms(interval_ms: u64) -> Result<u64, St
     let applied = gateway::set_sse_keepalive_interval_ms(interval_ms)?;
     save_persisted_app_setting(
         APP_SETTING_GATEWAY_SSE_KEEPALIVE_INTERVAL_MS_KEY,
-        Some(&applied.to_string()),
+        Some(&interval_ms.to_string()),
     )?;
     Ok(applied)
 }
@@ -660,6 +645,16 @@ pub fn set_gateway_sse_keepalive_interval_ms(interval_ms: u64) -> Result<u64, St
 /// 返回函数执行结果
 pub fn current_gateway_sse_keepalive_interval_ms() -> u64 {
     gateway::current_sse_keepalive_interval_ms()
+}
+
+pub fn set_gateway_sse_keepalive_enabled(enabled: bool) -> Result<bool, String> {
+    let applied = gateway::set_sse_keepalive_enabled(enabled);
+    save_persisted_bool_setting(APP_SETTING_GATEWAY_SSE_KEEPALIVE_ENABLED_KEY, enabled)?;
+    Ok(applied)
+}
+
+pub fn current_gateway_sse_keepalive_enabled() -> bool {
+    gateway::current_sse_keepalive_enabled()
 }
 
 /// 函数 `set_gateway_background_tasks`

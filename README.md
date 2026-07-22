@@ -75,17 +75,7 @@
       </a>
     </td>
     <td valign="top">
-      感谢 <strong>AI夏末 AIXiamo</strong> 赞助本项目！<strong>AIXiamo</strong> 面向 Codex CLI、Claude Code、Gemini CLI 等开发者场景，提供 ChatGPT Pro 5x / 20x、ChatGPT Plus、Claude Max、Gemini Pro、Grok 等 AI 会员开通与售后协助服务。支持支付宝 / 微信支付，自动充值，订单可查，提供教程说明与售后协助。适合需要稳定使用 AI 编程、代码生成、文档处理和高频对话的开发者用户。CodexManager 用户可优先咨询 Pro / Codex / Claude / Gemini 套餐选择。可前往<a href="https://www.aixiamo.com/?utm_source=github&utm_medium=sponsor&utm_campaign=codex_manager">官网</a>查看服务。
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="180">
-      <a href="https://apikey.fun/register?aff=Codex-Manager">
-        <img src="assets/images/sponsors/APIKey.Fun.png" alt="APIKEY.FUN" width="120" />
-      </a>
-    </td>
-    <td valign="top">
-      感谢 <strong>APIKEY.FUN</strong> 赞助本项目！APIKEY.FUN 是一家专业的企业级 AI 中转站，致力于为企业和个人开发者提供稳定、高效、低成本的 AI 模型 API 接入服务。平台支持 Claude、OpenAI、Gemini 等主流热门模型，价格低至官方原价的 7%。通过本项目<a href="https://apikey.fun/register?aff=Codex-Manager">专属链接</a>注册，还可享受最高 <strong>充值永久 95 折</strong> 专属优惠。
+      感谢 <strong>AI夏末 AIXiamo</strong> 赞助本项目！国内没有海外银行卡？AIXiamo 提供 ChatGPT、Claude、Codex 等 AI 服务正规代充，支持支付宝 / 微信，售后有保障。可前往<a href="https://www.aixiamo.com/?utm_source=github&utm_medium=sponsor&utm_campaign=codex_manager">官网</a>查看服务。
     </td>
   </tr>
   <tr>
@@ -122,9 +112,9 @@
 
 <a href="https://www.star-history.com/?repos=qxcnm%2FCodex-Manager&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=qxcnm/Codex-Manager&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=qxcnm/Codex-Manager&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=qxcnm/Codex-Manager&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="assets/images/star-history-dark.png" />
+   <source media="(prefers-color-scheme: light)" srcset="assets/images/star-history-light.png" />
+   <img alt="Codex Manager Star History Chart" src="assets/images/star-history-light.png" />
  </picture>
 </a>
 
@@ -137,6 +127,7 @@
 | 配置端口、代理、数据库、Web 密码、环境变量 | [环境变量与运行配置](docs/zh-CN/report/环境变量与运行配置说明.md) |
 | 排查账号不命中、导入失败、挑战拦截、请求异常 | [FAQ 与账号命中规则](docs/zh-CN/report/FAQ与账号命中规则.md) |
 | 排查后台任务账号跳过、禁用与停用原因 | [后台任务账号跳过说明](docs/zh-CN/report/后台任务账号跳过说明.md) |
+| 管理模型、价格、路由、instructions policy 与本地缓存导出 | [模型目录 V2 管理与计费说明](docs/zh-CN/report/模型目录V2管理与计费说明.md) |
 | 插件中心最小接入、快速对接 | [插件中心最小接入说明](docs/zh-CN/report/插件中心最小接入说明.md) |
 | 对接插件中心、查看接口清单、市场模式与 Rhai 接口 | [插件中心对接与接口清单](docs/zh-CN/report/插件中心对接与接口清单.md) |
 | 系统全部可对接内部接口 | [系统内部接口总表](docs/zh-CN/report/系统内部接口总表.md) |
@@ -146,12 +137,14 @@
 - 账号池管理：分组、标签、排序、备注、封禁识别与封禁筛选
 - 批量导入 / 导出：支持多文件导入、桌面端文件夹递归导入 JSON、按账号导出单文件
 - 用量展示：支持标准 5 小时 + 7 日窗口、仅 7 日单窗口账号，以及 Code Review / Spark 等官方附加额度窗口；刷新后会统一展示各额度的剩余百分比与重置时间
-- 授权登录：浏览器授权 + 手动回调解析
-- 平台 Key：随机生成或自定义固定 Key、禁用、删除、模型绑定、推理等级、服务等级（跟随请求 / Fast / Flex）
-- 模型管理：维护结构化模型目录、远端并入、自定义模型、`visibility` / `supportedInApi` 管理，以及桌面端 Codex 缓存同步 / Web 端缓存导出
-- 聚合 API：管理第三方最小转发上游，支持创建、编辑、测试连通性、供应商名称、顺序优先级，以及按 Codex / Claude 分类展示
+- 授权登录：支持 `chatgpt.com` 浏览器授权与 Device Code 登录；浏览器授权仍可手动粘贴回调地址完成解析
+- 平台 Key：随机生成或自定义固定 Key、禁用、删除、模型绑定、推理等级、服务等级（跟随请求 / Fast / Flex）；可绑定自定义账号分组，并与账号计划筛选取交集后仅在授权池内轮转
+- 模型管理：模型目录 V2 是唯一运行时真相源；支持 builtin/custom、整数三价与长上下文阶梯价、账号池/聚合 API route、instructions policy、本地 JSON preview/commit，以及桌面/Web 主动导出 Codex 缓存
+- 聚合 API：管理第三方最小转发上游，支持创建、编辑、余额和基于已配置 V2 route 的连通性测试；不会请求供应商 `/models` 或维护供应商模型池
 - 插件中心：路由为 `/plugins/`，支持内置精选、企业私有、自定义源三种市场模式，并提供插件清单、任务、日志与 Rhai 对接接口
-- 设置页：支持“系统推导”按钮、单账号并发上限、上游代理、请求总超时、流式空闲超时、SSE 保活间隔，以及更保守的高并发退化策略；实验性上游 WebSocket 可通过 `CODEXMANAGER_USE_WEBSOCKET_UPSTREAM=1` 开启，默认关闭
+- Skills 管理：路由为 `/skills/`，扫描服务主机的 `$CODEX_HOME/skills`，支持搜索、ZIP 安装、已有目录导入和用户 Skill 删除；`.system` 内置 Skill 只读展示，并可通过 Codex 原生 Marketplace 导入 GitHub 市场、预览其中的标准 Skills 后整包安装插件
+- 项目启动（桌面端）：收藏本机项目目录，并使用本机 CodexManager profile 在新终端中启动 Codex 或打开当前项目的 `resume` 会话选择器
+- 设置页：支持“系统推导”按钮、单账号并发上限、上游代理、请求总超时、流式空闲超时、SSE 保活开关与间隔，以及更保守的高并发退化策略；SSE 保活默认开启，可通过 `CODEXMANAGER_SSE_KEEPALIVE_ENABLED=0`（或 `false`）关闭；实验性上游 WebSocket 可通过 `CODEXMANAGER_USE_WEBSOCKET_UPSTREAM=1` 开启，默认关闭
 - 系统内部接口总表：列出当前桌面端与服务端所有可对接命令、RPC 方法、以及插件内建函数
 - 本地服务：自动拉起、可自定义端口与监听地址
 - 本地网关：为 Codex CLI、Gemini CLI、Claude Code 和第三方工具提供统一 OpenAI 兼容入口；Gemini 请求可转发到 `/v1/responses`，并兼容 SSE、tools、MCP、skill、请求总超时与流式空闲超时等调用链路
@@ -177,8 +170,8 @@
 
 ## 快速开始
 1. 启动桌面端，点击“启动服务”。
-2. 进入“账号管理”，添加账号并完成授权。
-3. 如回调失败，粘贴回调链接手动完成解析。
+2. 进入“账号管理”，选择浏览器授权或 Device Code 完成 `chatgpt.com` 登录。
+3. 浏览器授权如回调失败，可粘贴回调链接手动完成解析。
 4. 刷新用量并确认账号状态。
 
 ## 默认数据目录
@@ -193,8 +186,10 @@
 ### 桌面端
 - 账号管理：集中导入、导出、刷新账号与用量，支持低配额 / 封禁筛选与重置时间展示
 - 平台 Key：按模型、推理等级、服务等级绑定平台 Key，并查看调用日志
-- 模型管理：桌面端修改后会自动同步本地 `~/.codex/models_cache.json`
+- 模型管理：桌面端和 Web 端都只在点击“导出到本地 Codex 缓存”后写入或下载 `models_cache.json`；保存、读取和启动不会自动改写缓存
 - 插件中心：`/plugins/` 路由，内置精选 / 企业私有 / 自定义源市场切换，插件安装、启停、任务、日志、Rhai 对接
+- Skills 管理：`/skills/` 路由管理服务主机的 Codex Skills；支持 ZIP 安装、目录导入、搜索与安全删除，系统内置 Skill 只读，并可从 Codex 原生 Marketplace 安装包含标准 `SKILL.md` 的完整插件
+- 项目启动：桌面端收藏本机目录，并在新终端中启动 Codex 或继续当前项目会话；Web / Docker 不访问设备目录
 - 设置页：统一管理端口、监听地址、代理、请求超时、SSE 保活、主题、自动更新、后台行为
 
 ### Service 版
@@ -208,6 +203,7 @@
 - 架构说明：[ARCHITECTURE.md](docs/zh-CN/ARCHITECTURE.md)
 - 测试基线：[TESTING.md](docs/zh-CN/TESTING.md)
 - 安全说明：[SECURITY.md](docs/zh-CN/SECURITY.md)
+- 模型目录 V2：[模型目录 V2 管理与计费说明](docs/zh-CN/report/模型目录V2管理与计费说明.md)
 - 文档索引：[docs/zh-CN/README.md](docs/zh-CN/README.md)
 
 ## 专题页面

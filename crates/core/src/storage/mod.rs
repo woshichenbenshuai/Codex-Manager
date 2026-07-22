@@ -7,9 +7,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod account_manager;
 mod account_metadata;
+mod account_proxy_settings;
 mod account_subscriptions;
 mod accounts;
 mod accounts_sql;
+mod agent_identities;
 mod aggregate_apis;
 mod aggregate_apis_sql;
 mod api_key_quota_limits;
@@ -17,11 +19,15 @@ mod api_keys;
 mod conversation_bindings;
 mod events;
 mod key_id_filters;
+mod model_billing_v2;
+mod model_catalog_v2;
 mod model_groups;
 mod model_options;
 mod model_price_rules;
 mod model_sources;
 mod plugins;
+mod proxy_profiles;
+mod proxy_tests;
 mod quota_pools;
 mod request_log_filters;
 mod request_log_query;
@@ -30,6 +36,15 @@ mod request_token_stats;
 mod settings;
 mod tokens;
 mod usage;
+
+pub use model_billing_v2::{
+    ChargeComputationV2, ChargeSnapshotInputV2, ChargeSnapshotV2, ModelPriceTierV2,
+};
+pub use model_catalog_v2::{
+    ManagedModelBatchStateV2Update, ManagedModelStateV2Update, ManagedModelV2,
+    ManagedModelV2Upsert, ModelCatalogV2Stats, ModelPriceV2, ModelRouteV2,
+};
+pub use proxy_profiles::derive_proxy_profile_url_metadata;
 
 #[derive(Debug, Clone)]
 pub struct Account {
@@ -41,6 +56,20 @@ pub struct Account {
     pub group_name: Option<String>,
     pub sort: i64,
     pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountAgentIdentity {
+    pub account_id: String,
+    pub agent_runtime_id: String,
+    pub agent_private_key: String,
+    pub task_id: Option<String>,
+    pub chatgpt_user_id: String,
+    pub chatgpt_account_is_fedramp: bool,
+    pub auth_mode: String,
+    pub workspace_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -228,6 +257,253 @@ pub struct AccountSubscription {
 }
 
 #[derive(Debug, Clone)]
+pub struct AccountProxySettings {
+    pub account_id: String,
+    pub enabled: bool,
+    pub proxy_source: Option<String>,
+    pub proxy_profile_id: Option<String>,
+    pub proxy_url: Option<String>,
+    pub status: String,
+    pub latency_ms: Option<i64>,
+    pub last_download_mbps: Option<f64>,
+    pub last_upload_mbps: Option<f64>,
+    pub last_check_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub ip: Option<String>,
+    pub country_code: Option<String>,
+    pub country_name: Option<String>,
+    pub region_name: Option<String>,
+    pub city_name: Option<String>,
+    pub geo_checked_at: Option<i64>,
+    pub geo_error: Option<String>,
+    pub asn: Option<i64>,
+    pub as_org: Option<String>,
+    pub isp: Option<String>,
+    pub as_domain: Option<String>,
+    pub timezone_id: Option<String>,
+    pub timezone_offset: Option<i64>,
+    pub timezone_utc: Option<String>,
+    pub flag_img_url: Option<String>,
+    pub flag_emoji: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyProfile {
+    pub id: String,
+    pub name: String,
+    pub proxy_url: String,
+    pub proxy_url_redacted: String,
+    pub scheme: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<i64>,
+    pub enabled: bool,
+    pub status: String,
+    pub last_error: Option<String>,
+    pub last_url_latency_ms: Option<i64>,
+    pub last_download_mbps: Option<f64>,
+    pub last_upload_mbps: Option<f64>,
+    pub last_tested_at: Option<i64>,
+    pub ip: Option<String>,
+    pub country_code: Option<String>,
+    pub country_name: Option<String>,
+    pub region_name: Option<String>,
+    pub city_name: Option<String>,
+    pub asn: Option<i64>,
+    pub as_org: Option<String>,
+    pub isp: Option<String>,
+    pub as_domain: Option<String>,
+    pub flag_img_url: Option<String>,
+    pub flag_emoji: Option<String>,
+    pub timezone_id: Option<String>,
+    pub timezone_offset: Option<i64>,
+    pub timezone_utc: Option<String>,
+    pub tags_json: Option<String>,
+    pub notes: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyProfileCreateInput {
+    pub id: String,
+    pub name: String,
+    pub proxy_url: String,
+    pub enabled: bool,
+    pub tags_json: Option<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyProfileUpdateInput {
+    pub id: String,
+    pub name: Option<String>,
+    pub proxy_url: Option<String>,
+    pub enabled: Option<bool>,
+    pub status: Option<String>,
+    pub last_error: Option<String>,
+    pub last_url_latency_ms: Option<i64>,
+    pub last_download_mbps: Option<f64>,
+    pub last_upload_mbps: Option<f64>,
+    pub last_tested_at: Option<i64>,
+    pub ip: Option<String>,
+    pub country_code: Option<String>,
+    pub country_name: Option<String>,
+    pub region_name: Option<String>,
+    pub city_name: Option<String>,
+    pub asn: Option<i64>,
+    pub as_org: Option<String>,
+    pub isp: Option<String>,
+    pub as_domain: Option<String>,
+    pub flag_img_url: Option<String>,
+    pub flag_emoji: Option<String>,
+    pub timezone_id: Option<String>,
+    pub timezone_offset: Option<i64>,
+    pub timezone_utc: Option<String>,
+    pub tags_json: Option<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyProfileUrlTest {
+    pub id: i64,
+    pub proxy_profile_id: String,
+    pub status: String,
+    pub url_latency_ms: Option<i64>,
+    pub status_code: Option<i64>,
+    pub test_url: String,
+    pub final_url: Option<String>,
+    pub redirected: bool,
+    pub tested_at: i64,
+    pub error_code: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyProfileUrlTestInsertInput {
+    pub proxy_profile_id: String,
+    pub status: String,
+    pub url_latency_ms: Option<i64>,
+    pub status_code: Option<i64>,
+    pub test_url: String,
+    pub final_url: Option<String>,
+    pub redirected: bool,
+    pub tested_at: i64,
+    pub error_code: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyProfileUrlMetadata {
+    pub proxy_url_redacted: String,
+    pub scheme: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxySpeedTest {
+    pub id: i64,
+    pub scope: String,
+    pub proxy_profile_id: Option<String>,
+    pub account_id: Option<String>,
+    pub status: String,
+    pub provider: String,
+    pub observed_ip: Option<String>,
+    pub observed_country: Option<String>,
+    pub observed_colo: Option<String>,
+    pub max_payload_bytes: Option<i64>,
+    pub samples_json: Option<String>,
+    pub download_summary_json: Option<String>,
+    pub upload_summary_json: Option<String>,
+    pub started_at: i64,
+    pub finished_at: i64,
+    pub error_code: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxySpeedTestInsertInput {
+    pub scope: String,
+    pub proxy_profile_id: Option<String>,
+    pub account_id: Option<String>,
+    pub status: String,
+    pub provider: String,
+    pub observed_ip: Option<String>,
+    pub observed_country: Option<String>,
+    pub observed_colo: Option<String>,
+    pub max_payload_bytes: Option<i64>,
+    pub samples_json: Option<String>,
+    pub download_summary_json: Option<String>,
+    pub upload_summary_json: Option<String>,
+    pub started_at: i64,
+    pub finished_at: i64,
+    pub error_code: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyDiagnosticTest {
+    pub id: i64,
+    pub scope: String,
+    pub proxy_profile_id: Option<String>,
+    pub account_id: Option<String>,
+    pub status: String,
+    pub provider: String,
+    pub file_size_id: String,
+    pub downloaded_bytes: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub mbps: Option<f64>,
+    pub tested_at: i64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyDiagnosticTestInsertInput {
+    pub scope: String,
+    pub proxy_profile_id: Option<String>,
+    pub account_id: Option<String>,
+    pub status: String,
+    pub provider: String,
+    pub file_size_id: String,
+    pub downloaded_bytes: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub mbps: Option<f64>,
+    pub tested_at: i64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AccountProxyUrlTest {
+    pub id: i64,
+    pub account_id: String,
+    pub status: String,
+    pub url_latency_ms: Option<i64>,
+    pub status_code: Option<i64>,
+    pub test_url: String,
+    pub final_url: Option<String>,
+    pub redirected: bool,
+    pub tested_at: i64,
+    pub error_code: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AccountProxyUrlTestInsertInput {
+    pub account_id: String,
+    pub status: String,
+    pub url_latency_ms: Option<i64>,
+    pub status_code: Option<i64>,
+    pub test_url: String,
+    pub final_url: Option<String>,
+    pub redirected: bool,
+    pub tested_at: i64,
+    pub error_code: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct QuotaSourceModelAssignment {
     pub source_kind: String,
     pub source_id: String,
@@ -358,6 +634,36 @@ fn update_login_session_status_sql() -> &'static str {
 
 fn update_login_session_code_verifier_sql() -> &'static str {
     "UPDATE login_sessions SET code_verifier = ?1, updated_at = ?2 WHERE login_id = ?3"
+}
+
+fn claim_login_session_for_completion_sql() -> &'static str {
+    "UPDATE login_sessions
+     SET status = 'completing', error = NULL, updated_at = ?1
+     WHERE login_id = ?2 AND status = 'pending'"
+}
+
+fn finish_login_session_sql() -> &'static str {
+    "UPDATE login_sessions
+     SET status = ?1, error = ?2, code_verifier = '', updated_at = ?3
+     WHERE login_id = ?4 AND status IN ('pending', 'completing')"
+}
+
+fn fail_pending_login_session_sql() -> &'static str {
+    "UPDATE login_sessions
+     SET status = 'failed', error = ?1, code_verifier = '', updated_at = ?2
+     WHERE login_id = ?3 AND status = 'pending'"
+}
+
+fn cancel_login_session_sql() -> &'static str {
+    "UPDATE login_sessions
+     SET status = 'cancelled', error = NULL, code_verifier = '', updated_at = ?1
+     WHERE login_id = ?2 AND status = 'pending'"
+}
+
+fn update_login_session_code_verifier_if_pending_sql() -> &'static str {
+    "UPDATE login_sessions
+     SET code_verifier = ?1, updated_at = ?2
+     WHERE login_id = ?3 AND status = 'pending'"
 }
 
 #[derive(Debug, Clone)]
@@ -581,6 +887,14 @@ pub struct TokenUsageRollup {
 pub struct DailyTokenUsageRollup {
     pub day_start_ts: i64,
     pub day_end_ts: i64,
+    pub usage: TokenUsageRollup,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelTokenUsageRollup {
+    pub bucket_start_ts: i64,
+    pub bucket_end_ts: i64,
+    pub model: String,
     pub usage: TokenUsageRollup,
 }
 
@@ -864,6 +1178,7 @@ pub struct ApiKeyListSummary {
     pub rotation_strategy: String,
     pub aggregate_api_id: Option<String>,
     pub account_plan_filter: Option<String>,
+    pub account_group_filter: Option<String>,
     pub aggregate_api_url: Option<String>,
     pub client_type: String,
     pub protocol_type: String,
@@ -1266,7 +1581,7 @@ impl Storage {
         // 中文注释：并发写入时给 SQLite 一点等待时间，避免瞬时 lock 导致请求直接失败。
         conn.busy_timeout(Duration::from_millis(3000))?;
         // 中文注释：复杂筛选/聚合的临时 B-tree 优先走内存，减少报表查询落盘开销。
-        conn.execute_batch("PRAGMA temp_store=MEMORY;")?;
+        conn.execute_batch("PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=ON;")?;
         Ok(())
     }
 
@@ -1554,7 +1869,9 @@ impl Storage {
             include_str!("../../migrations/048_drop_model_options_cache.sql"),
         )?;
         self.apply_model_catalog_string_items_migration()?;
-        self.ensure_model_catalog_models_table()?;
+        if !self.has_migration("112_model_catalog_v2")? {
+            self.ensure_model_catalog_models_table()?;
+        }
         self.apply_sql_migration(
             "050_api_key_profiles_drop_azure_protocol",
             include_str!("../../migrations/050_api_key_profiles_drop_azure_protocol.sql"),
@@ -1846,13 +2163,51 @@ impl Storage {
             "111_model_source_platform_slug_lookup_indexes",
             include_str!("../../migrations/111_model_source_platform_slug_lookup_indexes.sql"),
         )?;
+        self.apply_model_catalog_v2_migration()?;
+        self.apply_model_billing_v2_hardening_migration()?;
+        self.apply_gpt56_pricing_migration()?;
+        self.apply_model_catalog_codex_metadata_migration()?;
+        self.apply_sql_or_compat_migration(
+            "116_request_logs_visibility",
+            include_str!("../../migrations/116_request_logs_visibility.sql"),
+            |s| s.ensure_request_log_visibility_column(),
+        )?;
+        self.apply_sql_or_compat_migration(
+            "117_account_proxy_settings",
+            include_str!("../../migrations/117_account_proxy_settings.sql"),
+            |s| s.ensure_account_proxy_settings_table(),
+        )?;
+        self.apply_sql_or_compat_migration(
+            "118_proxy_profiles",
+            include_str!("../../migrations/118_proxy_profiles.sql"),
+            |s| s.ensure_proxy_profiles_table(),
+        )?;
+        self.apply_sql_or_compat_migration(
+            "119_proxy_profile_url_tests",
+            include_str!("../../migrations/119_proxy_profile_url_tests.sql"),
+            |s| s.ensure_proxy_profile_url_tests_table(),
+        )?;
+        self.apply_sql_or_compat_migration(
+            "120_proxy_history",
+            include_str!("../../migrations/120_proxy_history.sql"),
+            |s| s.ensure_proxy_history_tables(),
+        )?;
+        self.apply_gpt56_official_pricing_migration()?;
+        self.apply_sql_migration(
+            "122_account_agent_identities",
+            include_str!("../../migrations/122_account_agent_identities.sql"),
+        )?;
+        self.apply_sql_or_compat_migration(
+            "123_api_keys_account_group_filter",
+            include_str!("../../migrations/123_api_keys_account_group_filter.sql"),
+            |s| s.ensure_api_key_account_group_filter_column(),
+        )?;
         self.ensure_api_key_rotation_columns()?;
+        self.ensure_api_key_account_group_filter_column()?;
         self.ensure_aggregate_apis_table()?;
-        self.ensure_aggregate_api_supplier_model_tables()?;
         self.ensure_aggregate_api_secrets_table()?;
         self.ensure_aggregate_api_balance_secrets_table()?;
         self.ensure_api_key_quota_limits_table()?;
-        self.ensure_model_price_rules_table()?;
         self.ensure_request_token_stats_table()?;
         self.ensure_request_log_request_type_and_service_tier_columns()?;
         self.ensure_request_log_effective_service_tier_column()?;
@@ -1861,13 +2216,15 @@ impl Storage {
         self.ensure_request_log_route_strategy_columns()?;
         self.ensure_request_log_first_response_column()?;
         self.ensure_request_log_route_detail_columns()?;
-        self.ensure_model_catalog_models_table()?;
+        self.ensure_request_log_visibility_column()?;
         self.ensure_account_subscriptions_table()?;
+        self.ensure_account_proxy_settings_table()?;
+        self.ensure_proxy_profiles_table()?;
+        self.ensure_proxy_profile_url_tests_table()?;
+        self.ensure_proxy_history_tables()?;
         self.ensure_quota_pool_tables()?;
         self.ensure_account_manager_tables()?;
-        self.ensure_model_source_tables()?;
-        self.ensure_aggregate_api_supplier_model_tables()?;
-        self.ensure_model_group_tables()?;
+        self.seed_missing_builtin_models_v2()?;
         Ok(())
     }
 
@@ -2064,6 +2421,66 @@ impl Storage {
             (code_verifier, now_ts(), login_id),
         )?;
         Ok(())
+    }
+
+    /// Atomically claims a pending login session for token/account persistence.
+    pub fn claim_login_session_for_completion(&self, login_id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            claim_login_session_for_completion_sql(),
+            (now_ts(), login_id),
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Moves an active login session to a terminal state and clears its PKCE verifier.
+    ///
+    /// The guarded update prevents a late completion/error from overwriting a session
+    /// that has already been cancelled or otherwise completed.
+    pub fn finish_login_session(
+        &self,
+        login_id: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            finish_login_session_sql(),
+            (status, error, now_ts(), login_id),
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Fails a session only before a completion worker has claimed ownership.
+    ///
+    /// OAuth error callbacks use this narrower transition so a second browser
+    /// callback cannot overwrite an in-flight successful completion.
+    pub fn fail_pending_login_session(&self, login_id: &str, error: Option<&str>) -> Result<bool> {
+        let changed = self.conn.execute(
+            fail_pending_login_session_sql(),
+            (error, now_ts(), login_id),
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Cancels a pending login session without racing a completion owner.
+    pub fn cancel_login_session(&self, login_id: &str) -> Result<bool> {
+        let changed = self
+            .conn
+            .execute(cancel_login_session_sql(), (now_ts(), login_id))?;
+        Ok(changed == 1)
+    }
+
+    /// Stores a verifier returned by the Device Code endpoint only while the
+    /// session is still pending.
+    pub fn update_login_session_code_verifier_if_pending(
+        &self,
+        login_id: &str,
+        code_verifier: &str,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            update_login_session_code_verifier_if_pending_sql(),
+            (code_verifier, now_ts(), login_id),
+        )?;
+        Ok(changed == 1)
     }
 
     /// 函数 `ensure_column`

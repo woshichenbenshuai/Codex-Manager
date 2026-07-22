@@ -1,12 +1,19 @@
 use codexmanager_core::rpc::types::{JsonRpcMessage, JsonRpcRequest};
 
+pub const RPC_BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
+
 mod account;
 mod account_identity;
+mod agent_identity;
 mod aggregate_api;
 mod apikey;
 pub(crate) mod app_settings;
 mod auth;
+mod codex_model_catalog;
 mod codex_profile;
+mod codex_runtime;
+mod codex_skills;
+mod codex_skills_marketplace;
 mod dashboard;
 mod errors;
 mod gateway;
@@ -14,7 +21,9 @@ mod http;
 mod lifecycle;
 mod logging;
 mod model_groups;
+mod models_v2;
 mod plugin;
+mod proxy_registry;
 mod quota;
 mod requestlog;
 mod rpc_actor;
@@ -30,25 +39,24 @@ pub(crate) use account::cleanup as account_cleanup;
 pub(crate) use account::delete as account_delete;
 pub(crate) use account::delete_many as account_delete_many;
 pub(crate) use account::export as account_export;
+pub(crate) use account::group as account_group;
 pub(crate) use account::import as account_import;
 pub(crate) use account::list as account_list;
 pub(crate) use account::plan as account_plan;
+pub(crate) use account::proxy as account_proxy;
+pub(crate) use account::proxy_testing::presets::proxy_test_presets;
 pub(crate) use account::status as account_status;
 pub(crate) use account::update as account_update;
 pub(crate) use account::warmup as account_warmup;
 pub(crate) use aggregate_api::{
-    create_aggregate_api, delete_aggregate_api, delete_aggregate_api_supplier_model,
-    discover_aggregate_api_models, import_aggregate_api_supplier_models,
-    list_aggregate_api_supplier_models, list_aggregate_apis, read_aggregate_api_secret,
-    refresh_aggregate_api_balance, save_aggregate_api_supplier_model,
-    test_aggregate_api_connection, update_aggregate_api,
+    create_aggregate_api, delete_aggregate_api, list_aggregate_apis, read_aggregate_api_secret,
+    refresh_aggregate_api_balance, test_aggregate_api_connection, update_aggregate_api,
 };
 pub(crate) use apikey::create as apikey_create;
 pub(crate) use apikey::delete as apikey_delete;
 pub(crate) use apikey::disable as apikey_disable;
 pub(crate) use apikey::enable as apikey_enable;
 pub(crate) use apikey::list as apikey_list;
-pub(crate) use apikey::models as apikey_models;
 pub(crate) use apikey::profile as apikey_profile;
 pub(crate) use apikey::read_secret as apikey_read_secret;
 pub(crate) use apikey::update_model as apikey_update_model;
@@ -64,6 +72,14 @@ pub(crate) use model_groups::{
     resolve_api_key_model_group_access, set_model_group_models, set_model_group_users,
     upsert_model_group,
 };
+pub(crate) use proxy_registry::{
+    cancel_proxy_test_job, create_proxy_profile, delete_proxy_profile,
+    get_proxy_profile_diagnostics_history, get_proxy_profile_latency_test_history,
+    get_proxy_profile_speed_test_history, get_proxy_test_job, list_proxy_profiles,
+    test_proxy_profile, test_proxy_profile_cloudflare_style_speed, test_proxy_profile_latency,
+    test_proxy_profile_speed, update_proxy_profile,
+};
+
 pub(crate) use requestlog::clear as requestlog_clear;
 pub(crate) use requestlog::list as requestlog_list;
 pub(crate) use requestlog::summary as requestlog_summary;
@@ -79,6 +95,7 @@ pub(crate) use usage::keepalive as usage_keepalive;
 pub(crate) use usage::list as usage_list;
 pub(crate) use usage::read as usage_read;
 pub(crate) use usage::refresh as usage_refresh;
+pub(crate) use usage::reset_credits as usage_reset_credits;
 pub(crate) use usage::scheduler as usage_scheduler;
 pub(crate) use usage::snapshot_store as usage_snapshot_store;
 pub(crate) use usage::token_refresh as usage_token_refresh;
@@ -90,7 +107,8 @@ pub use app_settings::{
     current_codex_cli_guide_dismissed, current_gateway_account_max_inflight,
     current_gateway_free_account_max_model, current_gateway_model_forward_rules,
     current_gateway_originator, current_gateway_request_compression_enabled,
-    current_gateway_residency_requirement, current_gateway_sse_keepalive_interval_ms,
+    current_gateway_residency_requirement, current_gateway_sse_keepalive_enabled,
+    current_gateway_sse_keepalive_interval_ms,
     current_gateway_thread_aware_account_distribution_enabled,
     current_gateway_upstream_proxy_bypass_hosts, current_gateway_upstream_stream_timeout_ms,
     current_gateway_upstream_total_timeout_ms, current_gateway_user_agent_version,
@@ -104,20 +122,21 @@ pub use app_settings::{
     set_gateway_account_max_inflight, set_gateway_background_tasks,
     set_gateway_free_account_max_model, set_gateway_model_forward_rules, set_gateway_originator,
     set_gateway_request_compression_enabled, set_gateway_residency_requirement,
-    set_gateway_route_strategy, set_gateway_sse_keepalive_interval_ms,
-    set_gateway_thread_aware_account_distribution_enabled, set_gateway_upstream_proxy_bypass_hosts,
-    set_gateway_upstream_proxy_url, set_gateway_upstream_stream_timeout_ms,
-    set_gateway_upstream_total_timeout_ms, set_gateway_user_agent_version,
-    set_lightweight_mode_on_close_to_tray_setting, set_saved_service_addr, set_service_bind_mode,
-    set_ui_appearance_preset, set_ui_low_transparency_enabled, set_ui_theme,
-    set_update_auto_check_enabled, sync_runtime_settings_from_storage, BackgroundTasksInput,
-    APP_SETTING_AUTO_START_ENABLED_KEY, APP_SETTING_CLOSE_TO_TRAY_ON_CLOSE_KEY,
-    APP_SETTING_DISTRIBUTION_ENABLED_KEY, APP_SETTING_ENV_OVERRIDES_KEY,
-    APP_SETTING_GATEWAY_ACCOUNT_MAX_INFLIGHT_KEY, APP_SETTING_GATEWAY_BACKGROUND_TASKS_KEY,
-    APP_SETTING_GATEWAY_FREE_ACCOUNT_MAX_MODEL_KEY, APP_SETTING_GATEWAY_MODEL_FORWARD_RULES_KEY,
-    APP_SETTING_GATEWAY_ORIGINATOR_KEY, APP_SETTING_GATEWAY_QUOTA_GUARD_KEY,
-    APP_SETTING_GATEWAY_REQUEST_COMPRESSION_ENABLED_KEY,
+    set_gateway_route_strategy, set_gateway_sse_keepalive_enabled,
+    set_gateway_sse_keepalive_interval_ms, set_gateway_thread_aware_account_distribution_enabled,
+    set_gateway_upstream_proxy_bypass_hosts, set_gateway_upstream_proxy_url,
+    set_gateway_upstream_stream_timeout_ms, set_gateway_upstream_total_timeout_ms,
+    set_gateway_user_agent_version, set_lightweight_mode_on_close_to_tray_setting,
+    set_saved_service_addr, set_service_bind_mode, set_ui_appearance_preset,
+    set_ui_low_transparency_enabled, set_ui_theme, set_update_auto_check_enabled,
+    sync_runtime_settings_from_storage, BackgroundTasksInput, APP_SETTING_AUTO_START_ENABLED_KEY,
+    APP_SETTING_CLOSE_TO_TRAY_ON_CLOSE_KEY, APP_SETTING_DISTRIBUTION_ENABLED_KEY,
+    APP_SETTING_ENV_OVERRIDES_KEY, APP_SETTING_GATEWAY_ACCOUNT_MAX_INFLIGHT_KEY,
+    APP_SETTING_GATEWAY_BACKGROUND_TASKS_KEY, APP_SETTING_GATEWAY_FREE_ACCOUNT_MAX_MODEL_KEY,
+    APP_SETTING_GATEWAY_MODEL_FORWARD_RULES_KEY, APP_SETTING_GATEWAY_ORIGINATOR_KEY,
+    APP_SETTING_GATEWAY_QUOTA_GUARD_KEY, APP_SETTING_GATEWAY_REQUEST_COMPRESSION_ENABLED_KEY,
     APP_SETTING_GATEWAY_RESIDENCY_REQUIREMENT_KEY, APP_SETTING_GATEWAY_ROUTE_STRATEGY_KEY,
+    APP_SETTING_GATEWAY_SSE_KEEPALIVE_ENABLED_KEY,
     APP_SETTING_GATEWAY_SSE_KEEPALIVE_INTERVAL_MS_KEY,
     APP_SETTING_GATEWAY_THREAD_AWARE_ACCOUNT_DISTRIBUTION_ENABLED_KEY,
     APP_SETTING_GATEWAY_UPSTREAM_PROXY_BYPASS_HOSTS_KEY,
@@ -136,9 +155,9 @@ pub use auth::{
     bootstrap_app_admin, build_web_access_session_token, change_app_user_password, create_app_user,
     current_web_access_password_hash, current_web_auth_mode, delete_app_user, distribution_enabled,
     list_api_key_ids_for_user, list_api_key_owners, list_app_users, login_app_user,
-    logout_app_user_session, resolve_app_user_session, set_api_key_owner, set_distribution_enabled,
-    set_web_access_password, set_web_auth_mode, update_app_user, update_app_user_profile,
-    verify_web_access_password, wallet_charge_for_request, wallet_precheck_for_api_key,
+    logout_app_user_session, record_request_charge_v2, resolve_app_user_session, set_api_key_owner,
+    set_distribution_enabled, set_web_access_password, set_web_auth_mode, update_app_user,
+    update_app_user_profile, verify_web_access_password, wallet_precheck_for_api_key,
     wallet_set_available_credit, wallet_top_up, web_access_auth_status_value,
     web_access_password_configured, web_auth_status_value, ApiKeyOwnerResult, AppLoginResult,
     AppSessionResult, AppSessionUserResult, AppUserCreateInput, AppUserPublicResult,

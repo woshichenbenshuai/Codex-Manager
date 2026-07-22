@@ -3,18 +3,15 @@ use rusqlite::{params_from_iter, types::Value, OptionalExtension, Result, Row};
 use super::account_metadata::delete_account_metadata_for_account_sql;
 use super::account_subscriptions::delete_account_subscription_for_account_sql;
 use super::accounts_sql::*;
+use super::agent_identities::delete_account_agent_identity_for_account_sql;
 use super::conversation_bindings::delete_conversation_bindings_for_account_sql;
 use super::events::delete_events_for_account_sql;
 use super::key_id_filters::{normalize_text_ids, text_id_in_clause, SQLITE_IN_CLAUSE_BATCH_SIZE};
-use super::model_sources::{
-    delete_model_source_mapping_preferences_for_source_sql,
-    delete_model_source_mappings_for_source_sql, delete_model_source_models_for_source_sql,
-};
 use super::tokens::delete_token_for_account_sql;
 use super::usage::delete_usage_snapshots_for_account_sql;
 
 use super::{
-    now_ts, Account, AccountAuthRefreshTarget, AccountCleanupCandidate,
+    now_ts, Account, AccountAgentIdentity, AccountAuthRefreshTarget, AccountCleanupCandidate,
     AccountCodexProfileCandidate, AccountDashboardSourceMetadata, AccountDirectAuthProfile,
     AccountImportSnapshot, AccountListSummaryRow, AccountQuotaOverviewStats,
     AccountQuotaPoolSource, AccountQuotaSourceSummary, AccountStatusCount,
@@ -22,8 +19,6 @@ use super::{
     AccountUpsertState, AccountUsageRefreshTarget, AccountUsageRefreshTokenTarget,
     AccountWorkspaceIdentity, Storage, Token,
 };
-
-const ACCOUNT_MODEL_SOURCE_KIND: &str = "openai_account";
 
 impl Storage {
     /// 函数 `insert_account`
@@ -96,6 +91,7 @@ impl Storage {
         note: Option<&str>,
         tags: Option<&str>,
         token: &Token,
+        agent_identity: Option<&AccountAgentIdentity>,
     ) -> Result<()> {
         if account.id != token.account_id {
             return Err(rusqlite::Error::InvalidParameterName(
@@ -204,6 +200,57 @@ impl Storage {
                 token.last_refresh,
             ),
         )?;
+        if let Some(identity) = agent_identity {
+            if identity.account_id != account.id {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "account id and agent identity account id do not match".to_string(),
+                ));
+            }
+            tx.execute(
+                "INSERT INTO account_agent_identities (
+                    account_id,
+                    agent_runtime_id,
+                    agent_private_key,
+                    task_id,
+                    chatgpt_user_id,
+                    chatgpt_account_is_fedramp,
+                    auth_mode,
+                    workspace_id,
+                    created_at,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(account_id) DO UPDATE SET
+                    agent_runtime_id = excluded.agent_runtime_id,
+                    agent_private_key = excluded.agent_private_key,
+                    task_id = excluded.task_id,
+                    chatgpt_user_id = excluded.chatgpt_user_id,
+                    chatgpt_account_is_fedramp = excluded.chatgpt_account_is_fedramp,
+                    auth_mode = excluded.auth_mode,
+                    workspace_id = excluded.workspace_id,
+                    updated_at = excluded.updated_at",
+                (
+                    &identity.account_id,
+                    &identity.agent_runtime_id,
+                    &identity.agent_private_key,
+                    &identity.task_id,
+                    &identity.chatgpt_user_id,
+                    if identity.chatgpt_account_is_fedramp {
+                        1
+                    } else {
+                        0
+                    },
+                    &identity.auth_mode,
+                    &identity.workspace_id,
+                    identity.created_at,
+                    identity.updated_at,
+                ),
+            )?;
+        } else {
+            tx.execute(
+                delete_account_agent_identity_for_account_sql(),
+                [&account.id],
+            )?;
+        }
         tx.commit()
     }
 
@@ -667,20 +714,15 @@ impl Storage {
         if account_ids.is_empty() {
             return Ok(AccountSummaryStorageSnapshot::default());
         }
-        let (metadata, subscriptions, model_assignments, quota_overrides) =
-            if options.include_details {
-                (
-                    self.list_account_metadata_for_accounts(account_ids)?,
-                    self.list_account_subscriptions_for_accounts(account_ids)?,
-                    self.list_quota_source_model_assignments_for_sources(
-                        ACCOUNT_MODEL_SOURCE_KIND,
-                        account_ids,
-                    )?,
-                    self.list_account_quota_capacity_overrides_for_accounts(account_ids)?,
-                )
-            } else {
-                Default::default()
-            };
+        let (metadata, subscriptions, quota_overrides) = if options.include_details {
+            (
+                self.list_account_metadata_for_accounts(account_ids)?,
+                self.list_account_subscriptions_for_accounts(account_ids)?,
+                self.list_account_quota_capacity_overrides_for_accounts(account_ids)?,
+            )
+        } else {
+            Default::default()
+        };
         Ok(AccountSummaryStorageSnapshot {
             preferred_account_id: if options.include_preferred {
                 self.preferred_account_id()?
@@ -700,7 +742,7 @@ impl Storage {
             usage_snapshots: self.latest_usage_snapshots_for_accounts(account_ids)?,
             metadata,
             subscriptions,
-            model_assignments,
+            model_assignments: Vec::new(),
             quota_overrides,
         })
     }
@@ -1096,6 +1138,18 @@ impl Storage {
         Ok(())
     }
 
+    pub fn update_account_group_name(
+        &self,
+        account_id: &str,
+        group_name: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            update_account_group_name_sql(),
+            (group_name, now_ts(), account_id),
+        )?;
+        Ok(())
+    }
+
     pub fn update_account_workspace_identity(
         &self,
         account_id: &str,
@@ -1196,21 +1250,29 @@ impl Storage {
         let tx = self.conn.transaction()?;
         tx.execute(delete_account_metadata_for_account_sql(), [account_id])?;
         tx.execute(delete_account_subscription_for_account_sql(), [account_id])?;
+        tx.execute(
+            delete_account_agent_identity_for_account_sql(),
+            [account_id],
+        )?;
         tx.execute(delete_token_for_account_sql(), [account_id])?;
         tx.execute(delete_usage_snapshots_for_account_sql(), [account_id])?;
         tx.execute(delete_events_for_account_sql(), [account_id])?;
         tx.execute(delete_conversation_bindings_for_account_sql(), [account_id])?;
         tx.execute(
-            delete_model_source_mappings_for_source_sql(),
-            (ACCOUNT_MODEL_SOURCE_KIND, account_id),
+            "DELETE FROM account_proxy_settings WHERE account_id = ?1",
+            [account_id],
         )?;
         tx.execute(
-            delete_model_source_models_for_source_sql(),
-            (ACCOUNT_MODEL_SOURCE_KIND, account_id),
+            "DELETE FROM account_proxy_url_tests WHERE account_id = ?1",
+            [account_id],
         )?;
         tx.execute(
-            delete_model_source_mapping_preferences_for_source_sql(),
-            (ACCOUNT_MODEL_SOURCE_KIND, account_id),
+            "DELETE FROM proxy_speed_tests WHERE account_id = ?1",
+            [account_id],
+        )?;
+        tx.execute(
+            "DELETE FROM proxy_diagnostics_history WHERE account_id = ?1",
+            [account_id],
         )?;
         tx.execute(delete_account_by_id_sql(), [account_id])?;
         tx.commit()?;
@@ -1228,13 +1290,11 @@ impl Storage {
         for chunk in account_ids.chunks(SQLITE_IN_CLAUSE_BATCH_SIZE) {
             delete_accounts_from_table(&tx, "account_metadata", "account_id", chunk)?;
             delete_accounts_from_table(&tx, "account_subscriptions", "account_id", chunk)?;
+            delete_accounts_from_table(&tx, "account_agent_identities", "account_id", chunk)?;
             delete_accounts_from_table(&tx, "tokens", "account_id", chunk)?;
             delete_accounts_from_table(&tx, "usage_snapshots", "account_id", chunk)?;
             delete_accounts_from_table(&tx, "events", "account_id", chunk)?;
             delete_accounts_from_table(&tx, "conversation_bindings", "account_id", chunk)?;
-            delete_model_source_rows_for_accounts(&tx, "model_source_mappings", chunk)?;
-            delete_model_source_rows_for_accounts(&tx, "model_source_models", chunk)?;
-            delete_model_source_rows_for_accounts(&tx, "model_source_mapping_preferences", chunk)?;
             deleted += delete_accounts_from_table(&tx, "accounts", "id", chunk)?;
         }
         tx.commit()?;
@@ -1848,9 +1908,20 @@ fn usage_refresh_token_targets_by_status_sql(status_condition: &str) -> String {
                 t.last_refresh
             FROM accounts a
             INNER JOIN tokens t ON t.account_id = a.id
+            LEFT JOIN account_agent_identities ai ON ai.account_id = a.id
             WHERE {status_condition}
-              AND TRIM(COALESCE(t.access_token, '')) <> ''
-              AND TRIM(COALESCE(t.refresh_token, '')) <> ''
+              AND (
+                    (
+                        TRIM(COALESCE(t.access_token, '')) <> ''
+                        AND TRIM(COALESCE(t.refresh_token, '')) <> ''
+                    )
+                    OR (
+                        ai.account_id IS NOT NULL
+                        AND LOWER(TRIM(COALESCE(ai.auth_mode, ''))) = 'agentidentity'
+                        AND TRIM(COALESCE(ai.agent_runtime_id, '')) <> ''
+                        AND TRIM(COALESCE(ai.agent_private_key, '')) <> ''
+                    )
+              )
         ),
         latest_status AS (
             SELECT
@@ -1953,22 +2024,6 @@ fn delete_accounts_from_table(
         return Ok(0);
     };
     let sql = format!("DELETE FROM {table} WHERE {condition}");
-    tx.execute(&sql, params_from_iter(params))
-}
-
-fn delete_model_source_rows_for_accounts(
-    tx: &rusqlite::Transaction<'_>,
-    table: &str,
-    account_ids: &[String],
-) -> Result<usize> {
-    let Some((condition, params)) = text_id_in_clause("source_id", account_ids) else {
-        return Ok(0);
-    };
-    let sql = format!(
-        "DELETE FROM {table}
-         WHERE source_kind = 'openai_account'
-           AND {condition}"
-    );
     tx.execute(&sql, params_from_iter(params))
 }
 

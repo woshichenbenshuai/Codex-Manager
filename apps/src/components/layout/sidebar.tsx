@@ -9,10 +9,13 @@ import {
   Boxes,
   Database,
   Puzzle,
+  WandSparkles,
   FileText,
+  FolderKanban,
   Route,
   Settings,
   UserRound,
+  Globe,
   ChevronLeft,
   ChevronRight,
   type LucideIcon,
@@ -44,11 +47,14 @@ const NAV_ITEM_BY_PATH = new Map<TopLevelRoutePath, { icon: LucideIcon }>([
   ["/aggregate-api", { icon: Database }],
   ["/apikeys", { icon: Key }],
   ["/platform-mode", { icon: Cable }],
+  ["/projects", { icon: FolderKanban }],
   ["/models", { icon: Boxes }],
   ["/model-groups", { icon: Route }],
   ["/plugins", { icon: Puzzle }],
+  ["/skills", { icon: WandSparkles }],
   ["/logs", { icon: FileText }],
   ["/settings", { icon: Settings }],
+  ["/proxy-settings", { icon: Globe }],
   ["/author", { icon: UserRound }],
 ]);
 
@@ -85,10 +91,10 @@ const NavItem = memo(({
     aria-label={itemName}
     title={itemName}
     className={cn(
-      "group/nav relative flex min-h-10 items-center gap-3 overflow-hidden rounded-md border border-transparent px-3 py-2 text-[13px] transition-all duration-200 hover:border-primary/20 hover:bg-primary/5 hover:text-primary",
+      "group/nav relative flex min-h-10 items-center gap-3 overflow-hidden rounded-md border border-transparent px-3 py-2 text-[13px] transition-colors duration-200 hover:border-primary/20 hover:bg-primary/5 hover:text-primary",
       !isSidebarOpen && "justify-center px-0",
       isActive
-        ? "border-primary/25 bg-primary/10 text-primary shadow-[inset_3px_0_0_rgb(var(--primary-rgb)/0.8),0_10px_22px_-20px_rgb(var(--primary-rgb)/0.34)]"
+        ? "border-primary/25 bg-primary/10 text-primary shadow-[0_10px_22px_-20px_rgb(var(--primary-rgb)/0.34)]"
         : "text-muted-foreground",
     )}
   >
@@ -141,8 +147,8 @@ export function Sidebar() {
   const brandTitle = isSidebarOpen ? t("重新打开 Codex 引导") : "CodexManager";
   const toggleTitle = isSidebarOpen ? t("收起侧边栏") : t("展开侧边栏");
   const routeAccess = useMemo(
-    () => ({ role, mode: session?.mode ?? null }),
-    [role, session?.mode],
+    () => ({ role, mode: session?.mode ?? null, isDesktopRuntime }),
+    [isDesktopRuntime, role, session?.mode],
   );
 
   const handleNavigate = useCallback(
@@ -196,7 +202,7 @@ export function Sidebar() {
         )}
       >
         {isSidebarOpen ? (
-          <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70">
+          <div className="animate-in px-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/70 fade-in slide-in-from-left-1 duration-200 motion-reduce:animate-none">
             {t(section.label)}
           </div>
         ) : null}
@@ -222,12 +228,22 @@ export function Sidebar() {
 
   return (
     <div
+      data-slot="app-sidebar"
       className={cn(
-        "relative z-20 flex shrink-0 flex-col glass-sidebar transition-[width] duration-300 ease-in-out",
+        "relative z-20 flex shrink-0 flex-col glass-sidebar",
         isSidebarOpen ? "w-60" : "w-16"
       )}
     >
-      <div className="pointer-events-none absolute inset-y-0 right-0 w-px bg-gradient-to-b from-transparent via-primary/45 to-transparent" />
+      <div
+        aria-hidden="true"
+        data-slot="app-sidebar-motion-edge"
+        className={cn(
+          "pointer-events-none absolute inset-y-0 left-0 z-20 w-px bg-gradient-to-b from-transparent via-primary/55 to-transparent transition-transform duration-200 ease-out will-change-transform motion-reduce:transition-none",
+          isSidebarOpen
+            ? "translate-x-[calc(15rem-1px)]"
+            : "translate-x-[calc(4rem-1px)]",
+        )}
+      />
       <div
         className={cn(
           "flex h-[76px] items-center border-b border-border/70 shrink-0",
@@ -245,7 +261,7 @@ export function Sidebar() {
             isSidebarOpen ? "text-left" : "justify-center"
           )}
         >
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md border border-primary/20 bg-white text-primary shadow-sm">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md border border-primary/20 bg-card text-primary shadow-sm">
             {logoFailed ? (
               <span className="text-sm font-bold">CM</span>
             ) : (
@@ -258,7 +274,7 @@ export function Sidebar() {
             )}
           </div>
           {isSidebarOpen && (
-            <div className="flex flex-col overflow-hidden animate-in fade-in duration-300">
+            <div className="flex flex-col overflow-hidden animate-in fade-in slide-in-from-left-1 duration-200 motion-reduce:animate-none">
               <span className="truncate text-sm font-semibold text-foreground">CodexManager</span>
               <span className="truncate font-mono text-[10px] uppercase text-primary/70">
                 Admin Console

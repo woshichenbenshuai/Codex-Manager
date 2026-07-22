@@ -19,17 +19,20 @@ CodexManager — локальный desktop + service-process менеджер �
 - Управление пулом аккаунтов: группы, теги, сортировка, заметки, распознавание и фильтрация банов.
 - Пакетный импорт/экспорт: мультифайловый импорт, рекурсивный импорт папок в desktop, экспорт по каждому аккаунту.
 - Отображение usage: окна 5 часов + 7 дней, single-window аккаунты и официальные дополнительные buckets (Code Review / Spark).
-- Platform key: создание, отключение, удаление, привязка модели, reasoning tier и service tier.
+- Авторизация аккаунта: OAuth через браузер и Device Code для `chatgpt.com`; для браузерного OAuth также доступен ручной разбор callback URL.
+- Platform key: создание, отключение, удаление, привязка модели, reasoning tier и service tier; администратор может привязать key к пользовательской группе аккаунтов, пересечь её с фильтром плана и выполнять ротацию только внутри разрешённого пула.
 - Aggregate API: создание/редактирование/проверка сторонних relay-upstream с поставщиками и приоритетами.
 - Plugin center: built-in, private и custom source режимы с задачами/логами и Rhai-интеграцией.
-- Локальный service + gateway: настройки bind/listen, upstream proxy, общий таймаут запроса, stream idle timeout, SSE keepalive и единая совместимая точка входа.
+- Управление Skills: сканирование `$CODEX_HOME/skills` на хосте service, поиск, установка ZIP, импорт существующего каталога и безопасное удаление пользовательских Skills; Skills в `.system` доступны только для чтения. Также можно импортировать GitHub-источники через нативный Marketplace Codex, просмотреть стандартные Skills и установить полный плагин.
+- Desktop-запуск проектов: можно сохранить локальные папки проектов и открыть Codex или выбор `resume` для текущего проекта в новом терминале с локальным профилем CodexManager; Web и Docker не получают доступ к папкам устройства.
+- Локальный service + gateway: настройки bind/listen, upstream proxy, общий таймаут запроса, stream idle timeout, SSE keepalive и единая совместимая точка входа. SSE keepalive включён по умолчанию; для отключения задайте `CODEXMANAGER_SSE_KEEPALIVE_ENABLED=0` (или `false`).
 - Генерация изображений: по умолчанию автоматически добавляется официальный Codex tool `image_generation` для `/v1/responses`, явно переданные tools проксируются без изменений, также поддерживаются совместимые endpoints `/v1/images/generations` и `/v1/images/edits`; модель image tool по умолчанию — `gpt-image-2`.
 
 ## Быстрый старт
 
 1. Запустите desktop-приложение и нажмите **Start Service**.
-2. Откройте **Account Management** и завершите авторизацию аккаунта.
-3. Если callback не распарсился автоматически, вставьте callback URL для ручного разбора.
+2. Откройте **Account Management** и выберите браузерную авторизацию или Device Code для `chatgpt.com`.
+3. Если браузерный callback не распарсился автоматически, вставьте callback URL для ручного разбора.
 4. Обновите usage и проверьте статус аккаунта.
 
 ## Скриншоты
@@ -64,17 +67,7 @@ CodexManager — локальный desktop + service-process менеджер �
       </a>
     </td>
     <td valign="top">
-      Спасибо <strong>AI夏末 AIXiamo</strong> за поддержку проекта! <strong>AIXiamo</strong> помогает разработчикам, использующим Codex CLI, Claude Code, Gemini CLI и похожие инструменты, с подключением AI-подписок и поддержкой после покупки: ChatGPT Pro 5x / 20x, ChatGPT Plus, Claude Max, Gemini Pro, Grok и другие. Поддерживаются Alipay и WeChat Pay, автоматическое пополнение, проверка заказов, инструкции и послепродажная помощь. Сервис подходит разработчикам, которым нужен стабильный доступ для AI-программирования, генерации кода, работы с документами и частых диалогов. Пользователи CodexManager могут приоритетно консультироваться по выбору Pro / Codex / Claude / Gemini тарифов. Посмотрите услуги на <a href="https://www.aixiamo.com/?utm_source=github&utm_medium=sponsor&utm_campaign=codex_manager">официальном сайте</a>.
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="180">
-      <a href="https://apikey.fun/register?aff=Codex-Manager">
-        <img src="../../assets/images/sponsors/APIKey.Fun.png" alt="APIKEY.FUN" width="120" />
-      </a>
-    </td>
-    <td valign="top">
-      Спасибо <strong>APIKEY.FUN</strong> за поддержку проекта! APIKEY.FUN — профессиональный enterprise-grade AI gateway, который предоставляет компаниям и индивидуальным разработчикам стабильный, эффективный и недорогой API-доступ к AI-моделям. Платформа поддерживает популярные модели Claude, OpenAI, Gemini и другие, а стоимость может начинаться от 7% официальной цены. Зарегистрируйтесь по <a href="https://apikey.fun/register?aff=Codex-Manager">эксклюзивной ссылке</a> проекта, чтобы получить специальную выгоду до <strong>постоянной скидки 5% на пополнения</strong>.
+      Спасибо <strong>AI夏末 AIXiamo</strong> за поддержку проекта! Рекомендуется пользователям в Китае без международной банковской карты, которым нужно пополнить ChatGPT, Claude, Codex или другие AI-сервисы. Поддерживаются Alipay / WeChat Pay, официальное пополнение и надёжная помощь после покупки. Посмотрите услуги на <a href="https://www.aixiamo.com/?utm_source=github&utm_medium=sponsor&utm_campaign=codex_manager">официальном сайте</a>.
     </td>
   </tr>
   <tr>

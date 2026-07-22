@@ -5,6 +5,7 @@ import {
   readGatewayManualAccountId,
   GatewayRouteStrategySettings,
   GatewayTransportSettings,
+  GatewayTransportSettingsPatch,
   GatewayUpstreamProxySettings,
   ServiceListenConfig,
   readGatewayConcurrencyRecommendation,
@@ -62,14 +63,14 @@ export const serviceClient = {
     );
     return normalizeStartupSnapshot(result);
   },
-  syncCodexModelsCache: (params: {
+  exportCodexModelsCache: (params: {
     userAgent: string;
     models: Array<Record<string, unknown>>;
     codexHome?: string | null;
     etag?: string | null;
     fetchedAt?: string;
   }) =>
-    invoke<unknown>("service_sync_codex_models_cache", {
+    invoke<unknown>("service_export_codex_models_cache", {
       userAgent: params.userAgent,
       models: params.models,
       codexHome: params.codexHome || null,
@@ -82,7 +83,7 @@ export const serviceClient = {
     return readGatewayTransportSettings(result);
   },
   async setGatewayTransport(
-    settings: Record<string, unknown>
+    settings: GatewayTransportSettingsPatch
   ): Promise<GatewayTransportSettings> {
     const result = await invoke<unknown>(
       "service_gateway_transport_set",

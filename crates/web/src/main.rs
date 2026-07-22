@@ -2,6 +2,7 @@
 
 mod auth;
 mod embedded_ui;
+mod gateway_websocket;
 mod service_gateway;
 mod ui_assets;
 
@@ -13,7 +14,7 @@ use std::time::Duration;
 use std::{net::Ipv4Addr, net::ToSocketAddrs};
 
 use axum::body::{to_bytes, Body, Bytes};
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -513,7 +514,12 @@ async fn async_main() {
     });
 
     let mut protected_app = Router::new()
-        .route("/api/rpc", post(service_gateway::rpc_proxy))
+        .route(
+            "/api/rpc",
+            post(service_gateway::rpc_proxy).layer(DefaultBodyLimit::max(
+                codexmanager_service::RPC_BODY_LIMIT_BYTES,
+            )),
+        )
         .route(
             "/api/events/usage-refresh",
             get(service_gateway::usage_refresh_events),
@@ -613,7 +619,10 @@ async fn async_main() {
 fn main() {
     codexmanager_service::portable::bootstrap_current_process();
     codexmanager_service::init_logging();
-    let _ = codexmanager_service::initialize_storage_if_needed();
+    if let Err(err) = codexmanager_service::initialize_storage_if_needed() {
+        eprintln!("database migration failed; refusing to start web service: {err}");
+        std::process::exit(1);
+    }
     codexmanager_service::sync_runtime_settings_from_storage();
 
     let runtime = tokio::runtime::Runtime::new().expect("create tokio runtime");

@@ -15,6 +15,7 @@ mod aggregate_api;
 mod apikey;
 mod app_settings;
 mod codex_profile;
+mod codex_skills;
 mod dashboard;
 mod gateway;
 mod model_groups;
@@ -22,6 +23,7 @@ mod quota;
 mod requestlog;
 mod service_config;
 mod startup;
+mod system;
 mod usage;
 
 /// 函数 `response`
@@ -185,12 +187,25 @@ const MEMBER_METHOD_ALLOWLIST: &[&str] = &[
     "account/chatgptAuthTokens/refresh",
     "account/chatgptAuthTokens/refreshAll",
     "account/list",
+    "account/proxy/clear",
+    "account/proxy/cancel-test",
+    "account/proxy/get",
+    "account/proxy/latency-test",
+    "account/proxy/set",
+    "account/proxy/speed-test",
+    "account/proxy/cloudflare-speed-test",
+    "account/proxy/speed-test-history",
+    "account/proxy/latency-test-history",
+    "account/proxy/diagnostics-history",
+    "account/proxy/test",
+    "account/proxy/test-job",
     "account/read",
     "account/update",
     "account/updateSorts",
     "account/usage/aggregate",
     "account/usage/list",
     "account/usage/read",
+    "account/usage/resetCredits",
     "account/usage/refresh",
     "account/warmup",
     "accountManager/password/change",
@@ -202,9 +217,8 @@ const MEMBER_METHOD_ALLOWLIST: &[&str] = &[
     "apikey/disable",
     "apikey/enable",
     "apikey/list",
-    "apikey/modelCatalogList",
-    "apikey/modelRouting",
-    "apikey/models",
+    "apikey/managedModelGetV2",
+    "apikey/managedModelListV2",
     "apikey/readSecret",
     "apikey/updateModel",
     "apikey/usageStats",
@@ -272,7 +286,7 @@ pub(crate) fn handle_request_with_actor(req: JsonRpcRequest, actor: RpcActor) ->
         return JsonRpcMessage::Response(response(&req, value_or_error::<()>(Err(err))));
     }
 
-    if let Some(resp) = account::try_handle(&req) {
+    if let Some(resp) = account::try_handle(&req, &actor) {
         return JsonRpcMessage::Response(resp);
     }
     if let Some(resp) = account_manager::try_handle(&req, &actor) {
@@ -290,6 +304,9 @@ pub(crate) fn handle_request_with_actor(req: JsonRpcRequest, actor: RpcActor) ->
     if let Some(resp) = codex_profile::try_handle(&req) {
         return JsonRpcMessage::Response(resp);
     }
+    if let Some(resp) = codex_skills::try_handle(&req) {
+        return JsonRpcMessage::Response(resp);
+    }
     if let Some(resp) = dashboard::try_handle(&req, &actor) {
         return JsonRpcMessage::Response(resp);
     }
@@ -297,6 +314,9 @@ pub(crate) fn handle_request_with_actor(req: JsonRpcRequest, actor: RpcActor) ->
         return JsonRpcMessage::Response(resp);
     }
     if let Some(resp) = service_config::try_handle(&req) {
+        return JsonRpcMessage::Response(resp);
+    }
+    if let Some(resp) = system::try_handle(&req) {
         return JsonRpcMessage::Response(resp);
     }
     if let Some(resp) = startup::try_handle(&req, &actor) {

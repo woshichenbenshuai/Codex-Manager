@@ -92,7 +92,12 @@ fn body_for_attempt_keeps_native_codex_retry_shape() {
         Some(true)
     );
     assert!(value.get("prompt_cache_key").is_none());
-    assert!(value.get("instructions").is_none());
+    assert_eq!(
+        value
+            .get("instructions")
+            .and_then(serde_json::Value::as_str),
+        Some("Follow the user's instructions.")
+    );
     assert!(value.get("tool_choice").is_none());
     assert!(value.get("include").is_none());
 }
@@ -134,7 +139,12 @@ fn body_for_attempt_injects_local_thread_anchor_without_compat_shape() {
         value.get("store").and_then(serde_json::Value::as_bool),
         Some(true)
     );
-    assert!(value.get("instructions").is_none());
+    assert_eq!(
+        value
+            .get("instructions")
+            .and_then(serde_json::Value::as_str),
+        Some("Follow the user's instructions.")
+    );
     assert!(value.get("tool_choice").is_none());
     assert!(value.get("include").is_none());
 }
@@ -192,6 +202,51 @@ fn compact_body_for_attempt_preserves_existing_prompt_cache_key() {
             .and_then(serde_json::Value::as_str),
         Some("client-thread")
     );
+}
+
+#[test]
+fn stripped_candidate_removes_encrypted_reasoning_items_without_leaving_invalid_shells() {
+    let mut state = CandidateExecutionState::default();
+    let body = Bytes::from_static(
+        br#"{
+            "model":"gpt-5.6-sol",
+            "input":[
+                {
+                    "type":"reasoning",
+                    "id":"rs_1",
+                    "summary":[],
+                    "encrypted_content":"reasoning-secret"
+                },
+                {
+                    "type":"agent_message",
+                    "content":[
+                        {"type":"input_text","text":"keep me"},
+                        {"type":"encrypted_content","encrypted_content":"nested-secret"}
+                    ]
+                },
+                {
+                    "type":"message",
+                    "role":"user",
+                    "content":[{"type":"input_text","text":"continue"}]
+                }
+            ]
+        }"#,
+    );
+    let mut setup = sample_setup();
+    setup.has_body_encrypted_content = true;
+
+    let actual = state.body_for_attempt("/v1/responses", &body, true, &setup, None, None);
+    let value: serde_json::Value =
+        serde_json::from_slice(actual.as_ref()).expect("parse stripped candidate body");
+    let input = value["input"].as_array().expect("input array");
+
+    assert_eq!(input.len(), 2, "reasoning item must be removed");
+    assert_eq!(input[0]["type"], "agent_message");
+    assert_eq!(
+        input[0]["content"],
+        serde_json::json!([{"type":"input_text","text":"keep me"}])
+    );
+    assert_eq!(input[1]["type"], "message");
 }
 
 #[test]

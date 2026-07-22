@@ -30,9 +30,9 @@ fn account_update_payload(
     preferred: Option<bool>,
     status: Option<String>,
     label: Option<String>,
+    group_name: Option<String>,
     note: Option<String>,
     tags: Option<String>,
-    model_slugs: Option<Vec<String>>,
     quota_capacity_primary_window_tokens: Option<i64>,
     quota_capacity_secondary_window_tokens: Option<i64>,
 ) -> Option<serde_json::Value> {
@@ -53,14 +53,17 @@ fn account_update_payload(
     if let Some(value) = label {
         params.insert("label".to_string(), serde_json::json!(value));
     }
+    if let Some(value) = group_name {
+        params.insert(
+            "groupName".to_string(),
+            serde_json::json!(value.trim()),
+        );
+    }
     if let Some(value) = note {
         params.insert("note".to_string(), serde_json::json!(value));
     }
     if let Some(value) = tags {
         params.insert("tags".to_string(), serde_json::json!(value));
-    }
-    if let Some(value) = model_slugs {
-        params.insert("modelSlugs".to_string(), serde_json::json!(value));
     }
     if let Some(value) = quota_capacity_primary_window_tokens {
         params.insert(
@@ -204,9 +207,9 @@ pub async fn service_account_update(
     preferred: Option<bool>,
     status: Option<String>,
     label: Option<String>,
+    group_name: Option<String>,
     note: Option<String>,
     tags: Option<String>,
-    model_slugs: Option<Vec<String>>,
     quota_capacity_primary_window_tokens: Option<i64>,
     quota_capacity_secondary_window_tokens: Option<i64>,
 ) -> Result<serde_json::Value, String> {
@@ -219,9 +222,9 @@ pub async fn service_account_update(
             preferred,
             status,
             label,
+            group_name,
             note,
             tags,
-            model_slugs,
             quota_capacity_primary_window_tokens,
             quota_capacity_secondary_window_tokens,
         ),
@@ -272,6 +275,172 @@ pub async fn service_account_warmup(
     });
     rpc_call_in_background("account/warmup", addr, Some(params)).await
 }
+
+#[tauri::command]
+pub async fn service_account_proxy_get(
+    addr: Option<String>,
+    account_id: String,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({ "accountId": account_id });
+    rpc_call_in_background("account/proxy/get", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_account_proxy_set(
+    addr: Option<String>,
+    account_id: String,
+    enabled: bool,
+    source: Option<String>,
+    proxy_profile_id: Option<String>,
+    proxy_url: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "accountId": account_id,
+        "enabled": enabled,
+        "source": source,
+        "proxyProfileId": proxy_profile_id,
+        "proxyUrl": proxy_url,
+    });
+    rpc_call_in_background("account/proxy/set", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_account_proxy_clear(
+    addr: Option<String>,
+    account_id: String,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({ "accountId": account_id });
+    rpc_call_in_background("account/proxy/clear", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_account_proxy_test(
+    addr: Option<String>,
+    account_id: String,
+    enabled: Option<bool>,
+    source: Option<String>,
+    proxy_profile_id: Option<String>,
+    proxy_url: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "accountId": account_id,
+        "enabled": enabled,
+        "source": source,
+        "proxyProfileId": proxy_profile_id,
+        "proxyUrl": proxy_url,
+    });
+    rpc_call_in_background("account/proxy/test", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_account_proxy_latency_test(
+    addr: Option<String>,
+    account_id: String,
+    preset_id: Option<String>,
+    custom_url: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "accountId": account_id,
+        "presetId": preset_id,
+        "customUrl": custom_url,
+    });
+    rpc_call_in_background("account/proxy/latency-test", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_account_proxy_speed_test(
+    addr: Option<String>,
+    account_id: String,
+    provider_id: Option<String>,
+    file_size_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "accountId": account_id,
+        "providerId": provider_id,
+        "fileSizeId": file_size_id,
+    });
+    rpc_call_in_background("account/proxy/speed-test", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_account_proxy_cloudflare_speed_test(
+    addr: Option<String>,
+    account_id: String,
+    config: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "accountId": account_id,
+        "config": config,
+    });
+    rpc_call_in_background("account/proxy/cloudflare-speed-test", addr, Some(params)).await
+}
+
+
+#[tauri::command]
+pub async fn service_account_proxy_test_job(
+    addr: Option<String>,
+    account_id: String,
+    job_id: String,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "accountId": account_id,
+        "jobId": job_id,
+    });
+    rpc_call_in_background("account/proxy/test-job", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_account_proxy_cancel_test(
+    addr: Option<String>,
+    account_id: String,
+    job_id: String,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "accountId": account_id,
+        "jobId": job_id,
+    });
+    rpc_call_in_background("account/proxy/cancel-test", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_account_proxy_speed_test_history(
+    addr: Option<String>,
+    account_id: String,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "accountId": account_id,
+        "limit": limit,
+    });
+    rpc_call_in_background("account/proxy/speed-test-history", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_account_proxy_latency_test_history(
+    addr: Option<String>,
+    account_id: String,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "accountId": account_id,
+        "limit": limit,
+    });
+    rpc_call_in_background("account/proxy/latency-test-history", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_account_proxy_diagnostics_history(
+    addr: Option<String>,
+    account_id: String,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "accountId": account_id,
+        "limit": limit,
+    });
+    rpc_call_in_background("account/proxy/diagnostics-history", addr, Some(params)).await
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -395,5 +564,38 @@ mod tests {
             "preferred": true
         });
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn account_update_payload_distinguishes_omitted_and_cleared_group_name() {
+        let omitted = account_update_payload(
+            "acc-1".to_string(),
+            None,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("omitted payload");
+        assert!(omitted.get("groupName").is_none());
+
+        let cleared = account_update_payload(
+            "acc-1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Some("   ".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("cleared payload");
+        assert_eq!(cleared.get("groupName").and_then(|value| value.as_str()), Some(""));
     }
 }

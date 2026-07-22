@@ -51,12 +51,55 @@ const SETTINGS_SNAPSHOT = {
   appearancePreset: "classic",
 };
 
+const USAGE_DETAILS = {
+  accountId: "acct-plus-1",
+  availabilityStatus: "available",
+  usedPercent: 23,
+  windowMinutes: 300,
+  resetsAt: 1_900_000_000,
+  secondaryUsedPercent: 23,
+  secondaryWindowMinutes: 10_080,
+  secondaryResetsAt: 1_900_604_800,
+  creditsJson: JSON.stringify({
+    _codexmanager_extra_rate_limits: [
+      {
+        limit_name: "Spark",
+        primary_window: {
+          used_percent: 0,
+          limit_window_seconds: 18_000,
+          reset_at: 1_900_010_000,
+        },
+        secondary_window: {
+          used_percent: 10,
+          limit_window_seconds: 604_800,
+          reset_at: 1_900_614_800,
+        },
+      },
+      {
+        limit_name: "Code Review",
+        primary_window: {
+          used_percent: 5,
+          limit_window_seconds: 18_000,
+          reset_at: 1_900_020_000,
+        },
+        secondary_window: {
+          used_percent: 15,
+          limit_window_seconds: 604_800,
+          reset_at: 1_900_624_800,
+        },
+      },
+    ],
+  }),
+  capturedAt: 1_900_000_000,
+};
+
 test("accounts toolbar shows warmup button and tooltip", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
   const usageRefreshPayloads: Record<string, unknown>[] = [];
   const rtRefreshPayloads: Record<string, unknown>[] = [];
   let refreshAllRtCount = 0;
 
-  await page.route("**/api/runtime", async (route) => {
+  await page.route("**/api/runtime**", async (route) => {
     await route.fulfill({
       contentType: "application/json; charset=utf-8",
       body: JSON.stringify({
@@ -72,7 +115,7 @@ test("accounts toolbar shows warmup button and tooltip", async ({ page }) => {
     });
   });
 
-  await page.route("**/api/rpc", async (route) => {
+  await page.route("**/api/rpc**", async (route) => {
     const payload = route.request().postDataJSON();
     const method = typeof payload?.method === "string" ? payload.method : "";
     const id = payload?.id ?? 1;
@@ -100,6 +143,16 @@ test("accounts toolbar shows warmup button and tooltip", async ({ page }) => {
       });
       return;
     }
+    if (method === "accountManager/session/current") {
+      await ok({
+        mode: "none",
+        currentUser: null,
+        role: "system_admin",
+        permissions: ["system:admin"],
+        distributionEnabled: false,
+      });
+      return;
+    }
     if (method === "account/list") {
       await ok({
         items: [
@@ -119,7 +172,7 @@ test("accounts toolbar shows warmup button and tooltip", async ({ page }) => {
       return;
     }
     if (method === "account/usage/list") {
-      await ok([]);
+      await ok([USAGE_DETAILS]);
       return;
     }
     if (method === "account/usage/refresh") {
@@ -181,7 +234,7 @@ test("accounts toolbar shows warmup button and tooltip", async ({ page }) => {
 
   await page.goto("/accounts/");
 
-  await expect(page.getByRole("heading", { name: "账号管理" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "OpenAI 账号池" })).toBeVisible();
 
   const warmupButton = page.getByRole("button", { name: "预热" });
   await expect(warmupButton).toBeVisible();
@@ -194,6 +247,31 @@ test("accounts toolbar shows warmup button and tooltip", async ({ page }) => {
 
   await page.getByRole("button", { name: "用量详情" }).click();
   const usageDialog = page.getByRole("dialog", { name: "用量详情" });
+  await expect(usageDialog.getByRole("button", { name: "刷新 AT/RT" })).toBeVisible();
+
+  const usageScrollBody = usageDialog.locator(
+    '[data-slot="usage-modal-scroll-body"]',
+  );
+  await expect(usageScrollBody).toHaveCSS("overflow-y", "auto");
+  await expect(usageDialog.getByText(/Code Review 额度/).last()).toBeAttached();
+  const scrollMetrics = await usageScrollBody.evaluate((element) => {
+    const styles = window.getComputedStyle(element);
+    return {
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      scrollbarGutter: styles.scrollbarGutter,
+    };
+  });
+  expect(scrollMetrics.scrollHeight).toBeGreaterThan(scrollMetrics.clientHeight);
+  expect(scrollMetrics.scrollbarGutter).toContain("stable");
+
+  await usageScrollBody.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect
+    .poll(() => usageScrollBody.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(0);
+  await expect(usageDialog.getByText(/Code Review 额度/).last()).toBeInViewport();
   await expect(usageDialog.getByRole("button", { name: "刷新 AT/RT" })).toBeVisible();
 
   await usageDialog.getByRole("button", { name: "立即刷新" }).click();

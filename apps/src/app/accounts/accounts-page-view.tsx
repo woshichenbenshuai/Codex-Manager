@@ -12,6 +12,7 @@ import {
   KeyRound,
   Loader2,
   MoreVertical,
+  Network,
   PencilLine,
   Pin,
   Plus,
@@ -21,6 +22,7 @@ import {
   Zap,
 } from "lucide-react";
 import { AddAccountModal } from "@/components/modals/add-account-modal";
+import { AccountResetCreditControl } from "@/components/account-reset-credit-control";
 import { ConfirmDialog } from "@/components/modals/confirm-dialog";
 import UsageModal from "@/components/modals/usage-modal";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -56,6 +58,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -73,7 +76,14 @@ import {
 import { useI18n } from "@/lib/i18n/provider";
 import { cn } from "@/lib/utils";
 import { formatCompactNumber } from "@/lib/utils/usage";
-import type { Account } from "@/types";
+import type {
+  AccountProxySettings,
+  AccountProxySource,
+} from "@/lib/api/account-client";
+import type { Account, ProxyProfile } from "@/types";
+import { AccountProxyCell } from "@/components/accounts/account-proxy-cell";
+import { AccountProxyGeoStatusGrid } from "@/components/accounts/account-proxy-status-grid";
+import { AccountProxyStatusHeader } from "@/components/accounts/account-proxy-status-header";
 import {
   type AccountEditorState,
   type AccountExportMode,
@@ -87,7 +97,6 @@ import {
   formatAccountExportModeLabel,
   formatAccountPlanLabel,
   formatAccountPlanValueLabel,
-  fitLongTextClassName,
   formatPlanFilterLabel,
   formatStatusFilterLabel,
   getAccountStatusAction,
@@ -135,15 +144,23 @@ export interface AccountsPageViewProps {
   cleanupDialogOpen: boolean;
   cleanupStatusDraft: string[];
   cleanupStatusOptions: CleanupStatusOption[];
+  proxyDialogAccount: Account | null;
+  proxySettings: AccountProxySettings | null;
+  proxyProfiles: ProxyProfile[];
+  isProxySettingsLoading: boolean;
+  proxyEnabledDraft: boolean;
+  proxySourceDraft: AccountProxySource;
+  proxyProfileIdDraft: string;
+  proxyUrlDraft: string;
   selectedAccount: Account | null;
   accountEditorState: AccountEditorState | null;
   deleteDialogState: DeleteDialogState;
   currentEditingAccount: Account | null;
   labelDraft: string;
+  groupNameDraft: string;
   tagsDraft: string;
   noteDraft: string;
   sortDraft: string;
-  modelWhitelistDraft: string;
   quotaPrimaryDraft: string;
   quotaSecondaryDraft: string;
   isRefreshingAllAccounts: boolean;
@@ -155,6 +172,9 @@ export interface AccountsPageViewProps {
   isDeletingMany: boolean;
   isCleaningAccountsByStatus: boolean;
   isUpdatingPreferred: boolean;
+  isSavingAccountProxy: boolean;
+  isClearingAccountProxy: boolean;
+  isTestingAccountProxy: boolean;
   isReorderingAccounts: boolean;
   isUpdatingProfileAccountId: string | null;
   isUpdatingStatusAccountId: string | null;
@@ -168,12 +188,16 @@ export interface AccountsPageViewProps {
   setExportModeDraft: Dispatch<SetStateAction<AccountExportMode>>;
   setDeleteDialogState: Dispatch<SetStateAction<DeleteDialogState>>;
   setCleanupDialogOpen: Dispatch<SetStateAction<boolean>>;
+  setProxyEnabledDraft: Dispatch<SetStateAction<boolean>>;
+  setProxySourceDraft: Dispatch<SetStateAction<AccountProxySource>>;
+  setProxyProfileIdDraft: Dispatch<SetStateAction<string>>;
+  setProxyUrlDraft: Dispatch<SetStateAction<string>>;
   setAccountEditorState: Dispatch<SetStateAction<AccountEditorState | null>>;
   setLabelDraft: Dispatch<SetStateAction<string>>;
+  setGroupNameDraft: Dispatch<SetStateAction<string>>;
   setTagsDraft: Dispatch<SetStateAction<string>>;
   setNoteDraft: Dispatch<SetStateAction<string>>;
   setSortDraft: Dispatch<SetStateAction<string>>;
-  setModelWhitelistDraft: Dispatch<SetStateAction<string>>;
   setQuotaPrimaryDraft: Dispatch<SetStateAction<string>>;
   setQuotaSecondaryDraft: Dispatch<SetStateAction<string>>;
   setPage: Dispatch<SetStateAction<number>>;
@@ -193,6 +217,11 @@ export interface AccountsPageViewProps {
   openExportDialog: () => void;
   handleConfirmExport: () => Promise<void>;
   handleDeleteSingle: (account: Account) => void;
+  openProxyDialog: (account: Account) => void;
+  handleProxyDialogOpenChange: (open: boolean) => void;
+  handleSaveProxySettings: () => Promise<void>;
+  handleClearProxySettings: () => Promise<void>;
+  handleTestProxySettings: () => Promise<void>;
   openAccountEditor: (account: Account) => void;
   handleMoveAccount: (
     account: Account,
@@ -244,15 +273,21 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     cleanupDialogOpen,
     cleanupStatusDraft,
     cleanupStatusOptions,
+    proxyDialogAccount,
+    proxySettings,
+    proxyProfiles,
+    isProxySettingsLoading,
+    proxyEnabledDraft,
+    proxyProfileIdDraft,
     selectedAccount,
     accountEditorState,
     deleteDialogState,
     currentEditingAccount,
     labelDraft,
+    groupNameDraft,
     tagsDraft,
     noteDraft,
     sortDraft,
-    modelWhitelistDraft,
     quotaPrimaryDraft,
     quotaSecondaryDraft,
     isRefreshingAllAccounts,
@@ -264,6 +299,9 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     isDeletingMany,
     isCleaningAccountsByStatus,
     isUpdatingPreferred,
+    isSavingAccountProxy,
+    isClearingAccountProxy,
+    isTestingAccountProxy,
     isReorderingAccounts,
     isUpdatingProfileAccountId,
     isUpdatingStatusAccountId,
@@ -277,12 +315,14 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     setExportModeDraft,
     setDeleteDialogState,
     setCleanupDialogOpen,
+    setProxyEnabledDraft,
+    setProxyProfileIdDraft,
     setAccountEditorState,
     setLabelDraft,
+    setGroupNameDraft,
     setTagsDraft,
     setNoteDraft,
     setSortDraft,
-    setModelWhitelistDraft,
     setQuotaPrimaryDraft,
     setQuotaSecondaryDraft,
     setPage,
@@ -302,6 +342,11 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     openExportDialog,
     handleConfirmExport,
     handleDeleteSingle,
+    openProxyDialog,
+    handleProxyDialogOpenChange,
+    handleSaveProxySettings,
+    handleClearProxySettings,
+    handleTestProxySettings,
     openAccountEditor,
     handleMoveAccount,
     handleApplyAccountSizeSort,
@@ -318,6 +363,13 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     setPreferredAccount,
     toggleAccountStatus,
   } = props;
+
+  const accountProxyBusy =
+    isProxySettingsLoading || isSavingAccountProxy || isClearingAccountProxy;
+  const selectedProxyProfile =
+    proxyProfiles.find((profile) => profile.id === proxyProfileIdDraft) || null;
+  const needsMissingProxyProfileOption =
+    Boolean(proxyProfileIdDraft) && !selectedProxyProfile;
   const cleanupSelectedCount = cleanupStatusOptions.reduce(
     (total, option) =>
       cleanupStatusDraft.includes(option.id) ? total + option.count : total,
@@ -785,6 +837,7 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                   {t("额度详情")}
                 </TableHead>
                 <TableHead className="w-[132px]">{t("顺序")}</TableHead>
+                <TableHead className="min-w-[180px]">{t("账号代理")}</TableHead>
                 <TableHead className="w-[112px]">{t("状态")}</TableHead>
                 <TableHead className="table-sticky-action-head w-[112px] text-center">
                   {t("操作")}
@@ -812,6 +865,9 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                       <Skeleton className="h-4 w-10" />
                     </TableCell>
                     <TableCell>
+                      <Skeleton className="h-8 w-28" />
+                    </TableCell>
+                    <TableCell>
                       <Skeleton className="h-6 w-16 rounded-full" />
                     </TableCell>
                     <TableCell className="table-sticky-action-cell">
@@ -821,7 +877,7 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                 ))
               ) : visibleAccounts.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="h-48 text-center">
+                  <TableCell colSpan={7} className="h-48 text-center">
                     <div className="flex flex-col items-center justify-center gap-2 text-muted-foreground">
                       <Search className="h-8 w-8 opacity-20" />
                       <p>{t("未找到符合条件的账号")}</p>
@@ -833,14 +889,6 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                   const quotaItems = buildQuotaSummaryItems(account, t);
                   const statusAction = getAccountStatusAction(account, t);
                   const StatusActionIcon = statusAction.icon;
-                  const modelPoolText = account.modelSlugs.length
-                    ? account.modelSlugs.slice(0, 2).join(", ")
-                    : t("全部 API 模型");
-                  const modelPoolDisplayText = `${t("模型池")}: ${modelPoolText}${
-                    account.modelSlugs.length > 2
-                      ? ` +${account.modelSlugs.length - 2}`
-                      : ""
-                  }`;
                   const isRefreshingCurrentAccount =
                     isRefreshingAccountId === account.id;
                   const isRefreshingCurrentRt =
@@ -868,19 +916,9 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                       <TableCell>
                         <QuotaOverviewCell items={quotaItems} />
                         <div className="mt-1.5 flex flex-wrap gap-1.5 text-[10px] text-muted-foreground">
-                          <span
-                            className={fitLongTextClassName(
-                              modelPoolDisplayText,
-                              "max-w-full rounded-full border border-border/50 bg-background/40 px-2 py-0.5 break-all [overflow-wrap:anywhere]",
-                              "text-[10px]",
-                            )}
-                            title={modelPoolDisplayText}
-                          >
-                            {modelPoolDisplayText}
-                          </span>
                           {account.quotaCapacityPrimaryWindowTokens ||
                           account.quotaCapacitySecondaryWindowTokens ? (
-                            <span className="max-w-full rounded-full border border-border/50 bg-background/40 px-2 py-0.5 break-words [overflow-wrap:anywhere]">
+                            <span className="inline-flex min-h-5 max-w-full items-center rounded-full border border-border/50 bg-background/40 px-2 py-0.5 leading-none break-words [overflow-wrap:anywhere]">
                               {t("容量覆盖")}:{" "}
                               {account.quotaCapacityPrimaryWindowTokens
                                 ? `5h ${formatCompactNumber(
@@ -901,10 +939,14 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                                 : "7d --"}
                             </span>
                           ) : (
-                            <span className="max-w-full rounded-full border border-border/50 bg-background/40 px-2 py-0.5 break-words [overflow-wrap:anywhere]">
+                            <span className="inline-flex min-h-5 max-w-full items-center rounded-full border border-border/50 bg-background/40 px-2 py-0.5 leading-none break-words [overflow-wrap:anywhere]">
                               {t("未设置账号容量覆盖")}
                             </span>
                           )}
+                          <AccountResetCreditControl
+                            account={account}
+                            disabled={!isServiceReady}
+                          />
                         </div>
                       </TableCell>
                       <TableCell>
@@ -959,6 +1001,9 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                             <PencilLine className="h-3.5 w-3.5" />
                           </Button>
                         </div>
+                      </TableCell>
+                      <TableCell>
+                        <AccountProxyCell account={account} />
                       </TableCell>
                       <TableCell>
                         <AccountStatusCell account={account} />
@@ -1039,6 +1084,14 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                               >
                                 <Pin className="h-4 w-4" />
                                 {account.preferred ? t("取消优先") : t("设为优先")}
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                className="gap-2"
+                                disabled={!isServiceReady}
+                                onClick={() => void openProxyDialog(account)}
+                              >
+                                <Network className="h-4 w-4" />
+                                {t("账号代理")}
                               </DropdownMenuItem>
                               <DropdownMenuItem
                                 className="gap-2"
@@ -1158,6 +1211,171 @@ export function AccountsPageView(props: AccountsPageViewProps) {
           !!selectedAccount && isRefreshingRtAccountId === selectedAccount.id
         }
       />
+      <Dialog
+        open={isPageActive && Boolean(proxyDialogAccount)}
+        onOpenChange={handleProxyDialogOpenChange}
+      >
+        <DialogContent className="glass-card max-h-[calc(100vh-2rem)] overflow-hidden p-0 sm:max-w-[672px]">
+          <DialogHeader className="px-6 pt-6">
+            <DialogTitle>{t("账号代理")}</DialogTitle>
+            <DialogDescription>
+              {proxyDialogAccount?.name || t("为当前账号选择独立代理配置")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid max-h-[calc(100vh-13rem)] gap-4 overflow-y-auto px-6 py-4">
+            <div className="flex items-center justify-between gap-4 rounded-xl border border-border/70 bg-muted/20 px-3 py-3">
+              <div className="min-w-0">
+                <Label htmlFor="account-proxy-enabled" className="text-sm">
+                  {t("启用账号代理")}
+                </Label>
+                <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                  {t("启用后，该账号对 OpenAI API 的请求将通过指定的代理发送。")}
+                </p>
+              </div>
+              <Switch
+                id="account-proxy-enabled"
+                checked={proxyEnabledDraft}
+                disabled={accountProxyBusy}
+                onCheckedChange={(value) =>
+                  setProxyEnabledDraft(Boolean(value))
+                }
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="account-proxy-profile">{t("代理配置")}</Label>
+              <Select
+                value={proxyProfileIdDraft || "__empty__"}
+                disabled={accountProxyBusy || proxyProfiles.length === 0}
+                onValueChange={(value) =>
+                  setProxyProfileIdDraft(
+                    !value || value === "__empty__" ? "" : value,
+                  )
+                }
+              >
+                <SelectTrigger
+                  id="account-proxy-profile"
+                  className="rounded-xl bg-card/50"
+                >
+                  <SelectValue
+                    placeholder={
+                      proxyProfiles.length === 0
+                        ? t("暂无可用代理配置")
+                        : t("选择代理配置")
+                    }
+                  >
+                    {proxyProfileIdDraft
+                      ? selectedProxyProfile?.name ||
+                        proxySettings?.proxyProfileName ||
+                        proxyProfileIdDraft
+                      : undefined}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {proxyProfiles.length === 0 ? (
+                    <SelectItem value="__empty__" disabled>
+                      {t("暂无可用代理配置")}
+                    </SelectItem>
+                  ) : null}
+                  {needsMissingProxyProfileOption ? (
+                    <SelectItem value={proxyProfileIdDraft} disabled>
+                      {proxySettings?.proxyProfileName || t("已删除的代理配置")}
+                    </SelectItem>
+                  ) : null}
+                  {proxyProfiles.map((profile) => (
+                    <SelectItem key={profile.id} value={profile.id}>
+                      {profile.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <div className="rounded-xl border border-border/60 bg-muted/20 px-3 py-3 text-sm leading-5 text-muted-foreground">
+                <div className="break-all">
+                  {selectedProxyProfile?.proxyUrlRedacted ||
+                    proxySettings?.proxyUrlRedacted ||
+                    t("未绑定代理端点")}
+                </div>
+                <div className="mt-1">
+                  {selectedProxyProfile
+                    ? selectedProxyProfile.enabled
+                      ? t("当前配置已启用")
+                      : t("当前配置已禁用，保存后该账号会 fail-closed")
+                    : t("未选择代理配置")}
+                </div>
+              </div>
+            </div>
+
+            {isProxySettingsLoading ? (
+              <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                {t("加载中...")}
+              </div>
+            ) : (
+              <div className="rounded-xl bg-muted/20 px-4 py-4 text-xs">
+                <AccountProxyStatusHeader
+                  status={proxySettings?.status}
+                  latencyMs={proxySettings?.latencyMs}
+                  lastTestedAt={proxySettings?.lastCheckAt}
+                  t={t}
+                />
+                <AccountProxyGeoStatusGrid geo={proxySettings} t={t} />
+              </div>
+            )}
+
+            {proxySettings?.lastError ? (
+              <div className="rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-3 text-xs">
+                <div className="text-muted-foreground">{t("错误")}</div>
+                <div className="mt-1 break-words font-mono text-destructive [overflow-wrap:anywhere]">
+                  {proxySettings.lastError}
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter className="mx-0 mb-0 gap-2 rounded-b-xl border-t bg-muted/40 px-6 py-4 sm:gap-2">
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={accountProxyBusy || isTestingAccountProxy}
+              onClick={() => void handleClearProxySettings()}
+            >
+              {isClearingAccountProxy ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              {t("清除")}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={accountProxyBusy || isTestingAccountProxy}
+              onClick={() => void handleTestProxySettings()}
+            >
+              <RefreshCw
+                className={cn(
+                  "mr-2 h-4 w-4",
+                  isTestingAccountProxy && "animate-spin",
+                )}
+              />
+              {isTestingAccountProxy ? t("测试中...") : t("测试")}
+            </Button>
+            <DialogClose
+              className={buttonVariants({ variant: "outline" })}
+              disabled={accountProxyBusy || isTestingAccountProxy}
+            >
+              {t("关闭")}
+            </DialogClose>
+            <Button
+              type="button"
+              disabled={accountProxyBusy || isTestingAccountProxy}
+              onClick={() => void handleSaveProxySettings()}
+            >
+              {isSavingAccountProxy ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              {t("保存")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <ConfirmDialog
         open={isPageActive && Boolean(deleteDialogState)}
         onOpenChange={(open) => {
@@ -1192,7 +1410,7 @@ export function AccountsPageView(props: AccountsPageViewProps) {
             <DialogTitle>{t("编辑账号信息")}</DialogTitle>
             <DialogDescription>
               {accountEditorState
-                ? `${t("修改")} ${accountEditorState.accountName} ${t("的名称、标签、备注、排序与额度池配置。")}`
+                ? `${t("修改")} ${accountEditorState.accountName} ${t("的名称、分组、标签、备注、排序与额度池配置。")}`
                 : t("修改账号的基础资料。")}
             </DialogDescription>
           </DialogHeader>
@@ -1208,6 +1426,16 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                 />
               </div>
               <div className="grid gap-2">
+                <Label htmlFor="account-group-input">{t("账号分组")}</Label>
+                <Input
+                  id="account-group-input"
+                  value={groupNameDraft}
+                  disabled={Boolean(isUpdatingProfileAccountId)}
+                  onChange={(event) => setGroupNameDraft(event.target.value)}
+                  placeholder={t("例如：团队 A")}
+                />
+              </div>
+              <div className="grid gap-2 sm:col-span-2">
                 <Label htmlFor="account-tags-input">
                   {t("标签（逗号分隔）")}
                 </Label>
@@ -1254,21 +1482,6 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                 <span>{t("值越小越靠前")}</span>
                 <span>{t("仅修改当前账号")}</span>
               </div>
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="account-model-whitelist-input">
-                {t("额度模型白名单")}
-              </Label>
-              <Input
-                id="account-model-whitelist-input"
-                value={modelWhitelistDraft}
-                disabled={Boolean(isUpdatingProfileAccountId)}
-                onChange={(event) => setModelWhitelistDraft(event.target.value)}
-                placeholder="gpt-5.4, gpt-5.4-mini"
-              />
-              <p className="text-[11px] leading-4 text-muted-foreground">
-                {t("仅用于额度池统计归属；留空表示该账号对全部 API 可用模型生效。")}
-              </p>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="grid gap-2">

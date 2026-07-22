@@ -2,11 +2,11 @@ use super::{
     build_socks5_connect_request, build_upstream_websocket_request, infer_ws_terminal_status,
     inspect_ws_terminal_event, is_previous_response_not_found_terminal, merge_client_metadata,
     parse_websocket_target, parse_ws_usage, proxy_basic_auth_header, rewrite_client_frame,
-    strip_previous_response_id_from_ws_text, WsRequestContext,
+    strip_previous_response_id_from_ws_text, WsRequestContext, WsUpstreamAuthorization,
 };
 use axum::http::{HeaderMap, HeaderValue};
-use codexmanager_core::storage::{Account, ApiKey};
-use serde_json::json;
+use codexmanager_core::storage::{now_ts, Account, ApiKey, Storage, Token};
+use serde_json::{json, Value};
 
 fn sample_api_key() -> ApiKey {
     ApiKey {
@@ -44,6 +44,93 @@ fn sample_account() -> Account {
         created_at: 0,
         updated_at: 0,
     }
+}
+
+fn websocket_bearer_authorization(value: &str) -> WsUpstreamAuthorization {
+    WsUpstreamAuthorization {
+        value: value.to_string(),
+        task_id: None,
+        uses_agent_identity: false,
+        is_fedramp: false,
+    }
+}
+
+fn insert_ws_candidate(storage: &Storage, id: &str, sort: i64, group_name: &str) {
+    let now = now_ts();
+    storage
+        .insert_account(&Account {
+            id: id.to_string(),
+            label: id.to_string(),
+            issuer: "issuer".to_string(),
+            chatgpt_account_id: None,
+            workspace_id: None,
+            group_name: Some(group_name.to_string()),
+            sort,
+            status: "active".to_string(),
+            created_at: now,
+            updated_at: now,
+        })
+        .expect("insert websocket account");
+    storage
+        .insert_token(&Token {
+            account_id: id.to_string(),
+            id_token: "header.payload.sig".to_string(),
+            access_token: "header.payload.sig".to_string(),
+            refresh_token: "refresh".to_string(),
+            api_key_access_token: None,
+            last_refresh: now,
+        })
+        .expect("insert websocket token");
+    crate::gateway::invalidate_candidate_cache();
+}
+
+#[test]
+fn websocket_initial_and_terminal_failover_candidates_stay_in_key_group() {
+    let _guard = crate::test_env_guard();
+    let storage = Storage::open_in_memory().expect("open");
+    storage.init().expect("init");
+    let mut api_key = sample_api_key();
+    api_key.id = "gk-ws-group".to_string();
+    api_key.key_hash = "hash-ws-group".to_string();
+    storage.insert_api_key(&api_key).expect("insert api key");
+    storage
+        .update_api_key_account_group_filter(&api_key.id, Some("team-a"))
+        .expect("set api key group filter");
+    insert_ws_candidate(&storage, "acc-a-first", 0, "team-a");
+    insert_ws_candidate(&storage, "acc-b-forbidden", 1, "team-b");
+    insert_ws_candidate(&storage, "acc-a-failover", 2, "team-a");
+
+    let initial = crate::gateway::gateway_collect_routed_candidates_with_log_source(
+        &storage,
+        &api_key.id,
+        Some("gpt-5.4"),
+    )
+    .expect("collect initial websocket candidates");
+    let mut initial_ids = initial
+        .candidates
+        .iter()
+        .map(|(account, _)| account.id.as_str())
+        .collect::<Vec<_>>();
+    initial_ids.sort_unstable();
+    assert_eq!(initial_ids, vec!["acc-a-failover", "acc-a-first"]);
+
+    let current_account_id = initial.candidates[0].0.id.clone();
+    let failover = crate::gateway::gateway_collect_routed_candidates_with_log_source(
+        &storage,
+        &api_key.id,
+        Some("gpt-5.4"),
+    )
+    .expect("collect failover websocket candidates");
+    let replacement = failover
+        .candidates
+        .iter()
+        .find(|(account, _)| account.id != current_account_id)
+        .expect("same-group failover candidate");
+    assert_ne!(replacement.0.id, "acc-b-forbidden");
+    assert!(failover
+        .candidates
+        .iter()
+        .all(|(account, _)| account.group_name.as_deref() == Some("team-a")));
 }
 
 fn sample_incoming_headers(
@@ -126,6 +213,18 @@ fn websocket_connect_error_preserves_http_unauthorized_status() {
 
     assert!(err.is_unauthorized());
     assert_eq!(err.status_code, Some(401));
+}
+
+#[test]
+fn websocket_connect_error_detects_invalid_agent_identity_task_body() {
+    let mut response =
+        super::WsClientResponse::new(Some(br#"{"error":{"code":"task_expired"}}"#.to_vec()));
+    *response.status_mut() = axum::http::StatusCode::UNAUTHORIZED;
+    let err = super::WsConnectError::from_tungstenite(tokio_tungstenite::tungstenite::Error::Http(
+        Box::new(response),
+    ));
+
+    assert!(err.is_agent_identity_task_invalid());
 }
 
 #[test]
@@ -229,11 +328,12 @@ fn upstream_websocket_request_forwards_oai_attestation_header() {
         prefer_raw_errors: false,
     };
     let account = sample_account();
+    let authorization = websocket_bearer_authorization("bearer-ws");
 
     let request = build_upstream_websocket_request(
         "wss://chatgpt.com/backend-api/codex/v1/responses",
         &account,
-        "bearer-ws",
+        &authorization,
         &context,
     )
     .unwrap_or_else(|err| panic!("build upstream websocket request failed: {}", err.message));
@@ -251,6 +351,54 @@ fn upstream_websocket_request_forwards_oai_attestation_header() {
             .get("openai-beta")
             .and_then(|value| value.to_str().ok()),
         Some(super::RESPONSES_WEBSOCKETS_BETA_HEADER_VALUE)
+    );
+    assert_eq!(
+        request
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer bearer-ws")
+    );
+    assert!(request.headers().get("x-openai-fedramp").is_none());
+}
+
+#[test]
+fn upstream_websocket_request_preserves_agent_assertion_and_fedramp() {
+    let context = WsRequestContext {
+        api_key: sample_api_key(),
+        incoming_headers: crate::gateway::IncomingHeaderSnapshot::default(),
+        prompt_cache_key: None,
+        effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
+        prefer_raw_errors: false,
+    };
+    let authorization = WsUpstreamAuthorization {
+        value: "AgentAssertion encoded-envelope".to_string(),
+        task_id: Some("task-1".to_string()),
+        uses_agent_identity: true,
+        is_fedramp: true,
+    };
+
+    let request = build_upstream_websocket_request(
+        "wss://chatgpt.com/backend-api/codex/v1/responses",
+        &sample_account(),
+        &authorization,
+        &context,
+    )
+    .unwrap_or_else(|err| panic!("build upstream websocket request failed: {}", err.message));
+
+    assert_eq!(
+        request
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("AgentAssertion encoded-envelope")
+    );
+    assert_eq!(
+        request
+            .headers()
+            .get("x-openai-fedramp")
+            .and_then(|value| value.to_str().ok()),
+        Some("true")
     );
 }
 
@@ -332,7 +480,7 @@ fn websocket_response_create_keeps_codex_field_snapshot() {
             json!({
                 "type": "response.create",
                 "model": "gpt-5.4",
-                "instructions": "stay",
+                "instructions": "  stay exactly\n",
                 "previous_response_id": "resp_previous",
                 "input": "hello",
                 "tools": [{ "type": "function", "name": "ping", "parameters": { "type": "object", "properties": {} } }],
@@ -395,6 +543,7 @@ fn websocket_response_create_keeps_codex_field_snapshot() {
 
     assert_eq!(keys, expected);
     assert_eq!(value["type"], "response.create");
+    assert_eq!(value["instructions"], "  stay exactly\n");
     assert_eq!(value["previous_response_id"], "resp_previous");
     assert_eq!(value["generate"], false);
     assert_eq!(value["reasoning"]["context"], "current_turn");
@@ -419,6 +568,70 @@ fn websocket_response_create_keeps_codex_field_snapshot() {
     assert!(object.get("truncation").is_none());
     assert!(object.get("user").is_none());
     assert!(object.get("unknown_field").is_none());
+}
+
+#[test]
+fn websocket_response_create_uses_minimal_fallback_for_missing_or_blank_instructions() {
+    let _guard = crate::test_env_guard();
+    let context = WsRequestContext {
+        api_key: sample_api_key(),
+        incoming_headers: sample_incoming_headers_with_metadata(),
+        prompt_cache_key: None,
+        effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
+        prefer_raw_errors: false,
+    };
+
+    for instructions in [
+        None,
+        Some(Value::Null),
+        Some(json!("")),
+        Some(json!(" \n\t")),
+    ] {
+        let mut frame = json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "input": "hello"
+        });
+        if let Some(instructions) = instructions {
+            frame["instructions"] = instructions;
+        }
+        let prepared = rewrite_client_frame(frame.to_string().as_str(), &context)
+            .unwrap_or_else(|_| panic!("rewrite websocket frame failed"));
+        let value: Value =
+            serde_json::from_str(&prepared.text).expect("parse prepared websocket frame");
+
+        assert_eq!(value["instructions"], "Follow the user's instructions.");
+    }
+}
+
+#[test]
+fn websocket_logs_client_ultra_and_sends_upstream_max() {
+    let _guard = crate::test_env_guard();
+    let context = WsRequestContext {
+        api_key: sample_api_key(),
+        incoming_headers: sample_incoming_headers_with_metadata(),
+        prompt_cache_key: None,
+        effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
+        prefer_raw_errors: false,
+    };
+    let frame = json!({
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "reasoning": { "effort": "ultra" },
+        "input": "handle a complex task"
+    });
+
+    let prepared = rewrite_client_frame(frame.to_string().as_str(), &context)
+        .unwrap_or_else(|_| panic!("rewrite websocket frame failed"));
+    let value: Value = serde_json::from_str(&prepared.text).expect("parse rewritten frame");
+
+    assert_eq!(prepared.client_reasoning_effort.as_deref(), Some("ultra"));
+    assert_eq!(prepared.reasoning_effort.as_deref(), Some("max"));
+    assert_eq!(
+        prepared.reasoning_source.as_deref(),
+        Some("client_request_normalized")
+    );
+    assert_eq!(value["reasoning"]["effort"], "max");
 }
 
 #[test]

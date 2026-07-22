@@ -12,9 +12,9 @@ use super::author_links::{
 use super::{
     current_background_tasks_snapshot_value, current_env_overrides,
     current_gateway_account_max_inflight, current_gateway_compact_model_forward_rules,
-    current_gateway_free_account_max_model, current_gateway_model_catalog_auto_remote_fetch,
-    current_gateway_model_forward_rules, current_gateway_originator, current_gateway_quota_guard,
-    current_gateway_residency_requirement, current_gateway_sse_keepalive_interval_ms,
+    current_gateway_free_account_max_model, current_gateway_model_forward_rules,
+    current_gateway_originator, current_gateway_quota_guard, current_gateway_residency_requirement,
+    current_gateway_sse_keepalive_enabled, current_gateway_sse_keepalive_interval_ms,
     current_gateway_thread_aware_account_distribution_enabled,
     current_gateway_upstream_proxy_bypass_hosts, current_gateway_upstream_stream_timeout_ms,
     current_gateway_upstream_total_timeout_ms, current_gateway_user_agent_version,
@@ -28,11 +28,11 @@ use super::{
     APP_SETTING_AUTO_START_ENABLED_KEY, APP_SETTING_CLOSE_TO_TRAY_ON_CLOSE_KEY,
     APP_SETTING_ENV_OVERRIDES_KEY, APP_SETTING_GATEWAY_ACCOUNT_MAX_INFLIGHT_KEY,
     APP_SETTING_GATEWAY_BACKGROUND_TASKS_KEY, APP_SETTING_GATEWAY_COMPACT_MODEL_FORWARD_RULES_KEY,
-    APP_SETTING_GATEWAY_FREE_ACCOUNT_MAX_MODEL_KEY,
-    APP_SETTING_GATEWAY_MODEL_CATALOG_AUTO_REMOTE_FETCH_KEY,
-    APP_SETTING_GATEWAY_MODEL_FORWARD_RULES_KEY, APP_SETTING_GATEWAY_ORIGINATOR_KEY,
-    APP_SETTING_GATEWAY_QUOTA_GUARD_KEY, APP_SETTING_GATEWAY_RESIDENCY_REQUIREMENT_KEY,
-    APP_SETTING_GATEWAY_ROUTE_STRATEGY_KEY, APP_SETTING_GATEWAY_SSE_KEEPALIVE_INTERVAL_MS_KEY,
+    APP_SETTING_GATEWAY_FREE_ACCOUNT_MAX_MODEL_KEY, APP_SETTING_GATEWAY_MODEL_FORWARD_RULES_KEY,
+    APP_SETTING_GATEWAY_ORIGINATOR_KEY, APP_SETTING_GATEWAY_QUOTA_GUARD_KEY,
+    APP_SETTING_GATEWAY_RESIDENCY_REQUIREMENT_KEY, APP_SETTING_GATEWAY_ROUTE_STRATEGY_KEY,
+    APP_SETTING_GATEWAY_SSE_KEEPALIVE_ENABLED_KEY,
+    APP_SETTING_GATEWAY_SSE_KEEPALIVE_INTERVAL_MS_KEY,
     APP_SETTING_GATEWAY_THREAD_AWARE_ACCOUNT_DISTRIBUTION_ENABLED_KEY,
     APP_SETTING_GATEWAY_UPSTREAM_PROXY_BYPASS_HOSTS_KEY,
     APP_SETTING_GATEWAY_UPSTREAM_PROXY_URL_KEY, APP_SETTING_GATEWAY_UPSTREAM_STREAM_TIMEOUT_MS_KEY,
@@ -192,7 +192,6 @@ fn current_app_settings_value_inner(
     };
     let route_strategy = crate::gateway::current_route_strategy().to_string();
     let free_account_max_model = current_gateway_free_account_max_model();
-    let model_catalog_auto_remote_fetch = current_gateway_model_catalog_auto_remote_fetch();
     let model_forward_rules = current_gateway_model_forward_rules();
     let compact_model_forward_rules = current_gateway_compact_model_forward_rules();
     let account_max_inflight = current_gateway_account_max_inflight();
@@ -210,6 +209,7 @@ fn current_app_settings_value_inner(
     let upstream_proxy_bypass_hosts = current_gateway_upstream_proxy_bypass_hosts();
     let upstream_stream_timeout_ms = current_gateway_upstream_stream_timeout_ms();
     let upstream_total_timeout_ms = current_gateway_upstream_total_timeout_ms();
+    let sse_keepalive_enabled = current_gateway_sse_keepalive_enabled();
     let sse_keepalive_interval_ms = current_gateway_sse_keepalive_interval_ms();
     let plugin_market_source_url = settings
         .get(APP_SETTING_PLUGIN_MARKET_SOURCE_URL_KEY)
@@ -254,6 +254,7 @@ fn current_app_settings_value_inner(
 
     if persist_snapshot {
         persist_current_snapshot(
+            &settings,
             update_auto_check,
             auto_start_enabled,
             persisted_close_to_tray,
@@ -267,7 +268,6 @@ fn current_app_settings_value_inner(
             &service_listen_mode,
             &route_strategy,
             &free_account_max_model,
-            model_catalog_auto_remote_fetch,
             &model_forward_rules,
             &compact_model_forward_rules,
             account_max_inflight,
@@ -284,6 +284,7 @@ fn current_app_settings_value_inner(
             &upstream_proxy_bypass_hosts,
             upstream_stream_timeout_ms,
             upstream_total_timeout_ms,
+            sse_keepalive_enabled,
             sse_keepalive_interval_ms,
             &background_tasks_raw,
             &env_overrides,
@@ -295,7 +296,6 @@ fn current_app_settings_value_inner(
             &service_listen_mode,
             &route_strategy,
             &free_account_max_model,
-            model_catalog_auto_remote_fetch,
             &model_forward_rules,
             thread_aware_account_distribution_enabled,
             &gateway_originator,
@@ -304,6 +304,7 @@ fn current_app_settings_value_inner(
             upstream_proxy_url.as_deref(),
             &upstream_proxy_bypass_hosts,
             upstream_stream_timeout_ms,
+            sse_keepalive_enabled,
             sse_keepalive_interval_ms,
             &background_tasks_raw,
             &env_overrides,
@@ -367,16 +368,16 @@ fn current_app_settings_value_inner(
         object.insert("autoStartEnabled".to_string(), auto_start_enabled.into());
         object.insert("autoStartSupported".to_string(), false.into());
         object.insert(
-            "modelCatalogAutoRemoteFetch".to_string(),
-            model_catalog_auto_remote_fetch.into(),
-        );
-        object.insert(
             "threadAwareAccountDistributionEnabled".to_string(),
             thread_aware_account_distribution_enabled.into(),
         );
         object.insert(
             "upstreamProxyBypassHosts".to_string(),
             upstream_proxy_bypass_hosts.into(),
+        );
+        object.insert(
+            "sseKeepaliveEnabled".to_string(),
+            sse_keepalive_enabled.into(),
         );
         object.insert("runtimeTimeZone".to_string(), runtime_time_zone);
         object.insert("webAuthMode".to_string(), current_web_auth_mode().into());
@@ -453,14 +454,27 @@ pub(super) fn current_author_content_value() -> Result<Value, String> {
 /// # 返回
 /// 返回函数执行结果
 fn load_free_account_max_model_options(current: &str) -> Vec<String> {
-    let cached = crate::storage_helpers::open_storage()
-        .and_then(|storage| {
-            storage
-                .list_api_available_model_catalog_slugs_with_prefix("default", "gpt-")
-                .ok()
-        })
+    let catalog = crate::storage_helpers::open_storage()
+        .and_then(|storage| storage.list_api_models_v2().ok())
         .unwrap_or_default();
-    collect_free_account_max_model_options(current, &cached)
+    let known_current_is_non_text = catalog.iter().any(|model| {
+        model.slug.eq_ignore_ascii_case(current.trim())
+            && !crate::models_v2::supports_text_generation(model)
+    });
+    let cached = catalog
+        .into_iter()
+        .filter(crate::models_v2::supports_text_generation)
+        .map(|model| model.slug)
+        .filter(|slug| slug.starts_with("gpt-"))
+        .collect::<Vec<_>>();
+    collect_free_account_max_model_options(
+        if known_current_is_non_text {
+            "auto"
+        } else {
+            current
+        },
+        &cached,
+    )
 }
 
 /// 函数 `collect_free_account_max_model_options`
@@ -555,6 +569,7 @@ fn is_free_account_max_model_option(slug: &str) -> bool {
 /// # 返回
 /// 无
 fn persist_current_snapshot(
+    settings: &HashMap<String, String>,
     update_auto_check: bool,
     auto_start_enabled: bool,
     persisted_close_to_tray: bool,
@@ -568,7 +583,6 @@ fn persist_current_snapshot(
     service_listen_mode: &str,
     route_strategy: &str,
     free_account_max_model: &str,
-    model_catalog_auto_remote_fetch: bool,
     model_forward_rules: &str,
     compact_model_forward_rules: &str,
     account_max_inflight: usize,
@@ -585,6 +599,7 @@ fn persist_current_snapshot(
     upstream_proxy_bypass_hosts: &str,
     upstream_stream_timeout_ms: u64,
     upstream_total_timeout_ms: u64,
+    sse_keepalive_enabled: bool,
     sse_keepalive_interval_ms: u64,
     background_tasks_raw: &str,
     env_overrides: &BTreeMap<String, String>,
@@ -617,10 +632,6 @@ fn persist_current_snapshot(
     let _ = save_persisted_app_setting(
         APP_SETTING_GATEWAY_FREE_ACCOUNT_MAX_MODEL_KEY,
         Some(free_account_max_model),
-    );
-    let _ = save_persisted_bool_setting(
-        APP_SETTING_GATEWAY_MODEL_CATALOG_AUTO_REMOTE_FETCH_KEY,
-        model_catalog_auto_remote_fetch,
     );
     let _ = save_persisted_app_setting(
         APP_SETTING_GATEWAY_MODEL_FORWARD_RULES_KEY,
@@ -702,10 +713,22 @@ fn persist_current_snapshot(
         APP_SETTING_GATEWAY_UPSTREAM_TOTAL_TIMEOUT_MS_KEY,
         Some(&upstream_total_timeout_ms.to_string()),
     );
-    let _ = save_persisted_app_setting(
-        APP_SETTING_GATEWAY_SSE_KEEPALIVE_INTERVAL_MS_KEY,
-        Some(&sse_keepalive_interval_ms.to_string()),
-    );
+    if !crate::gateway::sse_keepalive_enabled_is_env_overridden()
+        || !settings.contains_key(APP_SETTING_GATEWAY_SSE_KEEPALIVE_ENABLED_KEY)
+    {
+        let _ = save_persisted_bool_setting(
+            APP_SETTING_GATEWAY_SSE_KEEPALIVE_ENABLED_KEY,
+            sse_keepalive_enabled,
+        );
+    }
+    if !crate::gateway::sse_keepalive_interval_is_env_overridden()
+        || !settings.contains_key(APP_SETTING_GATEWAY_SSE_KEEPALIVE_INTERVAL_MS_KEY)
+    {
+        let _ = save_persisted_app_setting(
+            APP_SETTING_GATEWAY_SSE_KEEPALIVE_INTERVAL_MS_KEY,
+            Some(&sse_keepalive_interval_ms.to_string()),
+        );
+    }
     let _ = save_persisted_app_setting(
         APP_SETTING_GATEWAY_BACKGROUND_TASKS_KEY,
         Some(background_tasks_raw),
@@ -760,7 +783,6 @@ fn persist_get_snapshot_if_changed(
     service_listen_mode: &str,
     route_strategy: &str,
     free_account_max_model: &str,
-    model_catalog_auto_remote_fetch: bool,
     model_forward_rules: &str,
     thread_aware_account_distribution_enabled: bool,
     gateway_originator: &str,
@@ -769,6 +791,7 @@ fn persist_get_snapshot_if_changed(
     upstream_proxy_url: Option<&str>,
     upstream_proxy_bypass_hosts: &str,
     upstream_stream_timeout_ms: u64,
+    sse_keepalive_enabled: bool,
     sse_keepalive_interval_ms: u64,
     background_tasks_raw: &str,
     env_overrides: &BTreeMap<String, String>,
@@ -788,11 +811,6 @@ fn persist_get_snapshot_if_changed(
         settings,
         APP_SETTING_GATEWAY_FREE_ACCOUNT_MAX_MODEL_KEY,
         Some(free_account_max_model),
-    );
-    save_persisted_bool_setting_if_changed(
-        settings,
-        APP_SETTING_GATEWAY_MODEL_CATALOG_AUTO_REMOTE_FETCH_KEY,
-        model_catalog_auto_remote_fetch,
     );
     save_app_setting_if_changed(
         settings,
@@ -846,11 +864,24 @@ fn persist_get_snapshot_if_changed(
         APP_SETTING_GATEWAY_UPSTREAM_STREAM_TIMEOUT_MS_KEY,
         Some(&upstream_stream_timeout_ms.to_string()),
     );
-    save_app_setting_if_changed(
-        settings,
-        APP_SETTING_GATEWAY_SSE_KEEPALIVE_INTERVAL_MS_KEY,
-        Some(&sse_keepalive_interval_ms.to_string()),
-    );
+    if !crate::gateway::sse_keepalive_enabled_is_env_overridden()
+        || !settings.contains_key(APP_SETTING_GATEWAY_SSE_KEEPALIVE_ENABLED_KEY)
+    {
+        save_persisted_bool_setting_if_changed(
+            settings,
+            APP_SETTING_GATEWAY_SSE_KEEPALIVE_ENABLED_KEY,
+            sse_keepalive_enabled,
+        );
+    }
+    if !crate::gateway::sse_keepalive_interval_is_env_overridden()
+        || !settings.contains_key(APP_SETTING_GATEWAY_SSE_KEEPALIVE_INTERVAL_MS_KEY)
+    {
+        save_app_setting_if_changed(
+            settings,
+            APP_SETTING_GATEWAY_SSE_KEEPALIVE_INTERVAL_MS_KEY,
+            Some(&sse_keepalive_interval_ms.to_string()),
+        );
+    }
     save_app_setting_if_changed(
         settings,
         APP_SETTING_GATEWAY_BACKGROUND_TASKS_KEY,

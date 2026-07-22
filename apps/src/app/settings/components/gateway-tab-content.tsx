@@ -1,5 +1,6 @@
 import { ShieldCheck, Workflow } from "lucide-react";
 import { AppSettings } from "@/types";
+import { toast } from "sonner";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -32,7 +33,6 @@ export function GatewayTabContent({
   t,
   snapshot,
   updateSettings,
-  onModelCatalogAutoRemoteFetchChange,
   quotaGuardInputValues,
   setQuotaGuardDraft,
   saveQuotaGuardField,
@@ -60,7 +60,6 @@ export function GatewayTabContent({
     mutateAsync: (patch: Partial<AppSettings>) => Promise<unknown>;
     isPending: boolean;
   };
-  onModelCatalogAutoRemoteFetchChange: (checked: boolean) => void;
   quotaGuardInputValues: {
     primaryMinRemainingPercent: string;
     secondaryMinRemainingPercent: string;
@@ -170,20 +169,6 @@ export function GatewayTabContent({
           />
         </div>
 
-        <div className="flex flex-col gap-3 border-t pt-6 sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-1">
-            <Label>{t("自动拉取远端模型目录")}</Label>
-            <p className="text-[10px] text-muted-foreground">
-              {t("开启后本地模型目录为空时会自动从远端拉取；关闭后只在点击“远端并入”时拉取。")}
-            </p>
-          </div>
-          <Switch
-            checked={snapshot.modelCatalogAutoRemoteFetch}
-            onCheckedChange={(checked) =>
-              onModelCatalogAutoRemoteFetchChange(checked)
-            }
-          />
-        </div>
         <div className="grid gap-4 border-t pt-6">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="space-y-1">
@@ -192,7 +177,7 @@ export function GatewayTabContent({
                 <Label>{t("额度保护")}</Label>
               </div>
               <p className="text-[10px] text-muted-foreground">
-                {t("低于保留百分比的账号会从网关路由和远端模型刷新候选中跳过。")}
+                {t("低于保留百分比的账号会从网关路由候选中跳过。")}
               </p>
             </div>
             <Switch
@@ -355,12 +340,21 @@ export function GatewayTabContent({
             onChange={(event) => setUpstreamProxyDraft(event.target.value)}
             onBlur={() => {
               if (upstreamProxyDraft == null) return;
-              if (upstreamProxyInput === (snapshot.upstreamProxyUrl || "")) {
+              let finalUrl = upstreamProxyInput.trim();
+              if (finalUrl) {
+                const lowerUrl = finalUrl.toLowerCase();
+                if (lowerUrl.startsWith("socks5://")) {
+                  finalUrl = "socks5h://" + finalUrl.slice(9);
+                } else if (lowerUrl.startsWith("socks4://")) {
+                  toast.warning(t("SOCKS4 是已过时的协议，建议使用 SOCKS5"));
+                }
+              }
+              if (finalUrl === (snapshot.upstreamProxyUrl || "")) {
                 setUpstreamProxyDraft(null);
                 return;
               }
               void updateSettings
-                .mutateAsync({ upstreamProxyUrl: upstreamProxyInput })
+                .mutateAsync({ upstreamProxyUrl: finalUrl })
                 .then(() => setUpstreamProxyDraft(null))
                 .catch(() => undefined);
             }}
@@ -404,48 +398,70 @@ export function GatewayTabContent({
           </p>
         </div>
 
-        <div className="grid gap-4 border-t pt-6 md:grid-cols-3">
-          <div className="grid gap-2">
-            <Label>{t("SSE 保活间隔 (ms)")}</Label>
-            <Input
-              type="number"
-              value={transportInputValues.sseKeepaliveIntervalMs}
-              onChange={(event) =>
-                setTransportDraft((current) => ({
-                  ...current,
-                  sseKeepaliveIntervalMs: event.target.value,
-                }))
+        <div className="grid gap-4 border-t pt-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="space-y-1">
+              <Label htmlFor="sse-keepalive-enabled">{t("保持连接心跳")}</Label>
+              <p className="text-[10px] text-muted-foreground">
+                {t("开启后会按下方间隔向客户端发送 SSE 心跳，防止代理或网络链路因空闲断开。")}
+              </p>
+            </div>
+            <Switch
+              id="sse-keepalive-enabled"
+              checked={snapshot.sseKeepaliveEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings.mutate({ sseKeepaliveEnabled: checked })
               }
-              onBlur={() => saveTransportField("sseKeepaliveIntervalMs", 1)}
             />
           </div>
-          <div className="grid gap-2">
-            <Label>{t("上游总超时 (ms，0 为关闭)")}</Label>
-            <Input
-              type="number"
-              value={transportInputValues.upstreamTotalTimeoutMs}
-              onChange={(event) =>
-                setTransportDraft((current) => ({
-                  ...current,
-                  upstreamTotalTimeoutMs: event.target.value,
-                }))
-              }
-              onBlur={() => saveTransportField("upstreamTotalTimeoutMs", 0)}
-            />
-          </div>
-          <div className="grid gap-2">
-            <Label>{t("上游流式空闲超时 (ms)")}</Label>
-            <Input
-              type="number"
-              value={transportInputValues.upstreamStreamTimeoutMs}
-              onChange={(event) =>
-                setTransportDraft((current) => ({
-                  ...current,
-                  upstreamStreamTimeoutMs: event.target.value,
-                }))
-              }
-              onBlur={() => saveTransportField("upstreamStreamTimeoutMs", 0)}
-            />
+
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid gap-2">
+              <Label htmlFor="sse-keepalive-interval-ms">
+                {t("SSE 保活间隔 (ms)")}
+              </Label>
+              <Input
+                id="sse-keepalive-interval-ms"
+                type="number"
+                value={transportInputValues.sseKeepaliveIntervalMs}
+                onChange={(event) =>
+                  setTransportDraft((current) => ({
+                    ...current,
+                    sseKeepaliveIntervalMs: event.target.value,
+                  }))
+                }
+                onBlur={() => saveTransportField("sseKeepaliveIntervalMs", 1)}
+                disabled={!snapshot.sseKeepaliveEnabled}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label>{t("上游总超时 (ms，0 为关闭)")}</Label>
+              <Input
+                type="number"
+                value={transportInputValues.upstreamTotalTimeoutMs}
+                onChange={(event) =>
+                  setTransportDraft((current) => ({
+                    ...current,
+                    upstreamTotalTimeoutMs: event.target.value,
+                  }))
+                }
+                onBlur={() => saveTransportField("upstreamTotalTimeoutMs", 0)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label>{t("上游流式空闲超时 (ms)")}</Label>
+              <Input
+                type="number"
+                value={transportInputValues.upstreamStreamTimeoutMs}
+                onChange={(event) =>
+                  setTransportDraft((current) => ({
+                    ...current,
+                    upstreamStreamTimeoutMs: event.target.value,
+                  }))
+                }
+                onBlur={() => saveTransportField("upstreamStreamTimeoutMs", 0)}
+              />
+            </div>
           </div>
         </div>
       </CardContent>

@@ -24,7 +24,7 @@
       </a>
     </td>
     <td valign="top">
-      感谢 <strong>AI夏末 AIXiamo</strong> 赞助本项目！<strong>AIXiamo</strong> 面向 Codex CLI、Claude Code、Gemini CLI 等开发者场景，提供 ChatGPT Pro 5x / 20x、ChatGPT Plus、Claude Max、Gemini Pro、Grok 等 AI 会员开通与售后协助服务。支持支付宝 / 微信支付，自动充值，订单可查，提供教程说明与售后协助。适合需要稳定使用 AI 编程、代码生成、文档处理和高频对话的开发者用户。CodexManager 用户可优先咨询 Pro / Codex / Claude / Gemini 套餐选择。可前往<a href="https://www.aixiamo.com/?utm_source=github&utm_medium=sponsor&utm_campaign=codex_manager">官网</a>查看服务。
+      感谢 <strong>AI夏末 AIXiamo</strong> 赞助本项目！国内没有海外银行卡？AIXiamo 提供 ChatGPT、Claude、Codex 等 AI 服务正规代充，支持支付宝 / 微信，售后有保障。可前往<a href="https://www.aixiamo.com/?utm_source=github&utm_medium=sponsor&utm_campaign=codex_manager">官网</a>查看服务。
     </td>
   </tr>
   <tr>
@@ -91,6 +91,8 @@
 | [原生Codex线程锚点优先级说明.md](report/原生Codex线程锚点优先级说明.md) | 说明原生 Codex、`prompt_cache_key` 与兼容兜底锚点的优先级规则 |
 | [后台任务账号跳过说明.md](report/后台任务账号跳过说明.md) | 后台任务过滤、禁用账号、workspace 停用原因 |
 | [最小排障手册.md](report/最小排障手册.md) | 快速定位最常见启动与转发问题 |
+| [模型目录V2管理与计费说明.md](report/模型目录V2管理与计费说明.md) | 管理 builtin/custom、整数价格阶梯、routes、instructions policy、导入导出与钱包扣费 |
+| [聚合API请求规则与配置说明.md](report/聚合API请求规则与配置说明.md) | 聚合上游连接、V2 route、鉴权、余额查询与排障 |
 | [插件中心最小接入说明.md](report/插件中心最小接入说明.md) | 插件中心最小接入字段、接口和 Rhai 最小函数 |
 | [当前网关与Codex请求头和参数差异表.md](report/当前网关与Codex请求头和参数差异表.md) | 当前网关参数传递、请求头和请求参数与 Codex 的对照说明 |
 | [插件中心对接与接口清单.md](report/插件中心对接与接口清单.md) | 插件中心接入方式、市场模式、RPC/Tauri 命令、清单字段、Rhai 接口清单 |

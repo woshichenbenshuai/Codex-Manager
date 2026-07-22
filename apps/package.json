@@ -1,6 +1,6 @@
 {
   "name": "codexmanager-frontend",
-  "version": "0.4.0",
+  "version": "0.4.4",
   "packageManager": "pnpm@10.30.3",
   "private": true,
   "scripts": {
@@ -8,9 +8,12 @@
     "dev:desktop": "next dev --webpack -H 127.0.0.1 -p 3005",
     "build": "next build",
     "build:desktop": "next build",
+    "check": "pnpm run lint && pnpm run test:runtime && pnpm run build:desktop",
+    "test": "pnpm run test:runtime",
     "test:e2e": "playwright test",
     "test:navigation": "playwright test tests/navigation-cache.spec.ts",
-    "test:runtime": "node --test tests/runtime-capabilities.test.mjs tests/gateway-endpoints.test.mjs tests/transport-errors.test.mjs tests/gateway-settings.test.mjs tests/transport-web-commands.test.mjs tests/codex-profile-cache.test.mjs tests/i18n-page-coverage.test.mjs tests/account-list-cache.test.mjs tests/tauri-command-registry.test.mjs tests/dashboard-direct-mode.test.mjs tests/rpc-http.test.mjs tests/app-updates.test.mjs tests/account-auth.test.mjs tests/account-maintenance.test.mjs tests/usage-response.test.mjs tests/ccswitch.test.mjs tests/billing-mode-lock.test.mjs tests/top-level-routes.test.mjs tests/timeout.test.mjs tests/request-utils.test.mjs tests/app-bootstrap-startup.test.mjs",
+    "test:runtime": "node --test",
+    "test:ui": "pnpm run test:e2e",
     "start": "next start",
     "lint": "eslint"
   },
