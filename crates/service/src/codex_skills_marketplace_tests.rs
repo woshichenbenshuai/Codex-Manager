@@ -262,6 +262,39 @@ fn inventory_keeps_only_local_standard_codex_skill_plugins() {
 }
 
 #[test]
+fn available_plugin_rejects_a_cli_revision_that_differs_from_the_manifest_version() {
+    let temp = TestDirectory::new("available-version-mismatch");
+    let marketplace_root = temp.path().join("marketplace");
+    fs::create_dir_all(&marketplace_root).expect("create marketplace");
+    let plugin_path = write_plugin(
+        &marketplace_root,
+        "version-mismatch",
+        "version-mismatch",
+        "1.2.3",
+        Some("version-mismatch-skill"),
+        Some("Use this standard Codex skill for a version mismatch test."),
+    );
+    let plugins = serde_json::json!({
+        "installed": [],
+        "available": [plugin_entry(
+            "version-mismatch",
+            "test-market",
+            "marketplace-snapshot-revision",
+            &plugin_path,
+            false
+        )]
+    });
+    let runner = StubRunner::with_json(vec![
+        marketplace_json("test-market", &marketplace_root),
+        plugins,
+    ]);
+
+    let inventory = list_with_runner(temp.path(), &runner).expect("list inventory");
+
+    assert!(inventory.plugins.is_empty());
+}
+
+#[test]
 fn unavailable_or_old_cli_returns_an_explicit_inventory_warning() {
     let runner = StubRunner {
         responses: Mutex::new(VecDeque::from([Err(CliRunError::Unavailable(
@@ -279,7 +312,7 @@ fn unavailable_or_old_cli_returns_an_explicit_inventory_warning() {
 }
 
 #[test]
-fn install_revalidates_uses_an_argument_boundary_and_confirms_installation() {
+fn install_accepts_an_installed_cache_revision_and_keeps_the_manifest_version() {
     let temp = TestDirectory::new("install");
     let marketplace_root = temp.path().join("marketplace");
     fs::create_dir_all(&marketplace_root).expect("create marketplace");
@@ -305,7 +338,7 @@ fn install_revalidates_uses_an_argument_boundary_and_confirms_installation() {
         "installed": [plugin_entry(
             "installable-plugin",
             "test-market",
-            "2.0.0",
+            "marketplace-snapshot-revision",
             &plugin_path,
             true
         )],
@@ -324,6 +357,7 @@ fn install_revalidates_uses_an_argument_boundary_and_confirms_installation() {
         .expect("install plugin");
 
     assert!(inventory.plugins[0].installed);
+    assert_eq!(inventory.plugins[0].version, "2.0.0");
     assert_eq!(
         runner.calls()[2],
         strings(&[

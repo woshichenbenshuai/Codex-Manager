@@ -242,7 +242,10 @@ export function useAccounts() {
   const startupSnapshot =
     startupSnapshotQuery.data ||
     queryClient.getQueryData<StartupSnapshot>(startupSnapshotQueryKey);
-  const startupAccounts = startupSnapshot?.accounts || [];
+  const startupAccounts = useMemo(
+    () => startupSnapshot?.accounts ?? [],
+    [startupSnapshot?.accounts],
+  );
   const startupUsages = startupSnapshot?.usageSnapshots || [];
   const hasStartupAccountSnapshot = startupAccounts.length > 0;
   const startupAccountList = useMemo(

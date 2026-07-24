@@ -51,6 +51,103 @@ pub async fn service_codex_skills_delete(
 }
 
 #[tauri::command]
+pub async fn service_codex_skills_repository_list(
+    addr: Option<String>,
+    codex_home: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({ "codexHome": codex_home });
+    rpc_call_in_background("codexSkills/repositoryList", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_codex_skills_repository_add(
+    addr: Option<String>,
+    source: String,
+    ref_name: Option<String>,
+    codex_home: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "source": source,
+        "refName": ref_name,
+        "codexHome": codex_home,
+    });
+    rpc_call_in_background("codexSkills/repositoryAdd", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_codex_skills_repository_delete(
+    addr: Option<String>,
+    repository_id: String,
+    codex_home: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "repositoryId": repository_id,
+        "codexHome": codex_home,
+    });
+    rpc_call_in_background("codexSkills/repositoryDelete", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_codex_skills_repository_refresh(
+    addr: Option<String>,
+    repository_id: Option<String>,
+    codex_home: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "repositoryId": repository_id,
+        "codexHome": codex_home,
+    });
+    rpc_call_in_background("codexSkills/repositoryRefresh", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_codex_skills_repository_install(
+    addr: Option<String>,
+    repository_id: String,
+    skill_id: String,
+    codex_home: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "repositoryId": repository_id,
+        "skillId": skill_id,
+        "codexHome": codex_home,
+    });
+    rpc_call_in_background("codexSkills/repositoryInstall", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_codex_skills_registry_search(
+    addr: Option<String>,
+    query: String,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    codex_home: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "query": query,
+        "limit": limit,
+        "offset": offset,
+        "codexHome": codex_home,
+    });
+    rpc_call_in_background("codexSkills/registrySearch", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_codex_skills_registry_install(
+    addr: Option<String>,
+    source: String,
+    skill_id: String,
+    codex_home: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "source": source,
+        "skillId": skill_id,
+        "codexHome": codex_home,
+    });
+    rpc_call_in_background("codexSkills/registryInstall", addr, Some(params)).await
+}
+
+#[tauri::command]
 pub async fn service_codex_skills_marketplace_list(
     addr: Option<String>,
     codex_home: Option<String>,

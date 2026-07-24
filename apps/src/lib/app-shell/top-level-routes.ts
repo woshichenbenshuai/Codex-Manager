@@ -144,7 +144,7 @@ export const TOP_LEVEL_ROUTE_CONFIG = [
   },
   {
     path: "/skills",
-    label: "Skills 管理",
+    label: "Skills 与插件",
     section: "system",
     roles: ["system_admin", "admin"],
   },

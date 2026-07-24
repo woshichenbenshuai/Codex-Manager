@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useAccounts } from "@/hooks/useAccounts";
 import { useDesktopPageActive } from "@/hooks/useDesktopPageActive";
@@ -8,7 +8,6 @@ import { usePageTransitionReady } from "@/hooks/usePageTransitionReady";
 import { useRuntimeCapabilities } from "@/hooks/useRuntimeCapabilities";
 import { proxyProfilesClient } from "@/lib/api/proxy-profiles";
 import {
-  accountClient,
   type AccountProxySettings,
   type AccountProxySource,
 } from "@/lib/api/account-client";
@@ -24,7 +23,7 @@ import {
 } from "@/app/accounts/accounts-page-helpers";
 import { AccountsPageView } from "@/app/accounts/accounts-page-view";
 import { isBannedAccount, isLimitedAccount } from "@/lib/utils/usage";
-import type { Account, ProxyProfile, ProxyTestJobState } from "@/types";
+import type { Account, ProxyProfile } from "@/types";
 
 type CleanupStatus =
   | "unavailable"

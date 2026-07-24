@@ -242,6 +242,27 @@ test("createWebCommandMap 为 Codex Skills 管理提供 Web RPC 映射", () => {
   assert.deepEqual(commandMap.service_codex_skills_delete, {
     rpcMethod: "codexSkills/delete",
   });
+  assert.deepEqual(commandMap.service_codex_skills_repository_list, {
+    rpcMethod: "codexSkills/repositoryList",
+  });
+  assert.deepEqual(commandMap.service_codex_skills_repository_add, {
+    rpcMethod: "codexSkills/repositoryAdd",
+  });
+  assert.deepEqual(commandMap.service_codex_skills_repository_delete, {
+    rpcMethod: "codexSkills/repositoryDelete",
+  });
+  assert.deepEqual(commandMap.service_codex_skills_repository_refresh, {
+    rpcMethod: "codexSkills/repositoryRefresh",
+  });
+  assert.deepEqual(commandMap.service_codex_skills_repository_install, {
+    rpcMethod: "codexSkills/repositoryInstall",
+  });
+  assert.deepEqual(commandMap.service_codex_skills_registry_search, {
+    rpcMethod: "codexSkills/registrySearch",
+  });
+  assert.deepEqual(commandMap.service_codex_skills_registry_install, {
+    rpcMethod: "codexSkills/registryInstall",
+  });
   assert.deepEqual(commandMap.service_codex_skills_marketplace_list, {
     rpcMethod: "codexSkills/marketplaceList",
   });

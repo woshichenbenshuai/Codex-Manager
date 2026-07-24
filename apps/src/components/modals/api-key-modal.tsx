@@ -399,7 +399,7 @@ export function ApiKeyModal({
         queryClient.invalidateQueries({ queryKey: ["dashboard", "member-summary"] }),
         queryClient.invalidateQueries({ queryKey: CODEX_PROFILE_CANDIDATES_QUERY_KEY }),
       ]);
-      if (apiKey?.id) onOpenChange(false);
+      onOpenChange(false);
     } catch (err: unknown) {
       toast.error(
         `操作失败: ${err instanceof Error ? err.message : String(err)}`,

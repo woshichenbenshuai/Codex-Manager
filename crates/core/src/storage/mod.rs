@@ -16,6 +16,7 @@ mod aggregate_apis;
 mod aggregate_apis_sql;
 mod api_key_quota_limits;
 mod api_keys;
+mod codex_skill_repositories;
 mod conversation_bindings;
 mod events;
 mod key_id_filters;
@@ -748,6 +749,50 @@ pub struct ConversationBinding {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_used_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexSkillRepositoryRecord {
+    pub id: String,
+    pub owner: String,
+    pub repository: String,
+    pub ref_name: String,
+    pub enabled: bool,
+    pub is_builtin: bool,
+    pub revision: Option<String>,
+    pub last_scanned_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexSkillRepositoryUpsert {
+    pub id: String,
+    pub owner: String,
+    pub repository: String,
+    pub ref_name: String,
+    pub enabled: bool,
+    pub is_builtin: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexSkillRepositorySkillRecord {
+    pub repository_id: String,
+    pub skill_id: String,
+    pub name: String,
+    pub description: String,
+    pub path: String,
+    pub source_url: String,
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodexSkillRepositoryCatalogSnapshot {
+    pub repositories: Vec<CodexSkillRepositoryRecord>,
+    pub skills: Vec<CodexSkillRepositorySkillRecord>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2201,6 +2246,10 @@ impl Storage {
             "123_api_keys_account_group_filter",
             include_str!("../../migrations/123_api_keys_account_group_filter.sql"),
             |s| s.ensure_api_key_account_group_filter_column(),
+        )?;
+        self.apply_sql_migration(
+            "124_codex_skill_repositories",
+            include_str!("../../migrations/124_codex_skill_repositories.sql"),
         )?;
         self.ensure_api_key_rotation_columns()?;
         self.ensure_api_key_account_group_filter_column()?;

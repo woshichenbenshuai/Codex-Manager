@@ -17,6 +17,52 @@ export interface CodexSkillsInventory {
   warnings: string[];
 }
 
+export interface CodexSkillRepositorySummary {
+  id: string;
+  name: string;
+  owner: string;
+  repository: string;
+  sourceUrl: string;
+  refName: string;
+  builtin: boolean;
+  enabled: boolean;
+  skillCount: number;
+  lastScannedAt: number | null;
+  lastError: string | null;
+}
+
+export interface CodexSkillCatalogItem {
+  skillId: string;
+  repositoryId: string;
+  name: string;
+  description: string;
+  author: string;
+  category: string;
+  path: string;
+  repositoryName: string;
+  repositoryOwner: string;
+  repositoryRef: string;
+  sourceUrl: string;
+  installs: number;
+  installed: boolean;
+  installedDirectoryName: string | null;
+}
+
+export interface CodexSkillRepositoryCatalog {
+  repositories: CodexSkillRepositorySummary[];
+  items: CodexSkillCatalogItem[];
+  warnings: string[];
+}
+
+export interface CodexSkillRegistrySearchResult {
+  items: CodexSkillCatalogItem[];
+  total: number;
+  query: string;
+  limit: number;
+  offset: number;
+  warnings: string[];
+}
+
 export interface CodexSkillMarketplaceSummary {
   name: string;
   sourceType: string;

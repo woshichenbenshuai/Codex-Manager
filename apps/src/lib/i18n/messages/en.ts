@@ -178,6 +178,12 @@ export const EN_MESSAGES: MessageCatalog = {
   基础设置: "Basic settings",
   控制应用启动和窗口行为: "Control startup and window behavior.",
   自动检查更新: "Check updates automatically",
+  "启动完成后在后台检查更新，并每 7 小时检查一次":
+    "Check for updates in the background after startup, then every 7 hours.",
+  "检测到新版本，是否现在更新？":
+    "A new version is available. Would you like to update now?",
+  "更新包已准备完成，是否立即替换更新？":
+    "The update is ready. Would you like to apply it now?",
   启动时自动检测新版本: "Check for new versions on startup.",
   开机自动启动: "Launch at startup",
   系统登录后自动启动桌面端并保持网关可用:
@@ -185,6 +191,13 @@ export const EN_MESSAGES: MessageCatalog = {
   关闭时最小化到托盘: "Minimize to tray on close",
   点击关闭按钮不会直接退出程序:
     "Closing the window won't exit the app immediately.",
+  窗口界面资源常驻: "Keep window UI loaded",
+  "需先开启关闭时最小化到托盘，才能选择窗口关闭后的资源策略":
+    "Enable minimize to tray on close before choosing how window resources are handled.",
+  "快速唤醒：关闭后隐藏并保留界面，重开更快，但会占用更多内存":
+    "Fast reopen: hide and retain the interface on close for faster reopening, using more memory.",
+  "低资源：关闭后销毁界面，后台服务继续运行，重开时重新加载":
+    "Low resource: release the interface on close while the background service keeps running, then reload it when reopened.",
   视觉性能模式: "Visual performance mode",
   关闭毛玻璃等特效以提升低配电脑性能:
     "Disable blur and heavy effects for lower-end devices.",

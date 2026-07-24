@@ -323,6 +323,13 @@ struct ResolvedCodexCommand {
     safe_path: OsString,
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnixCodexCommandSpec {
+    program: PathBuf,
+    args: Vec<OsString>,
+}
+
 #[cfg(any(target_os = "windows", test))]
 fn is_supported_windows_codex_executable(path: &Path) -> bool {
     path.extension()
@@ -452,6 +459,37 @@ fn resolve_unix_codex_from_safe_directories(
         executable,
         safe_path,
     }))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn build_unix_codex_command_spec(
+    env_executable: PathBuf,
+    resolved: &ResolvedCodexCommand,
+    action: CodexProjectLaunchAction,
+    codex_home: Option<&Path>,
+) -> Result<UnixCodexCommandSpec, String> {
+    if !env_executable.is_absolute() || !is_executable_file(&env_executable) {
+        return Err(format!(
+            "env 必须是已解析的绝对可执行路径：{}",
+            env_executable.display()
+        ));
+    }
+
+    let mut path_assignment = OsString::from("PATH=");
+    path_assignment.push(&resolved.safe_path);
+    let mut args = vec![path_assignment];
+    if let Some(codex_home) = codex_home {
+        let mut codex_home_assignment = OsString::from("CODEX_HOME=");
+        codex_home_assignment.push(codex_home.as_os_str());
+        args.push(codex_home_assignment);
+    }
+    args.push(resolved.executable.as_os_str().to_os_string());
+    args.extend(codex_arguments(action).iter().map(OsString::from));
+
+    Ok(UnixCodexCommandSpec {
+        program: env_executable,
+        args,
+    })
 }
 
 #[cfg(any(unix, test))]
@@ -804,12 +842,18 @@ fn launch_codex_terminal(
     use std::ffi::OsString;
 
     let resolved = resolve_codex_executable(action, project_dir)?;
-    let codex_args = codex_arguments(action)
-        .iter()
-        .map(OsString::from)
-        .collect::<Vec<_>>();
+    // GNOME Terminal and some other emulators reuse a long-running server. Environment
+    // variables set on the terminal client process are not guaranteed to reach the new
+    // tab, so an NVM-installed Codex script can be found while its `env node` shebang
+    // still fails. Make the environment part of the child argv instead.
+    let env_executable = [Path::new("/usr/bin/env"), Path::new("/bin/env")]
+        .into_iter()
+        .find_map(|candidate| canonical_executable_outside_project(candidate, project_dir))
+        .ok_or_else(|| "未找到项目目录之外的安全 env 可执行文件".to_string())?;
+    let spec = build_unix_codex_command_spec(env_executable, &resolved, action, codex_home)?;
     let project = project_dir.as_os_str().to_os_string();
-    let executable_arg = resolved.executable.as_os_str().to_os_string();
+    let program_arg = spec.program.as_os_str().to_os_string();
+    let launch_args = spec.args;
     let safe_directories = safe_unix_search_directories(
         std::env::split_paths(&resolved.safe_path).collect::<Vec<_>>(),
         project_dir,
@@ -818,13 +862,13 @@ fn launch_codex_terminal(
     let candidates = [
         (
             "xdg-terminal-exec",
-            [vec![executable_arg.clone()], codex_args.clone()].concat(),
+            [vec![program_arg.clone()], launch_args.clone()].concat(),
         ),
         (
             "x-terminal-emulator",
             [
-                vec![OsString::from("-e"), executable_arg.clone()],
-                codex_args.clone(),
+                vec![OsString::from("-e"), program_arg.clone()],
+                launch_args.clone(),
             ]
             .concat(),
         ),
@@ -835,9 +879,9 @@ fn launch_codex_terminal(
                     OsString::from("--working-directory"),
                     project.clone(),
                     OsString::from("--"),
-                    executable_arg.clone(),
+                    program_arg.clone(),
                 ],
-                codex_args.clone(),
+                launch_args.clone(),
             ]
             .concat(),
         ),
@@ -848,9 +892,9 @@ fn launch_codex_terminal(
                     OsString::from("--workdir"),
                     project.clone(),
                     OsString::from("-e"),
-                    executable_arg.clone(),
+                    program_arg.clone(),
                 ],
-                codex_args.clone(),
+                launch_args.clone(),
             ]
             .concat(),
         ),
@@ -860,9 +904,9 @@ fn launch_codex_terminal(
                 vec![
                     OsString::from("--directory"),
                     project.clone(),
-                    executable_arg.clone(),
+                    program_arg.clone(),
                 ],
-                codex_args.clone(),
+                launch_args.clone(),
             ]
             .concat(),
         ),
@@ -874,9 +918,9 @@ fn launch_codex_terminal(
                     OsString::from("--cwd"),
                     project.clone(),
                     OsString::from("--"),
-                    executable_arg.clone(),
+                    program_arg.clone(),
                 ],
-                codex_args.clone(),
+                launch_args.clone(),
             ]
             .concat(),
         ),
@@ -888,9 +932,9 @@ fn launch_codex_terminal(
                     OsString::from("--working-directory"),
                     project,
                     OsString::from("-x"),
-                    executable_arg,
+                    program_arg,
                 ],
-                codex_args,
+                launch_args,
             ]
             .concat(),
         ),
@@ -1331,6 +1375,72 @@ mod tests {
             [nvm_bin.canonicalize().expect("canonical NVM bin")]
         );
         assert!(nvm_bin.join("node").is_file());
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn unix_child_argv_restores_nvm_path_profile_and_project_cwd() {
+        let root = temp_dir("unix-child-environment");
+        let project = root.join("project with spaces");
+        let nvm_bin = root.join("nvm-bin");
+        let package_bin = root.join("lib");
+        let codex_home = root.join("profile with spaces-$()");
+        std::fs::create_dir_all(&project).expect("create project directory");
+        std::fs::create_dir_all(&nvm_bin).expect("create NVM bin directory");
+        std::fs::create_dir_all(&package_bin).expect("create package bin directory");
+        std::fs::create_dir_all(&codex_home).expect("create Codex profile directory");
+
+        let codex_script = package_bin.join("codex.js");
+        write_test_executable(&codex_script, "#!/usr/bin/env node\n");
+        write_test_executable(
+            &nvm_bin.join("node"),
+            "#!/bin/sh\nprintf 'cwd='\npwd\nprintf 'path=%s\\nprofile=%s\\nargs=%s\\n' \"$PATH\" \"$CODEX_HOME\" \"$*\"\n",
+        );
+        std::os::unix::fs::symlink(&codex_script, nvm_bin.join("codex"))
+            .expect("link NVM Codex CLI");
+
+        let safe_directories = safe_unix_search_directories([nvm_bin.clone()], &project);
+        let resolved = resolve_unix_codex_from_safe_directories(&safe_directories, &project)
+            .expect("resolve NVM Codex CLI")
+            .expect("find NVM Codex CLI");
+        let env_executable =
+            canonical_executable_outside_project(Path::new("/usr/bin/env"), &project)
+                .expect("resolve system env executable");
+        let spec = build_unix_codex_command_spec(
+            env_executable,
+            &resolved,
+            CodexProjectLaunchAction::Resume,
+            Some(&codex_home),
+        )
+        .expect("build Unix child command");
+
+        // Clear the test process environment to model a terminal server that did not
+        // inherit NVM or the selected Codex profile from CodexManager.
+        let output = Command::new(&spec.program)
+            .args(&spec.args)
+            .current_dir(&project)
+            .env_clear()
+            .output()
+            .expect("run wrapped NVM Codex CLI");
+        assert!(
+            output.status.success(),
+            "wrapped Codex failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 probe output");
+        assert!(stdout.contains(&format!(
+            "cwd={}\n",
+            project.canonicalize().expect("canonical project").display()
+        )));
+        assert!(stdout.contains(&format!(
+            "path={}\n",
+            nvm_bin.canonicalize().expect("canonical NVM bin").display()
+        )));
+        assert!(stdout.contains(&format!("profile={}\n", codex_home.display())));
+        assert!(stdout.contains(" resume -C .\n"));
 
         std::fs::remove_dir_all(root).expect("remove test directory");
     }

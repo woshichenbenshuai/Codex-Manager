@@ -45,7 +45,7 @@ pub(crate) struct CodexSkillsInventory {
 }
 
 #[derive(Debug, Clone)]
-struct SkillMetadata {
+pub(crate) struct SkillMetadata {
     name: String,
     description: String,
 }
@@ -128,6 +128,30 @@ pub(crate) fn install_zip(
         .map_err(|_| "skills mutation lock poisoned".to_string())?;
     install_zip_into_root(&skills_root, &archive)?;
     list_from_root(&codex_home, &skills_root)
+}
+
+pub(crate) fn install_archive_bytes(
+    archive: &[u8],
+    codex_home: Option<&str>,
+) -> Result<CodexSkillsInventory, String> {
+    if archive.len() > MAX_ARCHIVE_BYTES {
+        return Err(format!(
+            "skill archive exceeds the {} MiB compressed size limit",
+            MAX_ARCHIVE_BYTES / (1024 * 1024)
+        ));
+    }
+    let codex_home = crate::codex_profile::resolve_profile_dir(codex_home)?;
+    let skills_root = codex_home.join("skills");
+    let _guard = mutation_lock()
+        .lock()
+        .map_err(|_| "skills mutation lock poisoned".to_string())?;
+    install_zip_into_root(&skills_root, archive)?;
+    list_from_root(&codex_home, &skills_root)
+}
+
+pub(crate) fn parse_skill_metadata_document(content: &str) -> Result<(String, String), String> {
+    let metadata = parse_skill_metadata(content)?;
+    Ok((metadata.name, metadata.description))
 }
 
 pub(crate) fn import_directory(

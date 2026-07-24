@@ -458,6 +458,7 @@ test("api key modal can select hybrid rotation on create", async ({ page }) => {
   await dialog.getByRole("button", { name: "完成" }).click();
 
   await expect.poll(() => createPayloads.length).toBe(1);
+  await expect(dialog).not.toBeVisible();
   const params = createPayloads[0]?.params as Record<string, unknown>;
   expect(params.rotationStrategy).toBe("hybrid_rotation");
   expect(params.customKey).toBe("sk-cm-custom-fixed");

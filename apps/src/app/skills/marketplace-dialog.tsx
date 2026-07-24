@@ -17,15 +17,9 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/modals/confirm-dialog";
+import { WorkPanel } from "@/components/layout/page-workspace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   Empty,
   EmptyDescription,
@@ -242,13 +236,11 @@ function MarketplacePluginCard({
   );
 }
 
-export function SkillsMarketplaceDialog({
-  open,
-  onOpenChange,
+export function CodexPluginsPanel({
+  active,
   enabled,
 }: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  active: boolean;
   enabled: boolean;
 }) {
   const { t } = useI18n();
@@ -268,7 +260,7 @@ export function SkillsMarketplaceDialog({
   const marketplaceQuery = useQuery({
     queryKey: CODEX_SKILLS_MARKETPLACE_QUERY_KEY,
     queryFn: () => codexSkillsClient.listMarketplace(),
-    enabled: open && enabled,
+    enabled: active && enabled,
     staleTime: 15_000,
     retry: 1,
   });
@@ -316,7 +308,11 @@ export function SkillsMarketplaceDialog({
       toast.success(t("插件已安装，新建 Codex 会话后生效"));
     },
     onError: (error) => {
-      toast.error(`${t("安装插件失败")}: ${getAppErrorMessage(error)}`);
+      toast.error(t("安装插件失败"), {
+        description: getAppErrorMessage(error),
+        duration: 10_000,
+        className: "skills-marketplace-install-error-toast",
+      });
     },
     onSettled: () => {
       setInstallingPluginId(null);
@@ -352,10 +348,12 @@ export function SkillsMarketplaceDialog({
       })
       .sort(
         (left, right) =>
-          Number(left.installed) - Number(right.installed) ||
+          Number(right.installed) - Number(left.installed) ||
           left.name.localeCompare(right.name),
       );
   }, [inventory?.plugins, marketplaceSourceByName, search]);
+  const installedPluginCount =
+    inventory?.plugins.filter((plugin) => plugin.installed).length ?? 0;
 
   const pendingMarketplaceSource = pendingInstall
     ? marketplaceSourceByName.get(pendingInstall.marketplaceName) ||
@@ -394,33 +392,36 @@ export function SkillsMarketplaceDialog({
   };
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen && anyMutationPending) return;
-        onOpenChange(nextOpen);
-      }}
-      disablePointerDismissal={anyMutationPending}
-    >
-      <DialogContent
-        className="flex h-[min(88dvh,860px)] max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0 sm:max-w-[880px] md:max-w-[880px] lg:max-w-[1120px] xl:max-w-[1240px]"
-        showCloseButton={!anyMutationPending}
-      >
-        <DialogHeader className="shrink-0 border-b border-border/60 px-5 pb-4 pt-5 pr-12 sm:px-6 sm:pt-6">
+    <>
+      <WorkPanel className="min-h-0">
+        <section
+          className="flex min-h-0 flex-col"
+          aria-labelledby="codex-plugins-panel-title"
+          data-testid="codex-plugins-panel"
+        >
+        <div className="shrink-0 border-b border-border/60 px-5 py-4 sm:px-6">
           <div className="flex items-start gap-3">
             <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
               <Store className="size-5" />
             </div>
             <div className="min-w-0">
-              <DialogTitle>{t("Codex Skills 市场")}</DialogTitle>
-              <DialogDescription className="mt-1 leading-5">
+              <h2
+                id="codex-plugins-panel-title"
+                className="text-base font-semibold leading-none"
+              >
+                {t("Codex 插件市场")}
+              </h2>
+              <p className="mt-1 text-sm leading-5 text-muted-foreground">
                 {t(
                   "通过 Codex 原生 Marketplace 安装完整插件，只展示包含标准 SKILL.md 的插件。",
                 )}
-              </DialogDescription>
+              </p>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                {t("插件中的 Skills 会随完整插件一起安装，不能在这里单独安装。")}
+              </p>
             </div>
           </div>
-        </DialogHeader>
+        </div>
 
         <div className="shrink-0 space-y-3 border-b border-border/60 bg-muted/15 px-5 py-4 sm:px-6">
           <form
@@ -513,6 +514,9 @@ export function SkillsMarketplaceDialog({
             />
           </div>
           <div className="flex items-center justify-between gap-2 sm:justify-end">
+            <Badge variant="outline" className="shrink-0">
+              {t("已安装 {count}", { count: installedPluginCount })}
+            </Badge>
             <span className="text-xs text-muted-foreground">
               {t("{count} 个兼容插件", { count: plugins.length })}
             </span>
@@ -536,7 +540,15 @@ export function SkillsMarketplaceDialog({
           </div>
         </div>
 
-        <ScrollArea className="min-h-0 flex-1">
+        <ScrollArea
+          className="min-h-96"
+          style={{ height: "min(64vh, 680px)" }}
+          viewportClassName="pr-4"
+          scrollbarClassName="skills-marketplace-scrollbar"
+          thumbClassName="skills-marketplace-scrollbar-thumb"
+          keepScrollbarMounted
+          data-testid="skills-marketplace-scroll"
+        >
           <div className="p-5 sm:p-6">
             {!enabled ? (
               <Empty className="min-h-64">
@@ -544,7 +556,7 @@ export function SkillsMarketplaceDialog({
                   <AlertTriangle />
                 </EmptyMedia>
                 <EmptyHeader>
-                  <EmptyTitle>{t("当前无法读取 Skills 市场")}</EmptyTitle>
+                  <EmptyTitle>{t("当前无法读取插件市场")}</EmptyTitle>
                   <EmptyDescription>
                     {t("请确认管理 RPC 可用并已连接 codexmanager-service。")}
                   </EmptyDescription>
@@ -580,7 +592,7 @@ export function SkillsMarketplaceDialog({
                   <TerminalSquare />
                 </EmptyMedia>
                 <EmptyHeader>
-                  <EmptyTitle>{t("当前 Codex CLI 不支持 Skills 市场")}</EmptyTitle>
+                  <EmptyTitle>{t("当前 Codex CLI 不支持插件市场")}</EmptyTitle>
                   <EmptyDescription>
                     {t(
                       "请在 codexmanager-service 主机安装或升级支持 plugin 命令的 Codex CLI。",
@@ -639,7 +651,8 @@ export function SkillsMarketplaceDialog({
             ))}
           </div>
         </ScrollArea>
-      </DialogContent>
+        </section>
+      </WorkPanel>
 
       <ConfirmDialog
         open={Boolean(pendingInstall)}
@@ -669,6 +682,6 @@ export function SkillsMarketplaceDialog({
           }
         }}
       />
-    </Dialog>
+    </>
   );
 }

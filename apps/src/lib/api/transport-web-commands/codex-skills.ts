@@ -11,6 +11,27 @@ export function createCodexSkillsWebCommands(): Record<
       rpcMethod: "codexSkills/importDirectory",
     },
     service_codex_skills_delete: { rpcMethod: "codexSkills/delete" },
+    service_codex_skills_repository_list: {
+      rpcMethod: "codexSkills/repositoryList",
+    },
+    service_codex_skills_repository_add: {
+      rpcMethod: "codexSkills/repositoryAdd",
+    },
+    service_codex_skills_repository_delete: {
+      rpcMethod: "codexSkills/repositoryDelete",
+    },
+    service_codex_skills_repository_refresh: {
+      rpcMethod: "codexSkills/repositoryRefresh",
+    },
+    service_codex_skills_repository_install: {
+      rpcMethod: "codexSkills/repositoryInstall",
+    },
+    service_codex_skills_registry_search: {
+      rpcMethod: "codexSkills/registrySearch",
+    },
+    service_codex_skills_registry_install: {
+      rpcMethod: "codexSkills/registryInstall",
+    },
     service_codex_skills_marketplace_list: {
       rpcMethod: "codexSkills/marketplaceList",
     },

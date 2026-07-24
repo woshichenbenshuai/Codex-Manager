@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import {
   Cable,
   LayoutDashboard,
@@ -265,9 +266,11 @@ export function Sidebar() {
             {logoFailed ? (
               <span className="text-sm font-bold">CM</span>
             ) : (
-              <img
+              <Image
                 src="/logo.png"
                 alt="CodexManager"
+                width={40}
+                height={40}
                 className="h-full w-full object-cover"
                 onError={() => setLogoFailed(true)}
               />

@@ -670,7 +670,7 @@ fn compatible_plugin(
     let plugin_id = bounded_json_string(value.get("pluginId"), 260)?;
     let name = bounded_json_string(value.get("name"), 128)?;
     let marketplace_name = bounded_json_string(value.get("marketplaceName"), 128)?;
-    let version = bounded_json_string(value.get("version"), 128)?;
+    let cli_version = bounded_json_string(value.get("version"), 128)?;
     if !valid_plugin_id(&plugin_id)
         || !valid_plugin_name(&name)
         || !valid_marketplace_name(&marketplace_name)
@@ -710,7 +710,15 @@ fn compatible_plugin(
     let manifest_path = manifest_directory.join("plugin.json");
     let manifest_text = read_regular_text_bounded(&manifest_path, MAX_MANIFEST_BYTES).ok()?;
     let manifest: Value = serde_json::from_str(&manifest_text).ok()?;
-    if manifest.get("name")?.as_str()? != name || manifest.get("version")?.as_str()? != version {
+    if manifest.get("name")?.as_str()? != name {
+        return None;
+    }
+    let version = bounded_json_string(manifest.get("version"), 128)?;
+    // For available plugins, the CLI version must describe the source we just inspected. Once a
+    // plugin is installed, Codex may report its immutable cache revision (for example a commit
+    // hash) instead of the manifest's semantic version. Keep accepting only the inspected
+    // manifest version for display while treating the installed bucket as authoritative state.
+    if !installed_bucket && cli_version != version {
         return None;
     }
     let skills_relative = manifest.get("skills")?.as_str()?.trim();
