@@ -152,7 +152,6 @@ fn reload_from_env_updates_timeout_and_proxy() {
     let _strict_allowlist_guard = EnvGuard::set(ENV_STRICT_REQUEST_PARAM_ALLOWLIST, "0");
     let _request_compression_guard = EnvGuard::set(ENV_ENABLE_REQUEST_COMPRESSION, "0");
     let _image_enabled_guard = EnvGuard::set(ENV_CODEX_IMAGE_GENERATION_ENABLED, "0");
-    let _image_auto_inject_guard = EnvGuard::set(ENV_CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL, "1");
     let _image_main_model_guard = EnvGuard::set(ENV_CODEX_IMAGE_MAIN_MODEL, "gpt-5.4");
     let _image_tool_model_guard = EnvGuard::set(ENV_CODEX_IMAGE_TOOL_MODEL, "gpt-image-2");
     let _client_id_guard = EnvGuard::set(ENV_TOKEN_EXCHANGE_CLIENT_ID, "client-id-123");
@@ -167,7 +166,6 @@ fn reload_from_env_updates_timeout_and_proxy() {
     assert!(!strict_request_param_allowlist_enabled());
     assert!(!request_compression_enabled());
     assert!(!codex_image_generation_enabled());
-    assert!(codex_image_generation_auto_inject_tool_enabled());
     assert_eq!(current_codex_image_main_model(), "gpt-5.4");
     assert_eq!(current_codex_image_tool_model(), "gpt-image-2");
     assert_eq!(token_exchange_client_id(), "client-id-123");
@@ -202,7 +200,6 @@ fn reload_from_env_defaults_keep_request_gate_legacy_unbounded() {
     let _stream_guard = EnvGuard::clear(ENV_UPSTREAM_STREAM_TIMEOUT_MS);
     let _request_compression_guard = EnvGuard::clear(ENV_ENABLE_REQUEST_COMPRESSION);
     let _image_enabled_guard = EnvGuard::clear(ENV_CODEX_IMAGE_GENERATION_ENABLED);
-    let _image_auto_inject_guard = EnvGuard::clear(ENV_CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL);
     let _image_main_model_guard = EnvGuard::clear(ENV_CODEX_IMAGE_MAIN_MODEL);
     let _image_tool_model_guard = EnvGuard::clear(ENV_CODEX_IMAGE_TOOL_MODEL);
 
@@ -218,7 +215,6 @@ fn reload_from_env_defaults_keep_request_gate_legacy_unbounded() {
     );
     assert!(request_compression_enabled());
     assert!(codex_image_generation_enabled());
-    assert!(!codex_image_generation_auto_inject_tool_enabled());
     assert_eq!(current_codex_image_main_model(), "gpt-5.4-mini");
     assert_eq!(current_codex_image_tool_model(), "gpt-image-2");
 }
@@ -714,6 +710,206 @@ fn upstream_proxy_url_for_account_prefers_explicit_account_proxy() {
         upstream_proxy_url_for_account("acc-fallback").as_deref(),
         Some("http://127.0.0.1:7002")
     );
+}
+
+#[test]
+fn websocket_proxy_url_for_account_falls_back_to_lowercase_https_proxy() {
+    let _guard = crate::test_env_guard();
+    let db = TestDbGuard::new("runtime-websocket-env-proxy");
+    seed_account(db.path(), "acc-env");
+    let _managed_proxy = EnvGuard::clear(ENV_UPSTREAM_PROXY_URL);
+    let _pool_proxy = EnvGuard::clear(ENV_PROXY_LIST);
+    let _upper_https_proxy = EnvGuard::clear("HTTPS_PROXY");
+    let _https_proxy = EnvGuard::set("https_proxy", "http://127.0.0.1:58438");
+    let _all_proxy = EnvGuard::clear("all_proxy");
+    let _upper_all_proxy = EnvGuard::clear("ALL_PROXY");
+    let _no_proxy = EnvGuard::clear("no_proxy");
+    let _upper_no_proxy = EnvGuard::clear("NO_PROXY");
+
+    reload_from_env();
+
+    assert_eq!(
+        websocket_proxy_url_for_account(
+            "acc-env",
+            "wss://chatgpt.com/backend-api/codex/responses",
+        )
+        .expect("resolve websocket proxy")
+        .as_deref(),
+        Some("http://127.0.0.1:58438")
+    );
+}
+
+#[test]
+fn websocket_system_proxy_matcher_maps_wss_target_to_https_proxy() {
+    let matcher = hyper_util::client::proxy::matcher::Matcher::builder()
+        .https("http://127.0.0.1:58439")
+        .build();
+
+    assert_eq!(
+        proxy_url_from_matcher_for_target(
+            "wss://chatgpt.com/backend-api/codex/responses",
+            &matcher,
+        )
+        .expect("resolve websocket system proxy")
+        .as_deref(),
+        Some("http://127.0.0.1:58439/")
+    );
+}
+
+#[test]
+fn websocket_proxy_url_for_account_prefers_routed_account_proxy_over_system_proxy() {
+    let _guard = crate::test_env_guard();
+    let db = TestDbGuard::new("runtime-websocket-account-proxy-priority");
+    seed_account(db.path(), "acc-explicit");
+    seed_account_proxy(
+        db.path(),
+        "acc-explicit",
+        true,
+        Some("http://127.0.0.1:7001"),
+    );
+    let _managed_proxy = EnvGuard::set(ENV_UPSTREAM_PROXY_URL, "http://127.0.0.1:7003");
+    let _pool_proxy = EnvGuard::set(ENV_PROXY_LIST, "http://127.0.0.1:7004");
+    let _upper_https_proxy = EnvGuard::clear("HTTPS_PROXY");
+    let _https_proxy = EnvGuard::set("https_proxy", "http://127.0.0.1:7002");
+    let _all_proxy = EnvGuard::clear("all_proxy");
+    let _upper_all_proxy = EnvGuard::clear("ALL_PROXY");
+    let _no_proxy = EnvGuard::clear("no_proxy");
+    let _upper_no_proxy = EnvGuard::clear("NO_PROXY");
+
+    reload_from_env();
+
+    assert_eq!(
+        websocket_proxy_url_for_account(
+            "acc-explicit",
+            "wss://chatgpt.com/backend-api/codex/responses",
+        )
+        .expect("resolve websocket proxy")
+        .as_deref(),
+        Some("http://127.0.0.1:7001")
+    );
+}
+
+#[test]
+fn websocket_proxy_url_for_account_prefers_managed_proxy_over_environment() {
+    let _guard = crate::test_env_guard();
+    let db = TestDbGuard::new("runtime-websocket-managed-proxy");
+    seed_account(db.path(), "acc-managed");
+    let _managed_proxy = EnvGuard::set(ENV_UPSTREAM_PROXY_URL, "http://127.0.0.1:7003");
+    let _pool_proxy = EnvGuard::set(ENV_PROXY_LIST, "http://127.0.0.1:7004");
+    let _upper_https_proxy = EnvGuard::clear("HTTPS_PROXY");
+    let _https_proxy = EnvGuard::set("https_proxy", "http://127.0.0.1:7002");
+    let _all_proxy = EnvGuard::clear("all_proxy");
+    let _upper_all_proxy = EnvGuard::clear("ALL_PROXY");
+    let _no_proxy = EnvGuard::clear("no_proxy");
+    let _upper_no_proxy = EnvGuard::clear("NO_PROXY");
+
+    reload_from_env();
+
+    assert_eq!(
+        websocket_proxy_url_for_account(
+            "acc-managed",
+            "wss://chatgpt.com/backend-api/codex/responses",
+        )
+        .expect("resolve websocket proxy")
+        .as_deref(),
+        Some("http://127.0.0.1:7003")
+    );
+}
+
+#[test]
+fn websocket_proxy_url_for_account_uses_proxy_pool_before_environment() {
+    let _guard = crate::test_env_guard();
+    let db = TestDbGuard::new("runtime-websocket-proxy-pool");
+    seed_account(db.path(), "acc-pool");
+    let _managed_proxy = EnvGuard::clear(ENV_UPSTREAM_PROXY_URL);
+    let _pool_proxy = EnvGuard::set(ENV_PROXY_LIST, "http://127.0.0.1:7004");
+    let _upper_https_proxy = EnvGuard::clear("HTTPS_PROXY");
+    let _https_proxy = EnvGuard::set("https_proxy", "http://127.0.0.1:7002");
+    let _all_proxy = EnvGuard::clear("all_proxy");
+    let _upper_all_proxy = EnvGuard::clear("ALL_PROXY");
+    let _no_proxy = EnvGuard::clear("no_proxy");
+    let _upper_no_proxy = EnvGuard::clear("NO_PROXY");
+
+    reload_from_env();
+
+    assert_eq!(
+        websocket_proxy_url_for_account(
+            "acc-pool",
+            "wss://chatgpt.com/backend-api/codex/responses",
+        )
+        .expect("resolve websocket proxy")
+        .as_deref(),
+        Some("http://127.0.0.1:7004")
+    );
+}
+
+#[test]
+fn websocket_environment_proxy_honors_no_proxy_host_and_port() {
+    let _guard = crate::test_env_guard();
+    let db = TestDbGuard::new("runtime-websocket-no-proxy");
+    seed_account(db.path(), "acc-bypass");
+    let _managed_proxy = EnvGuard::clear(ENV_UPSTREAM_PROXY_URL);
+    let _pool_proxy = EnvGuard::clear(ENV_PROXY_LIST);
+    let _upper_https_proxy = EnvGuard::clear("HTTPS_PROXY");
+    let _https_proxy = EnvGuard::set("https_proxy", "http://127.0.0.1:58438");
+    let _all_proxy = EnvGuard::clear("all_proxy");
+    let _upper_all_proxy = EnvGuard::clear("ALL_PROXY");
+    let _upper_no_proxy = EnvGuard::clear("NO_PROXY");
+    let _no_proxy = EnvGuard::set("no_proxy", ".example.test, chatgpt.com:443");
+
+    reload_from_env();
+
+    assert_eq!(
+        websocket_proxy_url_for_account(
+            "acc-bypass",
+            "wss://chatgpt.com/backend-api/codex/responses",
+        )
+        .expect("resolve bypassed websocket proxy"),
+        None
+    );
+    assert_eq!(
+        websocket_proxy_url_for_account(
+            "acc-bypass",
+            "wss://api.example.test/backend-api/codex/responses",
+        )
+        .expect("resolve suffix-bypassed websocket proxy"),
+        None
+    );
+    assert_eq!(
+        websocket_proxy_url_for_account(
+            "acc-bypass",
+            "wss://chatgpt.com:444/backend-api/codex/responses",
+        )
+        .expect("resolve non-bypassed websocket proxy")
+        .as_deref(),
+        Some("http://127.0.0.1:58438")
+    );
+}
+
+#[test]
+fn websocket_invalid_account_proxy_is_fail_closed_before_system_proxy() {
+    let _guard = crate::test_env_guard();
+    let db = TestDbGuard::new("runtime-websocket-invalid-account-proxy");
+    seed_account(db.path(), "acc-invalid");
+    seed_account_proxy(db.path(), "acc-invalid", true, Some("://invalid"));
+    let _managed_proxy = EnvGuard::clear(ENV_UPSTREAM_PROXY_URL);
+    let _pool_proxy = EnvGuard::clear(ENV_PROXY_LIST);
+    let _upper_https_proxy = EnvGuard::clear("HTTPS_PROXY");
+    let _https_proxy = EnvGuard::set("https_proxy", "http://127.0.0.1:7002");
+    let _all_proxy = EnvGuard::clear("all_proxy");
+    let _upper_all_proxy = EnvGuard::clear("ALL_PROXY");
+    let _no_proxy = EnvGuard::clear("no_proxy");
+    let _upper_no_proxy = EnvGuard::clear("NO_PROXY");
+
+    reload_from_env();
+
+    let error = websocket_proxy_url_for_account(
+        "acc-invalid",
+        "wss://chatgpt.com/backend-api/codex/responses",
+    )
+    .expect_err("invalid account proxy must fail closed");
+    assert!(error.contains("account explicit proxy"));
+    assert!(error.contains("fail-closed"));
 }
 
 #[test]
@@ -1397,6 +1593,34 @@ fn set_codex_user_agent_version_updates_env_and_user_agent() {
     assert_eq!(applied, "0.102.1");
     assert_eq!(current_codex_user_agent_version(), "0.102.1");
     assert!(current_codex_user_agent().contains("codex_cli_rs/0.102.1"));
+}
+
+#[test]
+fn gateway_user_agent_defaults_to_codex_and_accepts_valid_override() {
+    let _guard = crate::test_env_guard();
+    set_gateway_user_agent(None).expect("clear gateway user agent");
+    assert_eq!(current_gateway_user_agent(), current_codex_user_agent());
+
+    let applied =
+        set_gateway_user_agent(Some("  custom-client/1.2  ")).expect("set gateway user agent");
+    assert_eq!(applied.as_deref(), Some("custom-client/1.2"));
+    assert_eq!(current_gateway_user_agent(), "custom-client/1.2");
+
+    set_gateway_user_agent(None).expect("clear gateway user agent");
+}
+
+#[test]
+fn gateway_user_agent_rejects_unsafe_header_values() {
+    let _guard = crate::test_env_guard();
+    assert!(set_gateway_user_agent(Some("bad\r\nvalue"))
+        .expect_err("control characters must fail")
+        .contains("control characters"));
+    assert!(set_gateway_user_agent(Some(&"x".repeat(513)))
+        .expect_err("oversized value must fail")
+        .contains("must not exceed 512 bytes"));
+    assert!(set_gateway_user_agent(Some("客户端/1.0"))
+        .expect_err("non-header value must fail")
+        .contains("valid HTTP header value"));
 }
 
 /// 函数 `set_residency_requirement_updates_env_and_cache`

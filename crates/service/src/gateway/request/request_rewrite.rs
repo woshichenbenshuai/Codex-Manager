@@ -571,6 +571,22 @@ pub(super) fn apply_codex_candidate_transport_rules(path: &str, body: Vec<u8>) -
     serde_json::to_vec(&payload).unwrap_or(body)
 }
 
+pub(super) fn apply_external_dynamic_tools_transport_rules(path: &str, body: Vec<u8>) -> Vec<u8> {
+    if body.is_empty() || !responses::is_responses_path(path) {
+        return body;
+    }
+    let Ok(mut payload) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+    let Some(obj) = payload.as_object_mut() else {
+        return body;
+    };
+    if !responses::normalize_dynamic_tools_to_tools(path, obj) {
+        return body;
+    }
+    serde_json::to_vec(&payload).unwrap_or(body)
+}
+
 /// 函数 `apply_request_overrides_with_prompt_cache_key_mode`
 ///
 /// 作者: gaohongshun
@@ -604,6 +620,12 @@ fn apply_request_overrides_with_prompt_cache_key_mode(
     let use_codex_responses_compat =
         should_apply_codex_responses_compat(path, upstream_base_url, resolve_default_upstream_base);
     let use_codex_compat_rewrite = allow_codex_compat_rewrite && use_codex_responses_compat;
+    // Non-official Responses providers commonly reject Codex's dynamicTools
+    // envelope. Convert it only when an explicit non-Codex upstream is known;
+    // deferred routing must keep the original body until a candidate is chosen.
+    let normalize_external_dynamic_tools = upstream_base_url.is_some()
+        && responses::is_responses_path(path)
+        && !use_codex_responses_compat;
     let chat_rules_path = chat_request_rules_path(path);
     let normalized_model = model_slug
         .map(str::trim)
@@ -624,15 +646,35 @@ fn apply_request_overrides_with_prompt_cache_key_mode(
             let mut changed = false;
             let mut dropped_keys = Vec::new();
 
+            if normalize_external_dynamic_tools
+                && responses::normalize_dynamic_tools_to_tools(path, obj)
+            {
+                changed = true;
+            }
+
             // Ultra 由 Codex 客户端负责多代理编排；单个上游请求必须使用 Max。
             // 客户端原始值在进入此重写前已单独采集，供请求日志展示 ultra -> max。
             if normalize_client_ultra_for_upstream(obj) {
                 changed = true;
             }
 
-            let effective_model = compact_model_override
+            // `gpt-reserve` is Luna's upstream quota alias. Preserve it only when the
+            // configured model is unbound or Luna-equivalent; unrelated model bindings
+            // remain authoritative.
+            let configured_model = compact_model_override
                 .as_deref()
                 .or(normalized_model.as_deref());
+            let explicit_reserve_model = obj
+                .get("model")
+                .and_then(Value::as_str)
+                .filter(|model| {
+                    crate::models_v2::should_preserve_luna_reserve_alias(
+                        Some(model),
+                        configured_model,
+                    )
+                })
+                .map(|_| codexmanager_core::usage::LUNA_RESERVE_MODEL_SLUG);
+            let effective_model = explicit_reserve_model.or(configured_model);
             if let Some(model) = effective_model {
                 let forwarded_model = super::resolve_builtin_forwarded_model(model)
                     .unwrap_or_else(|| model.to_string());

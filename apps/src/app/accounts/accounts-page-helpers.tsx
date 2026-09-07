@@ -24,6 +24,12 @@ import type { Account } from "@/types";
 export type StatusFilter = "all" | "available" | "low_quota" | "limited" | "banned";
 export type AccountExportMode = "single" | "multiple";
 export type AccountSizeSortMode = "large-first" | "small-first";
+export type AccountMoveDirection = "up" | "down" | "top" | "bottom";
+export type AccountMovePlacement =
+  | { type: "top" }
+  | { type: "bottom" }
+  | { type: "before"; anchorAccountId: string }
+  | { type: "after"; anchorAccountId: string };
 
 const ACCOUNT_SORT_STEP = 5;
 
@@ -44,6 +50,8 @@ export type TranslateFn = (
   key: string,
   values?: Record<string, string | number>,
 ) => string;
+
+export type AccountStatusAction = "enable" | "disable" | null;
 
 export function formatAccountPlanValueLabel(value: string, t: TranslateFn) {
   const normalized = String(value || "")
@@ -119,6 +127,7 @@ export interface QuotaProgressProps {
 
 export interface QuotaSummaryItem extends QuotaProgressProps {
   id: string;
+  resetDurationMode?: "hours" | "days";
 }
 
 export interface AccountEditorState {
@@ -129,6 +138,7 @@ export interface AccountEditorState {
   currentTags: string;
   currentNote: string;
   currentSort: number;
+  currentForceEnabled: boolean;
   currentQuotaPrimaryWindowTokens: number | null;
   currentQuotaSecondaryWindowTokens: number | null;
 }
@@ -171,10 +181,10 @@ function QuotaProgress({
 
   return (
     <div className="flex min-w-[180px] flex-col gap-1.5">
-      <div className="flex items-center justify-between text-[10px]">
+      <div className="flex items-center justify-between text-[11px]">
         <div className="min-w-0">
           <div className="flex items-center gap-1 text-muted-foreground">
-            <Icon className={cn("h-3 w-3", palette.icon)} />
+            <Icon className={cn("h-3.5 w-3.5", palette.icon)} />
             <span>{label}</span>
           </div>
           {caption ? (
@@ -182,7 +192,7 @@ function QuotaProgress({
               className={fitLongTextClassName(
                 caption,
                 "max-w-full break-all text-muted-foreground/80 [overflow-wrap:anywhere]",
-                "text-[9px]",
+                "text-[10px]",
               )}
               title={caption}
             >
@@ -199,7 +209,7 @@ function QuotaProgress({
         trackClassName={palette.track}
         indicatorClassName={palette.indicator}
       />
-      <div className="text-[10px] text-muted-foreground">
+      <div className="text-[11px] leading-4 text-muted-foreground">
         {t("重置")}: {formatTsFromSeconds(resetsAt, emptyResetText)}
       </div>
     </div>
@@ -208,27 +218,29 @@ function QuotaProgress({
 
 export function QuotaOverviewCell({ items }: { items: QuotaSummaryItem[] }) {
   const { t } = useI18n();
-  const summaryItems = items.slice(0, 2);
 
   return (
     <Tooltip>
       <TooltipTrigger render={<div />} className="block min-w-0 cursor-help">
-        <div className="rounded-xl border border-primary/5 bg-accent/10 px-3 py-2">
-          <div className="flex items-center gap-3">
-            {summaryItems.map((item) => (
-              <div key={item.id} className="min-w-0 flex-1 space-y-1">
-                <div className="flex items-center justify-between text-[10px]">
+        <div className="rounded-xl border border-primary/5 bg-accent/10 px-3 py-2.5">
+          <div className="account-pool-quota-grid">
+            {items.map((item) => (
+              <div
+                key={item.id}
+                className="account-pool-quota-item min-w-0 rounded-lg border border-border/40 bg-background/20 p-2"
+              >
+                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-1 text-[11px] leading-4">
                   <span
                     className={fitLongTextClassName(
                       item.label,
-                      "min-w-0 max-w-full break-words text-muted-foreground [overflow-wrap:anywhere]",
-                      "text-[10px]",
+                      "min-w-0 break-words text-muted-foreground [overflow-wrap:anywhere]",
+                      "text-[11px]",
                     )}
                     title={item.label}
                   >
                     {item.label}
                   </span>
-                  <span className="font-medium text-foreground/80">
+                  <span className="shrink-0 whitespace-nowrap font-medium text-foreground/80">
                     {item.remainPercent == null
                       ? (item.emptyText ?? "--")
                       : `${item.remainPercent}%`}
@@ -251,38 +263,32 @@ export function QuotaOverviewCell({ items }: { items: QuotaSummaryItem[] }) {
                         : "bg-green-500"
                   }
                 />
-              </div>
-            ))}
-          </div>
-          <div className="mt-1 grid grid-cols-2 gap-3 text-[10px] text-muted-foreground">
-            {summaryItems.map((item) => (
-              <div
-                key={`${item.id}-reset`}
-                className="min-w-0 space-y-0.5"
-              >
-                <span
-                  className={fitLongTextClassName(
-                    formatTsFromSeconds(
+                <div className="mt-1.5 space-y-0.5 text-[11px] text-muted-foreground">
+                  <span
+                    className={fitLongTextClassName(
+                      formatTsFromSeconds(
+                        item.resetsAt,
+                        item.emptyResetText ?? t("未知"),
+                      ),
+                      "block min-w-0 max-w-full break-all leading-tight [overflow-wrap:anywhere]",
+                      "text-[10px]",
+                    )}
+                  >
+                    {formatTsFromSeconds(
                       item.resetsAt,
                       item.emptyResetText ?? t("未知"),
-                    ),
-                    "block min-w-0 break-words leading-tight [overflow-wrap:anywhere]",
-                    "text-[10px]",
-                  )}
-                >
-                  {formatTsFromSeconds(
-                    item.resetsAt,
-                    item.emptyResetText ?? t("未知"),
-                  )}
-                </span>
-                <span className="block whitespace-nowrap leading-tight text-foreground/70">
-                  {formatRemainingDurationFromSeconds(
-                    item.resetsAt,
-                    item.id.endsWith("-primary") ? "hours" : "days",
-                    item.emptyResetText ?? t("未知"),
-                  )}
-                  {t("后刷新")}
-                </span>
+                    )}
+                  </span>
+                  <span className="block min-w-0 max-w-full break-words whitespace-normal leading-tight text-foreground/70 [overflow-wrap:anywhere]">
+                    {formatRemainingDurationFromSeconds(
+                      item.resetsAt,
+                      item.resetDurationMode ??
+                        (item.id.endsWith("-primary") ? "hours" : "days"),
+                      item.emptyResetText ?? t("未知"),
+                    )}
+                    {t("后刷新")}
+                  </span>
+                </div>
               </div>
             ))}
           </div>
@@ -299,7 +305,7 @@ export function QuotaOverviewCell({ items }: { items: QuotaSummaryItem[] }) {
             <p className="text-sm font-semibold">
               {t("额度详情（悬停查看所有额度）")}
             </p>
-            <p className="text-[10px] text-muted-foreground">
+            <p className="text-[11px] leading-4 text-muted-foreground">
               {t("标准额度与专属额度统一在这里查看。")}
             </p>
           </div>
@@ -324,27 +330,42 @@ export function QuotaOverviewCell({ items }: { items: QuotaSummaryItem[] }) {
   );
 }
 
+export function getAccountStatusActionType(account: Account): AccountStatusAction {
+  const normalizedStatus = String(account.status || "")
+    .trim()
+    .toLowerCase();
+  if (normalizedStatus === "disabled" || normalizedStatus === "inactive") {
+    return "enable";
+  }
+  if (normalizedStatus === "banned") {
+    return null;
+  }
+  return "disable";
+}
+
 export function getAccountStatusAction(
   account: Account,
   t: TranslateFn,
 ): {
-  action: "enable" | "disable" | null;
+  action: AccountStatusAction;
   label: string;
   icon: LucideIcon;
 } {
   const normalizedStatus = String(account.status || "")
     .trim()
     .toLowerCase();
-  if (normalizedStatus === "disabled") {
-    return { action: "enable", label: t("启用账号"), icon: Power };
+  const action = getAccountStatusActionType(account);
+  if (action === "enable") {
+    return {
+      action,
+      label: normalizedStatus === "inactive" ? t("恢复账号") : t("启用账号"),
+      icon: Power,
+    };
   }
-  if (normalizedStatus === "inactive") {
-    return { action: "enable", label: t("恢复账号"), icon: Power };
-  }
-  if (normalizedStatus === "banned") {
+  if (action === null) {
     return { action: null, label: t("封禁账号"), icon: PowerOff };
   }
-  return { action: "disable", label: t("禁用账号"), icon: PowerOff };
+  return { action, label: t("禁用账号"), icon: PowerOff };
 }
 
 export function getAccountStatusReasonCode(account: Account): string {
@@ -415,6 +436,8 @@ export function formatAccountStatusReasonLabel(
       return t("工作区已停用");
     case "usage_limit_exhausted":
       return t("额度已耗尽");
+    case "manual_force_enable":
+      return t("手动强制开启");
     default:
       return reasonCode;
   }
@@ -428,18 +451,21 @@ export function AccountStatusCell({ account }: { account: Account }) {
 
   return (
     <Tooltip>
-      <TooltipTrigger render={<div />} className="block min-w-0 cursor-help">
-        <div className="flex min-w-0 flex-col gap-1">
+      <TooltipTrigger
+        render={<div />}
+        className="block min-w-0 max-w-full cursor-help overflow-hidden"
+      >
+        <div className="flex min-w-0 max-w-full flex-col gap-1">
           <div className="flex min-w-0 items-center gap-1.5">
             <div
               className={cn(
-                "h-1.5 w-1.5 shrink-0 rounded-full",
+                "h-2 w-2 shrink-0 rounded-full ring-2 ring-background",
                 account.isAvailable ? "bg-green-500" : "bg-red-500",
               )}
             />
             <span
               className={cn(
-                "text-[11px] font-medium",
+                "min-w-0 max-w-full break-words whitespace-normal text-xs font-semibold leading-4 [overflow-wrap:anywhere]",
                 account.isAvailable
                   ? "text-green-600 dark:text-green-400"
                   : "text-red-600 dark:text-red-400",
@@ -452,8 +478,8 @@ export function AccountStatusCell({ account }: { account: Account }) {
             <span
               className={fitLongTextClassName(
                 statusReasonLabel,
-                "block max-w-[180px] whitespace-normal break-words text-muted-foreground [overflow-wrap:anywhere]",
-                "text-[10px] leading-snug",
+                "block min-w-0 max-w-full whitespace-normal break-words text-muted-foreground [overflow-wrap:anywhere]",
+                "text-[11px] leading-4",
               )}
               title={statusReasonLabel}
             >
@@ -596,6 +622,39 @@ export function buildAccountOrderUpdates(orderedAccounts: Account[]) {
   );
 }
 
+// 按目标位置重排账号；锚点账号不存在时返回 null，由调用方提示刷新。
+export function buildAccountsByMovedOrder(
+  orderedAccounts: Account[],
+  account: Account,
+  placement: AccountMovePlacement,
+): Account[] | null {
+  const reorderedAccounts = orderedAccounts.filter(
+    (item) => item.id !== account.id,
+  );
+
+  if (placement.type === "top") {
+    reorderedAccounts.unshift(account);
+    return reorderedAccounts;
+  }
+  if (placement.type === "bottom") {
+    reorderedAccounts.push(account);
+    return reorderedAccounts;
+  }
+
+  const anchorIndex = reorderedAccounts.findIndex(
+    (item) => item.id === placement.anchorAccountId,
+  );
+  if (anchorIndex === -1) {
+    return null;
+  }
+  reorderedAccounts.splice(
+    placement.type === "before" ? anchorIndex : anchorIndex + 1,
+    0,
+    account,
+  );
+  return reorderedAccounts;
+}
+
 export function getAccountSizeGroup(
   account: Account,
 ): "large" | "standard" | "small" {
@@ -655,6 +714,7 @@ export function buildQuotaSummaryItems(
       caption: t("标准模型窗口"),
       emptyText: secondaryWindowOnly ? t("未提供") : "--",
       emptyResetText: secondaryWindowOnly ? t("未提供") : t("未知"),
+      resetDurationMode: "hours",
     },
     {
       id: `${account.id}-secondary`,
@@ -666,6 +726,7 @@ export function buildQuotaSummaryItems(
       caption: t("长周期窗口"),
       emptyText: primaryWindowOnly ? t("未提供") : "--",
       emptyResetText: primaryWindowOnly ? t("未提供") : t("未知"),
+      resetDurationMode: "days",
     },
     ...extraUsageRows.map((item) => ({
       id: item.id,
@@ -677,6 +738,9 @@ export function buildQuotaSummaryItems(
       caption: t(item.windowLabel, item.windowLabelValues),
       emptyText: "--",
       emptyResetText: t("未知"),
+      resetDurationMode: item.windowLabel.includes("天")
+        ? ("days" as const)
+        : ("hours" as const),
     })),
   ];
 }
@@ -713,11 +777,7 @@ export function AccountInfoCell({
         <div className="flex min-w-0 flex-col whitespace-normal">
           <div className="flex min-w-0 flex-wrap items-center gap-1.5">
             <span
-              className={fitLongTextClassName(
-                account.name,
-                "inline-block min-w-0 max-w-full break-words font-semibold [overflow-wrap:anywhere]",
-                "text-sm",
-              )}
+              className="inline-block min-w-0 max-w-full break-words text-[15px] font-semibold leading-5 [overflow-wrap:anywhere]"
               title={account.name}
             >
               {account.name}
@@ -726,7 +786,7 @@ export function AccountInfoCell({
               <Badge
                 variant="secondary"
                 className={cn(
-                  "h-4 shrink-0 px-1.5 text-[9px]",
+                  "h-5 shrink-0 px-2 text-[10px] font-semibold",
                   getAccountPlanBadgeClassName(accountPlanLabel),
                 )}
               >
@@ -736,7 +796,7 @@ export function AccountInfoCell({
             {isPreferred ? (
               <Badge
                 variant="secondary"
-                className="h-4 shrink-0 bg-amber-500/15 px-1.5 text-[10px] text-amber-700 dark:text-amber-300"
+                className="h-5 shrink-0 bg-amber-500/15 px-2 text-[10px] font-semibold text-amber-700 dark:text-amber-300"
               >
                 {t("优先")}
               </Badge>
@@ -744,18 +804,18 @@ export function AccountInfoCell({
             {groupName ? (
               <Badge
                 variant="outline"
-                className="h-4 max-w-full shrink px-1.5 text-[9px] text-muted-foreground"
+                className="h-5 max-w-full shrink px-2 text-[10px] font-medium text-muted-foreground"
                 title={groupName}
               >
                 <span className="truncate">{groupName}</span>
               </Badge>
             ) : null}
           </div>
-          <span className="mt-1 text-[10px] text-muted-foreground">
+          <span className="mt-1.5 text-[11px] leading-4 text-muted-foreground">
             {t("最近刷新")}:{" "}
             {formatTsFromSeconds(account.lastRefreshAt, t("从未刷新"))}
           </span>
-          <span className="text-[10px] text-muted-foreground">
+          <span className="text-[11px] leading-4 text-muted-foreground">
             {t("订阅到期")}: {subscriptionExpiryText}
           </span>
         </div>

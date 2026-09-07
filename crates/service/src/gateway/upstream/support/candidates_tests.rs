@@ -64,11 +64,40 @@ fn insert_usage_snapshot(
     crate::gateway::invalidate_candidate_cache();
 }
 
+fn insert_saturated_usage_snapshot(
+    storage: &Storage,
+    account_id: &str,
+    credits_json: Option<&str>,
+) {
+    storage
+        .insert_usage_snapshot(&UsageSnapshotRecord {
+            account_id: account_id.to_string(),
+            used_percent: Some(100.0),
+            window_minutes: Some(300),
+            resets_at: None,
+            secondary_used_percent: Some(100.0),
+            secondary_window_minutes: Some(10080),
+            secondary_resets_at: None,
+            credits_json: credits_json.map(str::to_string),
+            captured_at: now_ts(),
+        })
+        .expect("insert saturated usage snapshot");
+    crate::gateway::invalidate_candidate_cache();
+}
+
 struct QuotaGuardReset(crate::gateway::QuotaGuardConfig);
 
 impl Drop for QuotaGuardReset {
     fn drop(&mut self) {
         crate::gateway::set_quota_guard_config(self.0);
+    }
+}
+
+struct FreeAccountMaxModelReset(String);
+
+impl Drop for FreeAccountMaxModelReset {
+    fn drop(&mut self) {
+        let _ = crate::gateway::set_free_account_max_model(self.0.as_str());
     }
 }
 
@@ -170,6 +199,282 @@ fn quota_fallback_is_evaluated_inside_restricted_group() {
     .expect("prepare restricted low quota candidates");
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].0.id, "acc-team-a-low");
+}
+
+#[test]
+fn free_account_model_ceiling_filters_free_accounts_before_quota_selection() {
+    let _guard = crate::test_env_guard();
+    let _free_model_reset =
+        FreeAccountMaxModelReset(crate::gateway::current_free_account_max_model());
+    crate::gateway::set_free_account_max_model("gpt-5.2").expect("set free model ceiling");
+    let previous_quota_guard = crate::gateway::current_quota_guard_config();
+    let _quota_guard_reset = QuotaGuardReset(previous_quota_guard);
+    crate::gateway::set_quota_guard_config(crate::gateway::QuotaGuardConfig {
+        enabled: true,
+        primary_min_remaining_percent: 20.0,
+        secondary_min_remaining_percent: 0.0,
+        allow_all_low_quota_fallback: true,
+    });
+
+    let storage = Storage::open_in_memory().expect("open");
+    storage.init().expect("init");
+    insert_active_account_with_token(&storage, "acc-free-healthy", 0);
+    insert_usage_snapshot(&storage, "acc-free-healthy", 10.0, Some("free"));
+    insert_active_account_with_token(&storage, "acc-plus-low", 1);
+    insert_usage_snapshot(&storage, "acc-plus-low", 99.0, Some("plus"));
+
+    let candidates = super::prepare_gateway_candidates(
+        &storage,
+        Some("gpt-5.4"),
+        None,
+        None,
+        crate::gateway::LowQuotaCandidateMode::NormalOnly,
+    )
+    .expect("prepare candidates above free model ceiling");
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].0.id, "acc-plus-low");
+}
+
+#[test]
+fn free_account_model_ceiling_keeps_boundary_model_and_paid_accounts() {
+    let _guard = crate::test_env_guard();
+    let _free_model_reset =
+        FreeAccountMaxModelReset(crate::gateway::current_free_account_max_model());
+    crate::gateway::set_free_account_max_model("gpt-5.2").expect("set free model ceiling");
+    let previous_quota_guard = crate::gateway::current_quota_guard_config();
+    let _quota_guard_reset = QuotaGuardReset(previous_quota_guard);
+    crate::gateway::set_quota_guard_config(crate::gateway::QuotaGuardConfig {
+        enabled: false,
+        primary_min_remaining_percent: 0.0,
+        secondary_min_remaining_percent: 0.0,
+        allow_all_low_quota_fallback: true,
+    });
+
+    let storage = Storage::open_in_memory().expect("open");
+    storage.init().expect("init");
+    insert_active_account_with_token(&storage, "acc-free-boundary", 0);
+    insert_usage_snapshot(&storage, "acc-free-boundary", 10.0, Some("free"));
+    insert_active_account_with_token(&storage, "acc-pro-boundary", 1);
+    insert_usage_snapshot(&storage, "acc-pro-boundary", 10.0, Some("pro"));
+
+    let boundary_candidates = super::prepare_gateway_candidates(
+        &storage,
+        Some("gpt-5.2"),
+        None,
+        None,
+        crate::gateway::LowQuotaCandidateMode::NormalOnly,
+    )
+    .expect("prepare candidates at free model ceiling");
+    assert_eq!(boundary_candidates.len(), 2);
+
+    let above_ceiling_candidates = super::prepare_gateway_candidates(
+        &storage,
+        Some("gpt-5.4"),
+        None,
+        None,
+        crate::gateway::LowQuotaCandidateMode::NormalOnly,
+    )
+    .expect("prepare candidates above free model ceiling");
+    assert_eq!(above_ceiling_candidates.len(), 1);
+    assert_eq!(above_ceiling_candidates[0].0.id, "acc-pro-boundary");
+}
+
+#[test]
+fn free_account_model_ceiling_treats_reserve_alias_as_luna_boundary() {
+    let _guard = crate::test_env_guard();
+    let _free_model_reset =
+        FreeAccountMaxModelReset(crate::gateway::current_free_account_max_model());
+    crate::gateway::set_free_account_max_model(codexmanager_core::usage::LUNA_MODEL_SLUG)
+        .expect("set Luna free model ceiling");
+    let previous_quota_guard = crate::gateway::current_quota_guard_config();
+    let _quota_guard_reset = QuotaGuardReset(previous_quota_guard);
+    crate::gateway::set_quota_guard_config(crate::gateway::QuotaGuardConfig {
+        enabled: false,
+        primary_min_remaining_percent: 0.0,
+        secondary_min_remaining_percent: 0.0,
+        allow_all_low_quota_fallback: true,
+    });
+
+    let storage = Storage::open_in_memory().expect("open");
+    storage.init().expect("init");
+    insert_active_account_with_token(&storage, "acc-free-reserve", 0);
+    insert_usage_snapshot(&storage, "acc-free-reserve", 10.0, Some("free"));
+    storage
+        .update_account_status("acc-free-reserve", "force_enabled")
+        .expect("mark Reserve candidate force enabled");
+
+    let candidates = super::prepare_gateway_candidates(
+        &storage,
+        Some(codexmanager_core::usage::LUNA_RESERVE_MODEL_SLUG),
+        None,
+        None,
+        crate::gateway::LowQuotaCandidateMode::NormalOnly,
+    )
+    .expect("prepare Reserve candidates at Luna free model ceiling");
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].0.id, "acc-free-reserve");
+}
+
+#[test]
+fn free_account_model_ceiling_auto_does_not_filter_unknown_models() {
+    let _guard = crate::test_env_guard();
+    let _free_model_reset =
+        FreeAccountMaxModelReset(crate::gateway::current_free_account_max_model());
+    crate::gateway::set_free_account_max_model("auto").expect("disable free model ceiling");
+    let previous_quota_guard = crate::gateway::current_quota_guard_config();
+    let _quota_guard_reset = QuotaGuardReset(previous_quota_guard);
+    crate::gateway::set_quota_guard_config(crate::gateway::QuotaGuardConfig {
+        enabled: false,
+        primary_min_remaining_percent: 0.0,
+        secondary_min_remaining_percent: 0.0,
+        allow_all_low_quota_fallback: true,
+    });
+
+    let storage = Storage::open_in_memory().expect("open");
+    storage.init().expect("init");
+    insert_active_account_with_token(&storage, "acc-free-auto", 0);
+    insert_usage_snapshot(&storage, "acc-free-auto", 10.0, Some("free"));
+
+    let candidates = super::prepare_gateway_candidates(
+        &storage,
+        Some("gpt-custom-preview"),
+        None,
+        None,
+        crate::gateway::LowQuotaCandidateMode::NormalOnly,
+    )
+    .expect("prepare candidates without free model ceiling");
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].0.id, "acc-free-auto");
+}
+
+#[test]
+fn free_account_model_ceiling_treats_unknown_request_models_as_above_ceiling() {
+    let _guard = crate::test_env_guard();
+    let _free_model_reset =
+        FreeAccountMaxModelReset(crate::gateway::current_free_account_max_model());
+    crate::gateway::set_free_account_max_model("gpt-5.2").expect("set free model ceiling");
+    let previous_quota_guard = crate::gateway::current_quota_guard_config();
+    let _quota_guard_reset = QuotaGuardReset(previous_quota_guard);
+    crate::gateway::set_quota_guard_config(crate::gateway::QuotaGuardConfig {
+        enabled: false,
+        primary_min_remaining_percent: 0.0,
+        secondary_min_remaining_percent: 0.0,
+        allow_all_low_quota_fallback: true,
+    });
+
+    let storage = Storage::open_in_memory().expect("open");
+    storage.init().expect("init");
+    insert_active_account_with_token(&storage, "acc-free-unknown", 0);
+    insert_usage_snapshot(&storage, "acc-free-unknown", 10.0, Some("free"));
+    insert_active_account_with_token(&storage, "acc-plus-unknown", 1);
+    insert_usage_snapshot(&storage, "acc-plus-unknown", 10.0, Some("plus"));
+
+    let candidates = super::prepare_gateway_candidates(
+        &storage,
+        Some("gpt-custom-preview"),
+        None,
+        None,
+        crate::gateway::LowQuotaCandidateMode::NormalOnly,
+    )
+    .expect("prepare candidates for unknown model");
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].0.id, "acc-plus-unknown");
+}
+
+#[test]
+fn reserve_alias_uses_only_reserve_or_force_enabled_accounts() {
+    let _guard = crate::test_env_guard();
+    let _free_model_reset =
+        FreeAccountMaxModelReset(crate::gateway::current_free_account_max_model());
+    crate::gateway::set_free_account_max_model("auto").expect("disable free model ceiling");
+    let previous_quota_guard = crate::gateway::current_quota_guard_config();
+    let _quota_guard_reset = QuotaGuardReset(previous_quota_guard);
+    crate::gateway::set_quota_guard_config(crate::gateway::QuotaGuardConfig {
+        enabled: false,
+        primary_min_remaining_percent: 0.0,
+        secondary_min_remaining_percent: 0.0,
+        allow_all_low_quota_fallback: false,
+    });
+
+    let storage = Storage::open_in_memory().expect("open");
+    storage.init().expect("init");
+    insert_active_account_with_token(&storage, "acc-luna-reserve", 0);
+    insert_active_account_with_token(&storage, "acc-force-enabled", 1);
+    insert_active_account_with_token(&storage, "acc-exhausted", 2);
+    insert_active_account_with_token(&storage, "acc-standard-healthy", 3);
+    insert_active_account_with_token(&storage, "acc-expired-reserve", 4);
+    storage
+        .update_account_status("acc-force-enabled", "force_enabled")
+        .expect("mark force enabled");
+    insert_saturated_usage_snapshot(
+        &storage,
+        "acc-luna-reserve",
+        Some(
+            r#"{"_codexmanager_extra_rate_limits":[{"limit_name":"Luna Reserve","metered_feature":"base_model_inference","primary_window":{"used_percent":10.0}}]}"#,
+        ),
+    );
+    insert_saturated_usage_snapshot(&storage, "acc-force-enabled", None);
+    insert_saturated_usage_snapshot(&storage, "acc-exhausted", None);
+    insert_usage_snapshot(&storage, "acc-standard-healthy", 10.0, Some("plus"));
+    insert_saturated_usage_snapshot(
+        &storage,
+        "acc-expired-reserve",
+        Some(
+            r#"{"_codexmanager_extra_rate_limits":[{"limit_name":"Luna Reserve","primary_window":{"remaining_percent":100.0,"reset_at":1}}]}"#,
+        ),
+    );
+
+    let reserve_candidates = super::prepare_gateway_candidates(
+        &storage,
+        Some("gpt-reserve"),
+        None,
+        None,
+        crate::gateway::LowQuotaCandidateMode::NormalOnly,
+    )
+    .expect("prepare Luna Reserve candidates");
+    assert_eq!(
+        reserve_candidates
+            .iter()
+            .map(|(account, _)| account.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["acc-luna-reserve", "acc-force-enabled"]
+    );
+
+    let luna_candidates = super::prepare_gateway_candidates(
+        &storage,
+        Some("gpt-5.6-luna"),
+        None,
+        None,
+        crate::gateway::LowQuotaCandidateMode::NormalOnly,
+    )
+    .expect("prepare standard Luna candidates");
+    assert_eq!(
+        luna_candidates
+            .iter()
+            .map(|(account, _)| account.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["acc-force-enabled", "acc-standard-healthy"]
+    );
+
+    let standard_candidates = super::prepare_gateway_candidates(
+        &storage,
+        Some("gpt-5.4"),
+        None,
+        None,
+        crate::gateway::LowQuotaCandidateMode::NormalOnly,
+    )
+    .expect("prepare standard candidates");
+    assert_eq!(
+        standard_candidates
+            .iter()
+            .map(|(account, _)| account.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["acc-force-enabled", "acc-standard-healthy"]
+    );
 }
 
 fn upsert_account_source_model(storage: &Storage, account_id: &str, upstream_model: &str) {

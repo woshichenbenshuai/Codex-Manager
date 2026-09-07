@@ -1,10 +1,12 @@
 pub const APP_SETTING_UPDATE_AUTO_CHECK_KEY: &str = "app.update.auto_check";
 pub const APP_SETTING_AUTO_START_ENABLED_KEY: &str = "app.auto_start_enabled";
+pub const APP_SETTING_SHOW_MAIN_WINDOW_ON_STARTUP_KEY: &str = "app.show_main_window_on_startup";
 pub const APP_SETTING_CLOSE_TO_TRAY_ON_CLOSE_KEY: &str = "app.close_to_tray_on_close";
 pub const APP_SETTING_KEEP_WINDOW_UI_MOUNTED_KEY: &str = "app.keep_window_ui_mounted";
 pub const APP_SETTING_LIGHTWEIGHT_MODE_ON_CLOSE_TO_TRAY_KEY: &str =
     "app.lightweight_mode_on_close_to_tray";
 pub const APP_SETTING_UI_LOW_TRANSPARENCY_KEY: &str = "ui.low_transparency";
+pub const APP_SETTING_UI_ZOOM_FACTOR_KEY: &str = "ui.zoom_factor";
 pub const APP_SETTING_UI_CODEX_CLI_GUIDE_DISMISSED_KEY: &str = "ui.codex_cli_guide_dismissed";
 pub const APP_SETTING_UI_THEME_KEY: &str = "ui.theme";
 pub const APP_SETTING_UI_APPEARANCE_PRESET_KEY: &str = "ui.appearance_preset";
@@ -24,6 +26,7 @@ pub const APP_SETTING_GATEWAY_QUOTA_GUARD_KEY: &str = "gateway.quota_guard";
 pub const APP_SETTING_GATEWAY_REQUEST_COMPRESSION_ENABLED_KEY: &str =
     "gateway.request_compression_enabled";
 pub const APP_SETTING_GATEWAY_ORIGINATOR_KEY: &str = "gateway.originator";
+pub const APP_SETTING_GATEWAY_USER_AGENT_KEY: &str = "gateway.user_agent";
 pub const APP_SETTING_GATEWAY_USER_AGENT_VERSION_KEY: &str = "gateway.user_agent_version";
 pub const APP_SETTING_GATEWAY_RESIDENCY_REQUIREMENT_KEY: &str = "gateway.residency_requirement";
 pub const APP_SETTING_GATEWAY_UPSTREAM_PROXY_URL_KEY: &str = "gateway.upstream_proxy_url";

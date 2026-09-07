@@ -36,6 +36,7 @@ import type { AggregateApi } from "@/types/api-key";
 import type {
   ManagedModelV2,
   ManagedModelV2Upsert,
+  ModelFastPolicyV2,
   ModelInstructionsModeV2,
   ModelPriceTierV2,
   ModelRouteSourceKindV2,
@@ -69,13 +70,16 @@ type ModelDraft = {
   contextWindow: string;
   maxContextWindow: string;
   defaultReasoningEffort: string;
+  fastPolicy: ModelFastPolicyV2;
   capabilitiesJson: string;
   inputPrice: string;
   cachedInputPrice: string;
+  cacheWritePrice: string;
   outputPrice: string;
   longContextThreshold: string;
   longInputPrice: string;
   longCachedInputPrice: string;
+  longCacheWritePrice: string;
   longOutputPrice: string;
   routes: RouteDraft[];
   instructionsMode: ModelInstructionsModeV2;
@@ -96,7 +100,13 @@ const DEFAULT_CAPABILITIES = {
   reasoningEfforts: [],
   serviceTiers: [],
   inputModalities: ["text", "image"],
-  supportsParallelToolCalls: true,
+  supportsParallelToolCalls: false,
+  supportsReasoningSummaries: false,
+  defaultReasoningSummary: "auto",
+  supportsVerbosity: false,
+  truncationMode: "tokens",
+  truncationLimit: 10000,
+  experimentalSupportedTools: [],
 };
 
 function aggregateApiDisplayName(
@@ -150,16 +160,23 @@ function buildDraft(model: ManagedModelV2 | null | undefined, nextSortOrder: num
     maxContextWindow:
       model?.maxContextWindow == null ? "" : String(model.maxContextWindow),
     defaultReasoningEffort: model?.defaultReasoningEffort || "",
+    fastPolicy: model?.fastPolicy || "passthrough",
     capabilitiesJson: JSON.stringify(model?.capabilities || DEFAULT_CAPABILITIES, null, 2),
     inputPrice: microusdToUsdPerMillion(model?.price.inputMicrousdPer1m ?? null),
     cachedInputPrice: microusdToUsdPerMillion(
       model?.price.cachedInputMicrousdPer1m ?? null,
+    ),
+    cacheWritePrice: microusdToUsdPerMillion(
+      model?.price.cacheWriteMicrousdPer1m ?? null,
     ),
     outputPrice: microusdToUsdPerMillion(model?.price.outputMicrousdPer1m ?? null),
     longContextThreshold: longTier ? String(longTier.minInputTokens) : "",
     longInputPrice: microusdToUsdPerMillion(longTier?.inputMicrousdPer1m ?? null),
     longCachedInputPrice: microusdToUsdPerMillion(
       longTier?.cachedInputMicrousdPer1m ?? null,
+    ),
+    longCacheWritePrice: microusdToUsdPerMillion(
+      longTier?.cacheWriteMicrousdPer1m ?? null,
     ),
     longOutputPrice: microusdToUsdPerMillion(longTier?.outputMicrousdPer1m ?? null),
     routes:
@@ -218,13 +235,15 @@ function buildPrice(
   if (!hasBasePrice) {
     if (
       [
+        draft.cacheWritePrice,
         draft.longContextThreshold,
         draft.longInputPrice,
         draft.longCachedInputPrice,
+        draft.longCacheWritePrice,
         draft.longOutputPrice,
       ].some((value) => value.trim() !== "")
     ) {
-      throw new Error("配置长上下文价格前必须先填写基础三价");
+      throw new Error("配置缓存写入或长上下文价格前必须先填写基础三价");
     }
     return {
       price: {
@@ -232,6 +251,7 @@ function buildPrice(
         priceSource: null,
         inputMicrousdPer1m: null,
         cachedInputMicrousdPer1m: null,
+        cacheWriteMicrousdPer1m: null,
         outputMicrousdPer1m: null,
       },
       priceTiers: [],
@@ -245,17 +265,23 @@ function buildPrice(
     minInputTokens: 0,
     inputMicrousdPer1m: usdPerMillionToMicrousd(draft.inputPrice),
     cachedInputMicrousdPer1m: usdPerMillionToMicrousd(draft.cachedInputPrice),
+    cacheWriteMicrousdPer1m: draft.cacheWritePrice.trim()
+      ? usdPerMillionToMicrousd(draft.cacheWritePrice)
+      : null,
     outputMicrousdPer1m: usdPerMillionToMicrousd(draft.outputPrice),
   };
   const priceTiers = [baseTier];
-  const longValues = [
+  const longRequiredValues = [
     draft.longContextThreshold,
     draft.longInputPrice,
     draft.longCachedInputPrice,
     draft.longOutputPrice,
   ];
-  if (longValues.some((value) => value.trim() !== "")) {
-    if (longValues.some((value) => value.trim() === "")) {
+  const hasLongPrice = [...longRequiredValues, draft.longCacheWritePrice].some(
+    (value) => value.trim() !== "",
+  );
+  if (hasLongPrice) {
+    if (longRequiredValues.some((value) => value.trim() === "")) {
       throw new Error("长上下文阈值和三项价格必须完整填写");
     }
     priceTiers.push({
@@ -264,6 +290,9 @@ function buildPrice(
       cachedInputMicrousdPer1m: usdPerMillionToMicrousd(
         draft.longCachedInputPrice,
       ),
+      cacheWriteMicrousdPer1m: draft.longCacheWritePrice.trim()
+        ? usdPerMillionToMicrousd(draft.longCacheWritePrice)
+        : null,
       outputMicrousdPer1m: usdPerMillionToMicrousd(draft.longOutputPrice),
     });
   }
@@ -272,6 +301,7 @@ function buildPrice(
     model != null &&
     model.price.inputMicrousdPer1m === baseTier.inputMicrousdPer1m &&
     model.price.cachedInputMicrousdPer1m === baseTier.cachedInputMicrousdPer1m &&
+    model.price.cacheWriteMicrousdPer1m === baseTier.cacheWriteMicrousdPer1m &&
     model.price.outputMicrousdPer1m === baseTier.outputMicrousdPer1m &&
     JSON.stringify(model.priceTiers) === JSON.stringify(priceTiers);
   return {
@@ -280,6 +310,7 @@ function buildPrice(
       priceSource: unchanged ? model.price.priceSource : "local-ui",
       inputMicrousdPer1m: baseTier.inputMicrousdPer1m,
       cachedInputMicrousdPer1m: baseTier.cachedInputMicrousdPer1m,
+      cacheWriteMicrousdPer1m: baseTier.cacheWriteMicrousdPer1m,
       outputMicrousdPer1m: baseTier.outputMicrousdPer1m,
     },
     priceTiers,
@@ -402,6 +433,7 @@ export function ModelCatalogModal({
           "最大上下文窗口",
         ),
         defaultReasoningEffort: draft.defaultReasoningEffort.trim() || null,
+        fastPolicy: draft.fastPolicy,
         capabilities: parseCapabilities(draft.capabilitiesJson),
         instructionsMode: draft.instructionsMode,
         instructionsText: draft.instructionsText.trim() || null,
@@ -603,6 +635,55 @@ export function ModelCatalogModal({
               </div>
 
               <div className="space-y-2">
+                <Label htmlFor="model-fast-policy">{t("Fast 策略")}</Label>
+                <Select
+                  value={draft.fastPolicy}
+                  onValueChange={(value) =>
+                    updateDraft(
+                      "fastPolicy",
+                      (value || "passthrough") as ModelFastPolicyV2,
+                    )
+                  }
+                >
+                  <SelectTrigger id="model-fast-policy" aria-label={t("Fast 策略")}>
+                    <SelectValue>
+                      {(value) => {
+                        switch (value) {
+                          case "filter":
+                            return t("过滤（移除 service_tier）");
+                          case "force":
+                            return t("强制设置 priority（Fast）");
+                          case "block":
+                            return t("拦截（拒绝 Fast 请求）");
+                          default:
+                            return t("透传（保留 service_tier）");
+                        }
+                      }}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="passthrough">
+                        {t("透传（保留 service_tier）")}
+                      </SelectItem>
+                      <SelectItem value="filter">
+                        {t("过滤（移除 service_tier）")}
+                      </SelectItem>
+                      <SelectItem value="force">
+                        {t("强制设置 priority（Fast）")}
+                      </SelectItem>
+                      <SelectItem value="block">
+                        {t("拦截（拒绝 Fast 请求）")}
+                      </SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <p className="text-[11px] text-muted-foreground">
+                  {t("控制该模型如何处理请求中的 service_tier。")}
+                </p>
+              </div>
+
+              <div className="space-y-2">
                 <Label htmlFor="model-capabilities">{t("关键能力 JSON")}</Label>
                 <Textarea
                   id="model-capabilities"
@@ -619,14 +700,18 @@ export function ModelCatalogModal({
             <TabsContent value="price" className="mt-4 space-y-4">
               <Card size="sm">
                 <CardHeader><CardTitle>{t("基础价格（美元 / 百万令牌）")}</CardTitle></CardHeader>
-                <CardContent className="grid gap-4 md:grid-cols-3">
+                <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                   <div className="space-y-2">
                     <Label htmlFor="price-input">{t("输入价格")}</Label>
                     <Input id="price-input" inputMode="decimal" value={draft.inputPrice} onChange={(event) => updateDraft("inputPrice", event.target.value)} placeholder={t("留空表示价格缺失")} />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="price-cached">{t("缓存输入价格")}</Label>
+                    <Label htmlFor="price-cached">{t("缓存读取价格")}</Label>
                     <Input id="price-cached" inputMode="decimal" value={draft.cachedInputPrice} onChange={(event) => updateDraft("cachedInputPrice", event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="price-cache-write">{t("缓存写入价格")}</Label>
+                    <Input id="price-cache-write" inputMode="decimal" value={draft.cacheWritePrice} onChange={(event) => updateDraft("cacheWritePrice", event.target.value)} placeholder={t("留空按普通输入价格计费")} />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="price-output">{t("输出价格")}</Label>
@@ -637,7 +722,7 @@ export function ModelCatalogModal({
 
               <Card size="sm">
                 <CardHeader><CardTitle>{t("可选长上下文阶梯价")}</CardTitle></CardHeader>
-                <CardContent className="grid gap-4 md:grid-cols-4">
+                <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
                   <div className="space-y-2">
                     <Label htmlFor="price-long-threshold">{t("输入令牌阈值")}</Label>
                     <Input id="price-long-threshold" type="number" min="1" value={draft.longContextThreshold} onChange={(event) => updateDraft("longContextThreshold", event.target.value)} />
@@ -647,8 +732,12 @@ export function ModelCatalogModal({
                     <Input id="price-long-input" inputMode="decimal" value={draft.longInputPrice} onChange={(event) => updateDraft("longInputPrice", event.target.value)} />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="price-long-cached">{t("缓存输入价格")}</Label>
+                    <Label htmlFor="price-long-cached">{t("缓存读取价格")}</Label>
                     <Input id="price-long-cached" inputMode="decimal" value={draft.longCachedInputPrice} onChange={(event) => updateDraft("longCachedInputPrice", event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="price-long-cache-write">{t("缓存写入价格")}</Label>
+                    <Input id="price-long-cache-write" inputMode="decimal" value={draft.longCacheWritePrice} onChange={(event) => updateDraft("longCacheWritePrice", event.target.value)} placeholder={t("留空按普通输入价格计费")} />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="price-long-output">{t("输出价格")}</Label>

@@ -2,6 +2,13 @@ use crate::storage_helpers::open_storage;
 
 pub(crate) const MISSING_AUTH_JSON_OPENAI_API_KEY_ERROR: &str =
     "配置错误：未配置auth.json的OPENAI_API_KEY(invalid api key)";
+pub(crate) const X_OPENAI_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
+pub(crate) const CODEXMANAGER_IMAGE_EXTENSION_ACTOR_AUTHORIZATION: &str = "local-image-extension";
+
+pub(crate) fn is_codexmanager_image_extension_actor_authorization(name: &str, value: &str) -> bool {
+    name.eq_ignore_ascii_case(X_OPENAI_ACTOR_AUTHORIZATION_HEADER)
+        && value.trim() == CODEXMANAGER_IMAGE_EXTENSION_ACTOR_AUTHORIZATION
+}
 
 pub(crate) fn bilingual_error(
     chinese_description: impl AsRef<str>,
@@ -15,12 +22,71 @@ pub(crate) fn bilingual_error(
 }
 
 pub(crate) fn extract_raw_error_message(message: &str) -> Option<&str> {
-    let (_, tail) = message.rsplit_once('(')?;
-    let tail = tail.strip_suffix(')')?.trim();
+    let message = message.trim();
+    if !message.ends_with(')') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut opening = None;
+    for (index, ch) in message.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    opening = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let opening = opening?;
+    if !message[..opening].chars().any(|ch| !ch.is_ascii()) {
+        return None;
+    }
+    let tail = message[opening + 1..message.len() - 1].trim();
     if tail.is_empty() || !tail.is_ascii() || !tail.chars().any(|ch| ch.is_ascii_alphabetic()) {
         return None;
     }
     Some(tail)
+}
+
+#[cfg(test)]
+mod bilingual_error_tests {
+    use super::*;
+
+    #[test]
+    fn raw_error_extraction_preserves_nested_parentheses() {
+        let message = bilingual_error(
+            "模型不允许加速请求",
+            "model does not allow Fast requests (accelerated service tier)",
+        );
+        assert_eq!(
+            extract_raw_error_message(&message),
+            Some("model does not allow Fast requests (accelerated service tier)")
+        );
+    }
+
+    #[test]
+    fn raw_error_extraction_keeps_simple_messages_and_rejects_non_bilingual_text() {
+        assert_eq!(
+            extract_raw_error_message(&bilingual_error("缺少 API Key", "missing api key")),
+            Some("missing api key")
+        );
+        assert_eq!(extract_raw_error_message("plain error"), None);
+        assert_eq!(
+            extract_raw_error_message(
+                "model does not allow Fast requests (accelerated service tier)"
+            ),
+            None
+        );
+        assert_eq!(extract_raw_error_message("中文错误（无英文）"), None);
+    }
 }
 
 fn is_codex_user_agent(value: &str) -> bool {
@@ -51,6 +117,24 @@ pub(crate) fn prefers_raw_errors_for_tiny_http_request(request: &tiny_http::Requ
     })
 }
 
+pub(crate) fn load_active_gateway_api_key(
+    storage: &codexmanager_core::storage::Storage,
+    platform_key: &str,
+    request_url: &str,
+) -> Result<codexmanager_core::storage::ApiKey, (u16, String)> {
+    local_validation::load_active_api_key_for_platform_key(storage, platform_key, request_url)
+        .map_err(|err| (err.status_code, err.message))
+}
+
+pub(crate) fn load_active_gateway_api_key_by_id(
+    storage: &codexmanager_core::storage::Storage,
+    key_id: &str,
+    request_url: &str,
+) -> Result<codexmanager_core::storage::ApiKey, (u16, String)> {
+    local_validation::load_active_api_key_for_id(storage, key_id, request_url)
+        .map_err(|err| (err.status_code, err.message))
+}
+
 pub(crate) fn error_message_for_client(
     _prefers_raw_errors: bool,
     message: impl Into<String>,
@@ -65,7 +149,7 @@ pub(crate) fn error_message_for_client(
 mod anchor_fingerprint;
 mod concurrency;
 #[path = "routing/conversation_binding.rs"]
-mod conversation_binding;
+pub(crate) mod conversation_binding;
 #[path = "routing/cooldown.rs"]
 mod cooldown;
 mod error_response;
@@ -147,7 +231,8 @@ pub(crate) use request_log::{
 #[cfg(test)]
 use request_rewrite::apply_request_overrides_with_service_tier_and_prompt_cache_key;
 use request_rewrite::{
-    apply_codex_candidate_transport_rules, apply_request_overrides_for_deferred_aggregate,
+    apply_codex_candidate_transport_rules, apply_external_dynamic_tools_transport_rules,
+    apply_request_overrides_for_deferred_aggregate,
     apply_request_overrides_with_service_tier_and_forced_prompt_cache_key_scope,
     apply_request_overrides_with_service_tier_and_prompt_cache_key_scope, compute_upstream_url,
 };
@@ -158,6 +243,11 @@ pub(crate) use trace_log::{
     log_client_service_tier, log_request_execution_plan, log_request_final, log_request_start,
     next_trace_id,
 };
+
+pub(crate) fn strip_cross_account_encrypted_content(body: &[u8]) -> Option<Vec<u8>> {
+    upstream::support::payload_rewrite::strip_encrypted_content_from_body(body)
+}
+
 #[cfg(test)]
 use upstream::config::normalize_upstream_base_url;
 use upstream::config::{
@@ -388,15 +478,19 @@ use request_gate::{request_gate_lock, RequestGateAcquireError};
 pub(crate) use request_log::write_request_log;
 use route_hint::{apply_route_strategy, apply_route_strategy_with_source};
 use route_quality::record_route_quality;
-pub(crate) use runtime_config::front_proxy_max_body_bytes;
 pub(crate) use runtime_config::invalidate_account_proxy_client_cache as invalidate_account_proxy_cache;
 pub(crate) use runtime_config::upstream_client;
 pub(crate) use runtime_config::{account_max_inflight_limit, set_account_max_inflight_limit};
+pub(crate) use runtime_config::{
+    account_test_proxy_url_for_account, build_account_test_client_with_timeouts,
+    current_codex_image_main_model,
+};
 pub(crate) use runtime_config::{
     async_upstream_client_for_account, fresh_async_upstream_client_for_account,
     fresh_upstream_client_for_account, prepare_upstream_client_for_account,
     upstream_client_for_account,
 };
+pub(crate) use runtime_config::{front_proxy_max_body_bytes, front_proxy_zstd_max_body_bytes};
 use runtime_config::{
     prepare_upstream_client_for_aggregate_api_candidate, request_gate_wait_timeout,
     trace_body_preview_max_bytes, upstream_client_for_aggregate_api_candidate,
@@ -412,6 +506,7 @@ pub(crate) use selection::{
 };
 #[cfg(test)]
 use token_exchange::account_token_exchange_lock;
+pub(crate) use token_exchange::api_key_exchange_client_id;
 use token_exchange::resolve_openai_bearer_token;
 use upstream::proxy::proxy_validated_request;
 
@@ -629,7 +724,12 @@ pub(crate) fn default_codex_user_agent_version() -> &'static str {
 /// # 返回
 /// 返回函数执行结果
 pub(crate) fn set_originator(originator: &str) -> Result<String, String> {
-    runtime_config::set_originator(originator)
+    let previous_user_agent = runtime_config::current_gateway_user_agent();
+    let applied = runtime_config::set_originator(originator)?;
+    if runtime_config::current_gateway_user_agent() != previous_user_agent {
+        crate::usage_http::reload_usage_http_client_from_env();
+    }
+    Ok(applied)
 }
 
 /// 函数 `set_codex_user_agent_version`
@@ -644,7 +744,12 @@ pub(crate) fn set_originator(originator: &str) -> Result<String, String> {
 /// # 返回
 /// 返回函数执行结果
 pub(crate) fn set_codex_user_agent_version(version: &str) -> Result<String, String> {
-    runtime_config::set_codex_user_agent_version(version)
+    let previous_user_agent = runtime_config::current_gateway_user_agent();
+    let applied = runtime_config::set_codex_user_agent_version(version)?;
+    if runtime_config::current_gateway_user_agent() != previous_user_agent {
+        crate::usage_http::reload_usage_http_client_from_env();
+    }
+    Ok(applied)
 }
 
 /// 函数 `current_residency_requirement`
@@ -690,6 +795,23 @@ pub(crate) fn set_residency_requirement(value: Option<&str>) -> Result<Option<St
 /// 返回函数执行结果
 pub(crate) fn current_codex_user_agent() -> String {
     runtime_config::current_codex_user_agent()
+}
+
+pub(crate) fn set_gateway_user_agent(value: Option<&str>) -> Result<Option<String>, String> {
+    let previous_user_agent = runtime_config::current_gateway_user_agent();
+    let applied = runtime_config::set_gateway_user_agent(value)?;
+    if runtime_config::current_gateway_user_agent() != previous_user_agent {
+        crate::usage_http::reload_usage_http_client_from_env();
+    }
+    Ok(applied)
+}
+
+pub(crate) fn current_gateway_user_agent_override() -> Option<String> {
+    runtime_config::current_gateway_user_agent_override()
+}
+
+pub(crate) fn current_gateway_user_agent() -> String {
+    runtime_config::current_gateway_user_agent()
 }
 
 /// 函数 `set_free_account_max_model`
@@ -817,8 +939,11 @@ pub(crate) fn apply_async_upstream_proxy(
     runtime_config::apply_async_upstream_proxy(builder, proxy_url, invalid_event)
 }
 
-pub(crate) fn current_upstream_proxy_url_for_account(account_id: &str) -> Option<String> {
-    runtime_config::upstream_proxy_url_for_account(account_id)
+pub(crate) fn current_websocket_proxy_url_for_account(
+    account_id: &str,
+    target_url: &str,
+) -> Result<Option<String>, String> {
+    runtime_config::websocket_proxy_url_for_account(account_id, target_url)
 }
 
 /// 函数 `set_upstream_proxy_url`
@@ -856,6 +981,10 @@ pub(crate) fn set_upstream_proxy_bypass_hosts(raw: Option<&str>) -> String {
 /// 返回函数执行结果
 pub(crate) fn current_upstream_stream_timeout_ms() -> u64 {
     runtime_config::current_upstream_stream_timeout_ms()
+}
+
+pub(crate) fn current_upstream_connect_timeout() -> std::time::Duration {
+    runtime_config::current_upstream_connect_timeout()
 }
 
 pub(crate) fn current_upstream_total_timeout_ms() -> u64 {
@@ -1002,6 +1131,14 @@ pub(crate) fn gateway_resolve_effective_upstream_base(
         .unwrap_or_else(resolve_upstream_base_url)
 }
 
+pub(crate) fn gateway_resolve_default_upstream_base_url() -> String {
+    resolve_upstream_base_url()
+}
+
+pub(crate) fn gateway_should_send_chatgpt_account_header(base: &str) -> bool {
+    upstream::config::should_send_chatgpt_account_header(base)
+}
+
 /// 函数 `gateway_supports_official_responses_websocket`
 ///
 /// 作者: gaohongshun
@@ -1025,6 +1162,7 @@ pub(crate) fn gateway_supports_official_responses_websocket(
     }
     if api_key.rotation_strategy == crate::apikey_profile::ROTATION_AGGREGATE_API
         || api_key.rotation_strategy == crate::apikey_profile::ROTATION_HYBRID
+        || api_key.rotation_strategy == crate::apikey_profile::ROTATION_HYBRID_AGGREGATE_FIRST
     {
         return false;
     }
@@ -1051,6 +1189,7 @@ pub(crate) struct GatewayRoutedCandidates {
     )>,
     pub(crate) route_strategy: &'static str,
     pub(crate) route_source: &'static str,
+    pub(crate) conversation_routing: Option<conversation_binding::ConversationRoutingContext>,
 }
 
 pub(crate) fn gateway_collect_routed_candidates_with_log_source(
@@ -1077,7 +1216,140 @@ pub(crate) fn gateway_collect_routed_candidates_with_log_source(
         candidates,
         route_strategy: application.strategy_label,
         route_source: application.source,
+        conversation_routing: None,
     })
+}
+
+pub(crate) fn gateway_collect_routed_candidates_for_ws(
+    storage: &codexmanager_core::storage::Storage,
+    key_id: &str,
+    model: Option<&str>,
+    route_conversation_id: Option<&str>,
+    route_conversation_source: Option<conversation_binding::RouteConversationSource>,
+) -> Result<GatewayRoutedCandidates, String> {
+    let api_key = storage
+        .find_api_key_by_id(key_id)
+        .map_err(|err| format!("read api key routing config failed: {err}"))?
+        .ok_or_else(|| "api key not found".to_string())?;
+    let account_group_filter = storage
+        .find_api_key_account_group_filter(key_id)
+        .map_err(|err| format!("read api key account group filter failed: {err}"))?;
+    let mut candidates = upstream::support::candidates::prepare_gateway_candidates(
+        storage,
+        model,
+        account_group_filter.as_deref(),
+        api_key.account_plan_filter.as_deref(),
+        LowQuotaCandidateMode::NormalOnly,
+    )?;
+
+    // HTTP candidate execution treats runtime cooldown as a hard skip whenever another
+    // candidate exists. A persistent WebSocket must not keep using the current account after
+    // a 429/401/403 cooldown is recorded, so the WS pool excludes all cooled-down accounts
+    // before routing and failover.
+    candidates.retain(|(account, _)| !is_account_in_cooldown(account.id.as_str()));
+
+    let conversation_binding = match route_conversation_id {
+        Some(conversation_id) => conversation_binding::load_conversation_binding(
+            storage,
+            api_key.key_hash.as_str(),
+            Some(conversation_id),
+        )?,
+        None => None,
+    };
+    let mut conversation_routing = route_conversation_source.and_then(|source| {
+        conversation_binding::prepare_conversation_routing_with_source(
+            api_key.key_hash.as_str(),
+            route_conversation_id,
+            conversation_binding.as_ref(),
+            &mut candidates,
+            source,
+        )
+    });
+    let account_binding_counts = if thread_aware_account_distribution_enabled()
+        && conversation_routing.as_ref().is_some_and(|routing| {
+            routing.existing_binding.is_none() && routing.source.allows_initial_binding_create()
+        }) {
+        match storage.active_conversation_binding_account_counts(api_key.key_hash.as_str()) {
+            Ok(counts) => Some(counts),
+            Err(err) => {
+                log::warn!("load conversation binding account counts for websocket failed: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut rotation_plan = conversation_binding::apply_candidate_rotation(
+        &mut candidates,
+        conversation_routing.as_ref(),
+        key_id,
+        model,
+        account_binding_counts.as_ref(),
+    );
+    match conversation_binding::claim_initial_conversation_binding(
+        storage,
+        conversation_routing.as_mut(),
+        &mut candidates,
+        model,
+    ) {
+        Ok(claim) if claim.selected_binding() => {
+            rotation_plan = conversation_binding::CandidateRotationPlan {
+                source: conversation_binding::CandidateRotationSource::ConversationBinding,
+                strategy_label: claim.strategy_label(),
+                strategy_applied: true,
+            };
+        }
+        Ok(_) => {}
+        Err(err) => {
+            log::warn!("event=responses_ws_conversation_claim_failed err={err}");
+        }
+    }
+    Ok(GatewayRoutedCandidates {
+        candidates,
+        route_strategy: rotation_plan.strategy_label,
+        route_source: rotation_plan.source.as_str(),
+        conversation_routing,
+    })
+}
+
+pub(crate) fn gateway_ws_account_requires_switch(
+    routed: &GatewayRoutedCandidates,
+    current_account_id: &str,
+) -> bool {
+    if !routed
+        .candidates
+        .iter()
+        .any(|(account, _)| account.id == current_account_id)
+    {
+        return true;
+    }
+
+    // A turn-state-only or otherwise unbound WebSocket has no conversation routing context,
+    // but an explicitly preferred account still applies to it. The routed source is already
+    // computed from the fresh preference snapshot above, so do not let the persistent socket
+    // keep using a formerly selected non-preferred account.
+    if routed.route_source == "manual_preferred_account" {
+        return routed
+            .candidates
+            .first()
+            .is_some_and(|(account, _)| account.id != current_account_id);
+    }
+
+    let Some(routing) = routed.conversation_routing.as_ref() else {
+        return false;
+    };
+    if routing
+        .manual_preferred_account_id
+        .as_deref()
+        .is_some_and(|account_id| account_id != current_account_id)
+    {
+        return true;
+    }
+    routing.bound_account_selectable
+        && routing
+            .existing_binding
+            .as_ref()
+            .is_some_and(|binding| binding.account_id != current_account_id)
 }
 
 /// 函数 `gateway_record_failover_attempt`
@@ -1144,26 +1416,64 @@ pub(crate) fn gateway_token_exchange_client_id() -> String {
     runtime_config::token_exchange_client_id()
 }
 
+pub(crate) struct GatewayWsRoutingPreparation {
+    pub(crate) incoming_headers: IncomingHeaderSnapshot,
+    pub(crate) prompt_cache_key: Option<String>,
+    pub(crate) cache_affinity_key: Option<String>,
+    pub(crate) route_conversation_id: Option<String>,
+    pub(crate) route_conversation_source: Option<conversation_binding::RouteConversationSource>,
+}
+
 pub(crate) fn gateway_resolve_ws_prompt_cache_key(
     storage: &codexmanager_core::storage::Storage,
     api_key: &codexmanager_core::storage::ApiKey,
     incoming_headers: &IncomingHeaderSnapshot,
-) -> Result<(IncomingHeaderSnapshot, Option<String>), String> {
+) -> Result<GatewayWsRoutingPreparation, String> {
+    let cache_affinity_key = incoming_headers
+        .session_id()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let has_native_conversation_id = incoming_headers
+        .conversation_id()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
     let local_conversation_id =
         resolve_local_conversation_id_with_sticky_fallback(incoming_headers, true);
+    let route_conversation_id = cache_affinity_key
+        .is_none()
+        .then(|| local_conversation_id.clone())
+        .flatten();
     let conversation_binding = conversation_binding::load_conversation_binding(
         storage,
         api_key.key_hash.as_str(),
-        local_conversation_id.as_deref(),
+        route_conversation_id.as_deref(),
     )?;
     let incoming_headers =
         incoming_headers.with_conversation_id_override(local_conversation_id.as_deref());
-    let prompt_cache_key = resolve_fallback_thread_anchor(
-        &incoming_headers,
-        local_conversation_id.as_deref(),
-        conversation_binding.as_ref(),
-    );
-    Ok((incoming_headers, prompt_cache_key))
+    let prompt_cache_key = cache_affinity_key.clone().or_else(|| {
+        resolve_fallback_thread_anchor(
+            &incoming_headers,
+            local_conversation_id.as_deref(),
+            conversation_binding.as_ref(),
+        )
+    });
+    let route_conversation_source = if cache_affinity_key.is_some() {
+        None
+    } else if has_native_conversation_id {
+        Some(conversation_binding::RouteConversationSource::NativeConversation)
+    } else if local_conversation_id.is_some() {
+        Some(conversation_binding::RouteConversationSource::StickyFallback)
+    } else {
+        None
+    };
+    Ok(GatewayWsRoutingPreparation {
+        incoming_headers,
+        prompt_cache_key,
+        cache_affinity_key,
+        route_conversation_id,
+        route_conversation_source,
+    })
 }
 
 /// 函数 `gateway_rewrite_ws_responses_body`
@@ -1198,16 +1508,40 @@ pub(crate) fn gateway_rewrite_ws_responses_body(
         .service_tier
         .as_deref()
         .and_then(crate::apikey::service_tier::normalize_service_tier);
-    apply_request_overrides_with_service_tier_and_prompt_cache_key_scope(
-        path,
-        body,
-        normalized_model,
-        normalized_reasoning,
-        normalized_service_tier,
-        api_key.upstream_base_url.as_deref(),
-        prompt_cache_key,
-        false,
-    )
+    let has_explicit_prompt_cache_key = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("prompt_cache_key")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .is_some();
+    if has_explicit_prompt_cache_key {
+        apply_request_overrides_with_service_tier_and_prompt_cache_key_scope(
+            path,
+            body,
+            normalized_model,
+            normalized_reasoning,
+            normalized_service_tier,
+            api_key.upstream_base_url.as_deref(),
+            prompt_cache_key,
+            false,
+        )
+    } else {
+        apply_request_overrides_with_service_tier_and_forced_prompt_cache_key_scope(
+            path,
+            body,
+            normalized_model,
+            normalized_reasoning,
+            normalized_service_tier,
+            api_key.upstream_base_url.as_deref(),
+            prompt_cache_key,
+            false,
+        )
+    }
 }
 
 /// 函数 `gateway_compute_upstream_url`

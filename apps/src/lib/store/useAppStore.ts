@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { AppSettings, RuntimeCapabilities, ServiceStatus } from "../../types";
 import {
   DEFAULT_CODEX_ORIGINATOR,
+  DEFAULT_CODEX_USER_AGENT,
   DEFAULT_CODEX_USER_AGENT_VERSION,
 } from "../constants/codex";
 import {
@@ -66,10 +67,12 @@ export const useAppStore = create<AppState>((set) => ({
     updateAutoCheck: true,
     autoStartEnabled: false,
     autoStartSupported: false,
+    showMainWindowOnStartup: true,
     closeToTrayOnClose: false,
     closeToTraySupported: false,
     keepWindowUiMounted: true,
     lowTransparency: false,
+    zoomFactor: 1,
     lightweightModeOnCloseToTray: false,
     codexCliGuideDismissed: false,
     webAccessPasswordConfigured: false,
@@ -118,6 +121,8 @@ export const useAppStore = create<AppState>((set) => ({
     },
     gatewayOriginator: DEFAULT_CODEX_ORIGINATOR,
     gatewayOriginatorDefault: DEFAULT_CODEX_ORIGINATOR,
+    gatewayUserAgent: "",
+    gatewayUserAgentDefault: DEFAULT_CODEX_USER_AGENT,
     gatewayUserAgentVersion: DEFAULT_CODEX_USER_AGENT_VERSION,
     gatewayUserAgentVersionDefault: DEFAULT_CODEX_USER_AGENT_VERSION,
     gatewayResidencyRequirement: "",

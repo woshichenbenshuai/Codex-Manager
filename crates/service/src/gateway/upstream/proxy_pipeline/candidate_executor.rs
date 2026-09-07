@@ -18,6 +18,7 @@ use super::response_finalize::{
     finalize_terminal_candidate, finalize_upstream_response, respond_total_timeout,
     FinalizeUpstreamResponseOutcome,
 };
+use super::stream_preflight::{preflight_stream_response, StreamPreflightOutcome};
 
 /// 函数 `extract_prompt_cache_key_for_trace`
 ///
@@ -158,6 +159,41 @@ fn should_force_strip_after_anthropic_challenge(
         && is_challenge_failover_error(attempt_trace.last_attempt_error.as_deref())
 }
 
+fn should_retry_same_account_after_failover(retry_count: u8) -> bool {
+    retry_count == 0
+}
+
+fn account_model_override_for_request(
+    storage: &Storage,
+    model_for_log: Option<&str>,
+) -> Option<String> {
+    model_for_log
+        .and_then(|model| {
+            storage
+                .get_enabled_model_v2(crate::models_v2::policy_catalog_slug(model))
+                .ok()
+                .flatten()
+        })
+        .and_then(|model| {
+            model
+                .routes
+                .into_iter()
+                .filter(|route| {
+                    route.enabled
+                        && route.source_kind == "account_pool"
+                        && route.source_id == "default"
+                })
+                .max_by_key(|route| route.priority)
+                .map(|route| route.upstream_model)
+        })
+        .filter(|configured_model| {
+            !crate::models_v2::should_preserve_luna_reserve_alias(
+                model_for_log,
+                Some(configured_model.as_str()),
+            )
+        })
+}
+
 fn should_failover_terminal_gateway_error(
     context: &GatewayUpstreamExecutionContext<'_>,
     account_id: &str,
@@ -252,20 +288,7 @@ pub(in super::super) fn execute_candidate_sequence(
     let mut last_attempt_url = None;
     let mut last_attempt_error = None;
     let mut force_strip_session_affinity_after_challenge = false;
-    let account_model_override = model_for_log
-        .and_then(|model| storage.get_enabled_model_v2(model).ok().flatten())
-        .and_then(|model| {
-            model
-                .routes
-                .into_iter()
-                .filter(|route| {
-                    route.enabled
-                        && route.source_kind == "account_pool"
-                        && route.source_id == "default"
-                })
-                .max_by_key(|route| route.priority)
-                .map(|route| route.upstream_model)
-        });
+    let account_model_override = account_model_override_for_request(storage, model_for_log);
     let usage_snapshots = usage_snapshots_for_candidate_plans(storage, &candidates);
     let ordered_account_ids = candidates
         .iter()
@@ -372,7 +395,8 @@ pub(in super::super) fn execute_candidate_sequence(
 
         let mut inflight_guard = Some(super::super::super::acquire_account_inflight(&account.id));
         let mut attempt_trace = CandidateAttemptTrace::default();
-        let decision = run_candidate_attempt(CandidateAttemptParams {
+        let mut same_account_retry_count = 0u8;
+        let mut decision = run_candidate_attempt(CandidateAttemptParams {
             storage,
             method,
             request_ctx,
@@ -392,6 +416,47 @@ pub(in super::super) fn execute_candidate_sequence(
             setup,
             trace: &mut attempt_trace,
         });
+
+        // A transient upstream error gets one retry on the same account. If that
+        // retry also fails, the normal candidate failover path selects the next
+        // account instead of repeatedly hammering the current one.
+        if matches!(decision, CandidateUpstreamDecision::Failover)
+            && should_retry_same_account_after_failover(same_account_retry_count)
+        {
+            same_account_retry_count += 1;
+            log::warn!(
+                "event=gateway_same_account_retry trace_id={} account_id={} retry={} ",
+                trace_id,
+                account.id,
+                same_account_retry_count
+            );
+            attempt_trace = CandidateAttemptTrace::default();
+            let request_ref = request
+                .as_ref()
+                .ok_or_else(|| "request already consumed before same-account retry".to_string())?;
+            let retry_request_ctx =
+                UpstreamRequestContext::from_request(request_ref, context.protocol_type());
+            decision = run_candidate_attempt(CandidateAttemptParams {
+                storage,
+                method,
+                request_ctx: retry_request_ctx,
+                incoming_headers: &attempt_headers,
+                body: &body_for_attempt,
+                upstream_is_stream,
+                path,
+                request_deadline,
+                account: &account,
+                token: &mut token,
+                strip_session_affinity,
+                debug,
+                allow_openai_fallback: attempt_allow_openai_fallback,
+                disable_challenge_stateless_retry,
+                has_more_candidates: context.has_more_candidates(idx),
+                context,
+                setup,
+                trace: &mut attempt_trace,
+            });
+        }
 
         match decision {
             CandidateUpstreamDecision::Failover => {
@@ -519,6 +584,95 @@ pub(in super::super) fn execute_candidate_sequence(
                         }
                     }
                 }
+                match preflight_stream_response(
+                    resp,
+                    path,
+                    upstream_is_stream,
+                    context.has_more_candidates(idx),
+                ) {
+                    StreamPreflightOutcome::Ready(response) => {
+                        resp = response;
+                    }
+                    StreamPreflightOutcome::Failover(message) => {
+                        if should_failover_terminal_gateway_error(
+                            context,
+                            &account.id,
+                            context.has_more_candidates(idx),
+                            message.as_str(),
+                            &mut attempt_trace,
+                            &mut last_attempt_url,
+                            &mut last_attempt_error,
+                        ) {
+                            continue;
+                        }
+                        let request = request.take().ok_or_else(|| {
+                            "request already consumed before stream preflight error response"
+                                .to_string()
+                        })?;
+                        return respond_terminal_attempt(
+                            request,
+                            context,
+                            &account.id,
+                            attempt_trace.last_attempt_url.as_deref(),
+                            429,
+                            message,
+                            trace_id,
+                            started_at,
+                            attempt_model_for_log,
+                            Some(attempted_account_ids.as_slice()),
+                        );
+                    }
+                    StreamPreflightOutcome::StatusFailover {
+                        status_code,
+                        message,
+                    } => {
+                        super::super::super::mark_account_cooldown_for_status(
+                            &account.id,
+                            status_code,
+                        );
+                        super::super::super::record_route_quality(&account.id, status_code);
+                        attempt_trace.last_attempt_error = Some(message);
+                        record_failover_attempt(
+                            &mut attempt_trace,
+                            &mut last_attempt_url,
+                            &mut last_attempt_error,
+                        );
+                        continue;
+                    }
+                    StreamPreflightOutcome::RetryUsageNotice(message) => {
+                        // Some Codex-compatible upstreams encode quota exhaustion as assistant
+                        // output followed by an incomplete terminal sequence. Retry it before
+                        // delivery, but do not persistently disable the account based on model
+                        // output alone.
+                        super::super::super::mark_account_cooldown(
+                            &account.id,
+                            super::super::super::CooldownReason::Default,
+                        );
+                        let _ =
+                            crate::usage_refresh::enqueue_usage_refresh_for_account(&account.id);
+                        attempt_trace.last_attempt_error = Some(message);
+                        record_failover_attempt(
+                            &mut attempt_trace,
+                            &mut last_attempt_url,
+                            &mut last_attempt_error,
+                        );
+                        continue;
+                    }
+                    StreamPreflightOutcome::TransportFailover(message) => {
+                        super::super::super::mark_account_cooldown(
+                            &account.id,
+                            super::super::super::CooldownReason::Network,
+                        );
+                        super::super::super::record_route_quality(&account.id, 502);
+                        attempt_trace.last_attempt_error = Some(message);
+                        record_failover_attempt(
+                            &mut attempt_trace,
+                            &mut last_attempt_url,
+                            &mut last_attempt_error,
+                        );
+                        continue;
+                    }
+                }
                 let request = request.take().ok_or_else(|| {
                     "request already consumed before upstream response".to_string()
                 })?;
@@ -561,14 +715,6 @@ pub(in super::super) fn execute_candidate_sequence(
                             );
                         }
                         return Ok(CandidateExecutionResult::Handled);
-                    }
-                    FinalizeUpstreamResponseOutcome::Failover => {
-                        record_failover_attempt(
-                            &mut attempt_trace,
-                            &mut last_attempt_url,
-                            &mut last_attempt_error,
-                        );
-                        continue;
                     }
                 }
             }

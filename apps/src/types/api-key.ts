@@ -32,6 +32,7 @@ export interface AggregateApi {
   supplierName: string | null;
   sort: number;
   url: string;
+  userAgent: string | null;
   authType: string;
   authParams: Record<string, unknown> | null;
   action: string | null;
@@ -93,6 +94,26 @@ export interface AggregateApiBalanceRefreshResult {
   message: string | null;
   queriedAt: number;
   latencyMs: number;
+}
+
+export interface AggregateApiFetchedModel {
+  upstreamModel: string;
+  displayName: string | null;
+  existingModelSlug: string | null;
+  alreadyLinked: boolean;
+}
+
+export interface AggregateApiFetchModelsResult {
+  apiId: string;
+  providerType: string;
+  fetchedAt: number;
+  items: AggregateApiFetchedModel[];
+}
+
+export interface AggregateApiAssociateModelsResult {
+  createdModels: string[];
+  addedRoutes: string[];
+  unchangedRoutes: string[];
 }
 
 export interface ApiKeyUsageStat {

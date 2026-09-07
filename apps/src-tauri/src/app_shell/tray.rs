@@ -30,6 +30,7 @@ pub(crate) fn setup_tray(app: &tauri::AppHandle) -> Result<(), tauri::Error> {
     TRAY_AVAILABLE.store(false, std::sync::atomic::Ordering::Relaxed);
     let menu = build_tray_menu(app)?;
     let mut tray = TrayIconBuilder::with_id("main-tray")
+        .tooltip("Codex Manager")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -154,8 +155,8 @@ fn tray_usage_reset_labels(
     secondary_resets_at: Option<i64>,
 ) -> (String, String) {
     (
-        format!("5小时重置：{}", format_tray_reset_time(primary_resets_at)),
-        format!("7天重置：{}", format_tray_reset_time(secondary_resets_at)),
+        format!("5小时重置：{}", format_tray_reset_time(secondary_resets_at)),
+        format!("7天重置：{}", format_tray_reset_time(primary_resets_at)),
     )
 }
 

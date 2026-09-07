@@ -878,6 +878,52 @@ impl Storage {
         rows.collect()
     }
 
+    pub fn list_account_workspace_identities_for_subject(
+        &self,
+        subject_account_id: &str,
+    ) -> Result<Vec<AccountWorkspaceIdentity>> {
+        let subject_account_id = subject_account_id.trim();
+        if subject_account_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT id, chatgpt_account_id, workspace_id
+             FROM accounts
+             WHERE subject_account_id = ?1
+                OR (
+                    subject_account_id IS NULL
+                    AND (id = ?1 OR substr(id, 1, length(?1) + 2) = ?1 || '::')
+                )
+             ORDER BY updated_at DESC, id ASC",
+        )?;
+        let rows = stmt.query_map([subject_account_id], |row| {
+            Ok(AccountWorkspaceIdentity {
+                id: row.get(0)?,
+                chatgpt_account_id: row.get(1)?,
+                workspace_id: row.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn update_account_subject_identity(
+        &self,
+        account_id: &str,
+        subject_account_id: &str,
+    ) -> Result<()> {
+        let subject_account_id = subject_account_id.trim();
+        if subject_account_id.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "UPDATE accounts
+             SET subject_account_id = ?1
+             WHERE id = ?2",
+            (subject_account_id, account_id),
+        )?;
+        Ok(())
+    }
+
     /// 函数 `list_accounts_paginated`
     ///
     /// 作者: gaohongshun
@@ -915,7 +961,13 @@ impl Storage {
     /// # 返回
     /// 返回函数执行结果
     pub fn list_gateway_candidates(&self) -> Result<Vec<(Account, Token)>> {
-        list_gateway_candidates_filtered(self, None)
+        list_gateway_candidates_filtered(self, None, true)
+    }
+
+    /// Lists token-bearing accounts while leaving usage-window eligibility to the caller.
+    /// Hard account states remain excluded so this is safe for model-specific reserve routing.
+    pub fn list_gateway_candidates_unfiltered(&self) -> Result<Vec<(Account, Token)>> {
+        list_gateway_candidates_filtered(self, None, false)
     }
 
     pub fn list_gateway_candidates_for_accounts(
@@ -929,7 +981,29 @@ impl Storage {
 
         let mut out = Vec::new();
         for chunk in account_ids.chunks(SQLITE_IN_CLAUSE_BATCH_SIZE) {
-            out.extend(list_gateway_candidates_filtered(self, Some(chunk))?);
+            out.extend(list_gateway_candidates_filtered(self, Some(chunk), true)?);
+        }
+        out.sort_by(|(left, _), (right, _)| {
+            left.sort
+                .cmp(&right.sort)
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(out)
+    }
+
+    pub fn list_gateway_candidates_unfiltered_for_accounts(
+        &self,
+        account_ids: &[String],
+    ) -> Result<Vec<(Account, Token)>> {
+        let account_ids = normalize_text_ids(account_ids);
+        if account_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut out = Vec::new();
+        for chunk in account_ids.chunks(SQLITE_IN_CLAUSE_BATCH_SIZE) {
+            out.extend(list_gateway_candidates_filtered(self, Some(chunk), false)?);
         }
         out.sort_by(|(left, _), (right, _)| {
             left.sort
@@ -1232,6 +1306,30 @@ impl Storage {
             return Ok((true, true));
         }
         Ok((self.account_exists(account_id)?, false))
+    }
+
+    /// Updates an account status only when the row still matches the state observed by the
+    /// caller. Long-running operations use this guard so a stale completion cannot overwrite a
+    /// newer manual or gateway-driven status transition.
+    pub fn update_account_status_if_context_matches(
+        &self,
+        account_id: &str,
+        expected_status: &str,
+        expected_updated_at: i64,
+        status: &str,
+    ) -> Result<bool> {
+        let updated_at = now_ts().max(expected_updated_at.saturating_add(1));
+        let updated = self.conn.execute(
+            update_account_status_if_context_matches_sql(),
+            (
+                status,
+                updated_at,
+                account_id,
+                expected_status,
+                expected_updated_at,
+            ),
+        )?;
+        Ok(updated > 0)
     }
 
     /// 函数 `delete_account`
@@ -1736,7 +1834,7 @@ fn active_account_codex_profile_candidates_for_ids_chunk_sql(condition: &str) ->
         "SELECT id, label, issuer, chatgpt_account_id, workspace_id, group_name, status, sort, updated_at
          FROM accounts
          WHERE {condition}
-           AND LOWER(TRIM(COALESCE(status, ''))) = 'active'"
+           AND LOWER(TRIM(COALESCE(status, ''))) IN ('active', 'force_enabled')"
     )
 }
 
@@ -2100,8 +2198,13 @@ fn list_account_dashboard_source_metadata_for_ids_chunk(
 fn list_gateway_candidates_filtered(
     storage: &Storage,
     account_ids: Option<&[String]>,
+    require_available_usage: bool,
 ) -> Result<Vec<(Account, Token)>> {
-    let availability_clause = gateway_account_usage_filter_clause("a", "lu");
+    let availability_clause = if require_available_usage {
+        gateway_account_usage_filter_clause("a", "lu")
+    } else {
+        gateway_account_status_filter_clause("a")
+    };
     let mut usage_cte_params = Vec::new();
     let latest_usage_cte = if let Some(account_ids) = account_ids {
         let Some((usage_condition, usage_params)) = text_id_in_clause("account_id", account_ids)
@@ -2151,7 +2254,7 @@ fn gateway_candidates_filtered_sql(latest_usage_cte: &str, where_clause: &str) -
            ON lu.account_id = a.id
           AND lu.rn = 1
          WHERE {where_clause}
-         ORDER BY a.sort ASC, a.updated_at DESC",
+         ORDER BY a.sort ASC, a.updated_at DESC, a.id ASC",
         account_select = account_select_columns("a"),
         token_select = token_select_columns("t"),
     )
@@ -2206,7 +2309,9 @@ fn latest_usage_cte_sql_for_condition(where_condition: &str) -> String {
 }
 
 fn available_account_status_clause(account_alias: &str) -> String {
-    format!("LOWER(TRIM(COALESCE({account_alias}.status, ''))) IN ('active', 'available')")
+    format!(
+        "LOWER(TRIM(COALESCE({account_alias}.status, ''))) IN ('active', 'available', 'force_enabled')"
+    )
 }
 
 fn remaining_percent_sql(percent_expr: &str) -> String {
@@ -2258,9 +2363,23 @@ fn available_usage_clause(usage_alias: &str) -> String {
 /// 返回函数执行结果
 fn gateway_account_usage_filter_clause(account_alias: &str, usage_alias: &str) -> String {
     format!(
-        "LOWER(TRIM(COALESCE({account_alias}.status, ''))) NOT IN ('inactive', 'disabled', 'unavailable', 'limited', 'banned')
-         AND ({usage_alias}.account_id IS NULL OR ({}))",
-        available_usage_clause(usage_alias)
+        "{status_clause}
+         AND (LOWER(TRIM(COALESCE({account_alias}.status, ''))) = 'force_enabled'
+              OR {usage_alias}.account_id IS NULL OR ({available_clause}))",
+        status_clause = gateway_account_usage_status_filter_clause(account_alias),
+        available_clause = available_usage_clause(usage_alias)
+    )
+}
+
+fn gateway_account_usage_status_filter_clause(account_alias: &str) -> String {
+    format!(
+        "LOWER(TRIM(COALESCE({account_alias}.status, ''))) NOT IN ('inactive', 'disabled', 'unavailable', 'limited', 'banned')"
+    )
+}
+
+fn gateway_account_status_filter_clause(account_alias: &str) -> String {
+    format!(
+        "LOWER(TRIM(COALESCE({account_alias}.status, ''))) NOT IN ('inactive', 'disabled', 'unavailable', 'banned')"
     )
 }
 

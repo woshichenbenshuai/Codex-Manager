@@ -8,12 +8,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod support;
 use support::{test_env_guard, EnvGuard};
 
-const CODEX_IMAGE_AUTO_INJECT_TOOL_ENV: &str =
-    "CODEXMANAGER_CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL";
 const LEGACY_COMPACT_MODEL_FORWARD_RULES_SETTING_KEY: &str = "gateway.compact_model_forward_rules";
 
 const ISOLATED_RUNTIME_ENV_KEYS: &[&str] = &[
-    CODEX_IMAGE_AUTO_INJECT_TOOL_ENV,
+    "CODEXMANAGER_ACCOUNT_MAX_INFLIGHT",
     "CODEXMANAGER_SERVICE_ADDR",
     "CODEXMANAGER_WEB_ADDR",
     "CODEXMANAGER_ROUTE_STRATEGY",
@@ -31,6 +29,7 @@ const ISOLATED_RUNTIME_ENV_KEYS: &[&str] = &[
     "CODEXMANAGER_UPSTREAM_PROXY_URL",
     "CODEXMANAGER_UPSTREAM_STREAM_TIMEOUT_MS",
     "CODEXMANAGER_UPSTREAM_TOTAL_TIMEOUT_MS",
+    "CODEXMANAGER_FRONT_PROXY_ZSTD_MAX_BODY_BYTES",
     "CODEXMANAGER_SSE_KEEPALIVE_ENABLED",
     "CODEXMANAGER_SSE_KEEPALIVE_INTERVAL_MS",
     "CODEXMANAGER_USAGE_POLLING_ENABLED",
@@ -95,6 +94,7 @@ fn reset_runtime_defaults() {
             "allowAllLowQuotaFallback": true
         },
         "gatewayOriginator": "codex_cli_rs",
+        "gatewayUserAgent": "",
         "gatewayUserAgentVersion": codexmanager_service::default_gateway_user_agent_version(),
         "gatewayResidencyRequirement": "",
         "appearancePreset": "classic",
@@ -365,6 +365,38 @@ fn app_settings_roundtrip_account_manager_mode_and_bootstrap() {
 }
 
 #[test]
+fn app_settings_roundtrip_gateway_user_agent_and_validates_header_value() {
+    with_temp_db(|_| {
+        let defaults = codexmanager_service::app_settings_get().expect("read default settings");
+        assert_eq!(defaults["gatewayUserAgent"], "");
+        assert!(defaults["gatewayUserAgentDefault"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("codex_cli_rs/")));
+
+        let updated = codexmanager_service::app_settings_set(Some(&json!({
+            "gatewayUserAgent": "Custom-Gateway/3.0"
+        })))
+        .expect("save gateway user agent");
+        assert_eq!(updated["gatewayUserAgent"], "Custom-Gateway/3.0");
+
+        let persisted = codexmanager_service::app_settings_get().expect("read persisted settings");
+        assert_eq!(persisted["gatewayUserAgent"], "Custom-Gateway/3.0");
+
+        let err = codexmanager_service::app_settings_set(Some(&json!({
+            "gatewayUserAgent": "bad\r\nvalue"
+        })))
+        .expect_err("unsafe gateway user agent should fail");
+        assert!(err.contains("control characters"));
+
+        let cleared = codexmanager_service::app_settings_set(Some(&json!({
+            "gatewayUserAgent": ""
+        })))
+        .expect("clear gateway user agent");
+        assert_eq!(cleared["gatewayUserAgent"], "");
+    });
+}
+
+#[test]
 fn app_settings_rejects_password_mode_without_password() {
     with_temp_db(|_| {
         let result = codexmanager_service::app_settings_set(Some(&json!({
@@ -586,6 +618,39 @@ fn sync_runtime_settings_from_storage_preserves_process_env_when_override_not_pe
     });
 }
 
+#[test]
+fn sync_runtime_settings_ignores_legacy_max_inflight_env_override() {
+    with_temp_db(|db_path| {
+        let storage = Storage::open(db_path).expect("open storage");
+        storage
+            .set_app_setting(
+                codexmanager_service::APP_SETTING_GATEWAY_ACCOUNT_MAX_INFLIGHT_KEY,
+                "1",
+                now_ts(),
+            )
+            .expect("save account max inflight");
+        storage
+            .set_app_setting(
+                codexmanager_service::APP_SETTING_ENV_OVERRIDES_KEY,
+                &serde_json::to_string(&json!({
+                    "CODEXMANAGER_ACCOUNT_MAX_INFLIGHT": "0"
+                }))
+                .expect("serialize legacy env override"),
+                now_ts(),
+            )
+            .expect("save legacy env override");
+        drop(storage);
+
+        codexmanager_service::sync_runtime_settings_from_storage();
+
+        assert_eq!(
+            codexmanager_service::current_gateway_account_max_inflight(),
+            1
+        );
+        assert!(std::env::var_os("CODEXMANAGER_ACCOUNT_MAX_INFLIGHT").is_none());
+    });
+}
+
 /// 函数 `sync_runtime_settings_from_storage_preserves_explicit_process_env_over_persisted_override`
 ///
 /// 作者: gaohongshun
@@ -620,42 +685,6 @@ fn sync_runtime_settings_from_storage_preserves_explicit_process_env_over_persis
         assert_eq!(
             std::env::var("CODEXMANAGER_WEB_ADDR").ok().as_deref(),
             Some("0.0.0.0:48761")
-        );
-    });
-}
-
-#[test]
-fn sync_runtime_settings_from_storage_preserves_explicit_image_auto_inject_override() {
-    with_temp_db(|db_path| {
-        let storage = Storage::open(db_path).expect("open storage");
-        storage
-            .set_app_setting(
-                codexmanager_service::APP_SETTING_ENV_OVERRIDES_KEY,
-                &serde_json::to_string(&json!({
-                    CODEX_IMAGE_AUTO_INJECT_TOOL_ENV: "0"
-                }))
-                .expect("serialize env overrides"),
-                now_ts(),
-            )
-            .expect("save legacy env overrides");
-        drop(storage);
-
-        let _env = override_env_vars(&[(CODEX_IMAGE_AUTO_INJECT_TOOL_ENV, None)]);
-
-        codexmanager_service::sync_runtime_settings_from_storage();
-
-        assert_eq!(
-            std::env::var(CODEX_IMAGE_AUTO_INJECT_TOOL_ENV)
-                .ok()
-                .as_deref(),
-            Some("0")
-        );
-        let stored = read_env_overrides_map(db_path);
-        assert_eq!(
-            stored
-                .get(CODEX_IMAGE_AUTO_INJECT_TOOL_ENV)
-                .and_then(|value| value.as_str()),
-            Some("0")
         );
     });
 }
@@ -914,6 +943,7 @@ fn app_settings_set_persists_snapshot_and_password_hash() {
             "lightweightModeOnCloseToTray": true,
             "codexCliGuideDismissed": true,
             "lowTransparency": true,
+            "zoomFactor": 0.9,
             "theme": "dark",
             "appearancePreset": "classic",
             "serviceAddr": "127.0.0.1:4999",
@@ -990,6 +1020,10 @@ fn app_settings_set_persists_snapshot_and_password_hash() {
                 .get("appearancePreset")
                 .and_then(|value| value.as_str()),
             Some("classic")
+        );
+        assert_eq!(
+            snapshot.get("zoomFactor").and_then(|value| value.as_f64()),
+            Some(0.9)
         );
         assert_eq!(
             snapshot
@@ -2012,6 +2046,7 @@ fn app_settings_set_persists_env_overrides_and_exposes_catalog() {
         let snapshot = codexmanager_service::app_settings_set(Some(&json!({
             "envOverrides": {
                 "CODEXMANAGER_UPSTREAM_TOTAL_TIMEOUT_MS": "321000",
+                "CODEXMANAGER_FRONT_PROXY_ZSTD_MAX_BODY_BYTES": "134217728",
                 "CODEXMANAGER_WEB_ROOT": "D:/tmp/web"
             }
         })))
@@ -2036,6 +2071,12 @@ fn app_settings_set_persists_env_overrides_and_exposes_catalog() {
                 .ok()
                 .as_deref(),
             Some("321000")
+        );
+        assert_eq!(
+            std::env::var("CODEXMANAGER_FRONT_PROXY_ZSTD_MAX_BODY_BYTES")
+                .ok()
+                .as_deref(),
+            Some("134217728")
         );
         let catalog = snapshot
             .get("envOverrideCatalog")
@@ -2087,6 +2128,25 @@ fn app_settings_set_persists_env_overrides_and_exposes_catalog() {
                 .and_then(|value| value.as_str()),
             Some("1")
         );
+        let zstd_body_limit = catalog
+            .iter()
+            .find(|item| {
+                item.get("key").and_then(|value| value.as_str())
+                    == Some("CODEXMANAGER_FRONT_PROXY_ZSTD_MAX_BODY_BYTES")
+            })
+            .expect("zstd body limit catalog item");
+        assert_eq!(
+            zstd_body_limit
+                .get("applyMode")
+                .and_then(|value| value.as_str()),
+            Some("runtime")
+        );
+        assert_eq!(
+            zstd_body_limit
+                .get("label")
+                .and_then(|value| value.as_str()),
+            Some("zstd 解压后最大请求体（字节）")
+        );
         let token_refresh_ahead = catalog
             .iter()
             .find(|item| {
@@ -2131,6 +2191,12 @@ fn app_settings_set_persists_env_overrides_and_exposes_catalog() {
                 .get("CODEXMANAGER_UPSTREAM_TOTAL_TIMEOUT_MS")
                 .and_then(|value| value.as_str()),
             Some("321000")
+        );
+        assert_eq!(
+            stored
+                .get("CODEXMANAGER_FRONT_PROXY_ZSTD_MAX_BODY_BYTES")
+                .and_then(|value| value.as_str()),
+            Some("134217728")
         );
         assert_eq!(
             stored

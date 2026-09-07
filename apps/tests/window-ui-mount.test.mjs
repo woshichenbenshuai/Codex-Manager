@@ -37,12 +37,16 @@ test("后台保活由新的窗口常驻设置决定", async () => {
   );
 });
 
-test("预加载的托盘界面只连接服务而不会重启服务", async () => {
+test("桌面恢复优先复用服务，托盘预览只连接服务", async () => {
   const source = await readSource("src/components/layout/app-bootstrap.tsx");
 
   assert.match(
     source,
-    /const connectToDesktopService = isTrayPreview\s*\? initializeService\(addr, TRAY_PREVIEW_SERVICE_INITIALIZE_RETRIES\)\s*: startAndInitializeService\(addr\)/,
+    /const initializeOrStartService = useCallback\([\s\S]*?return await initializeService\(addr, 0\);[\s\S]*?return startAndInitializeService\(addr\)/,
+  );
+  assert.match(
+    source,
+    /const connectToDesktopService = isTrayPreview\s*\? initializeService\(addr, TRAY_PREVIEW_SERVICE_INITIALIZE_RETRIES\)\s*: initializeOrStartService\(addr\)/,
   );
   assert.match(source, /TRAY_PREVIEW_SERVICE_INITIALIZE_RETRIES = 40/);
 });
@@ -63,5 +67,18 @@ test("窗口常驻设置明确依赖关闭到托盘并展示资源取舍", async
   assert.match(
     source,
     /updateSettings\.mutate\(\{ keepWindowUiMounted: value \}\)/,
+  );
+});
+
+test("启动主窗口设置在基础设置中持久化", async () => {
+  const source = await readSource(
+    "src/app/settings/components/general-basics-card.tsx",
+  );
+
+  assert.match(source, /启动时显示主界面/);
+  assert.match(source, /checked=\{snapshot\.showMainWindowOnStartup\}/);
+  assert.match(
+    source,
+    /updateSettings\.mutate\(\{ showMainWindowOnStartup: value \}\)/,
   );
 });

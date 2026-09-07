@@ -529,6 +529,7 @@ fn delete_aggregate_api_removes_aggregate_model_source_routes() {
             auth_params_json: None,
             action: None,
             model_override: None,
+            user_agent: None,
             status: "active".to_string(),
             created_at: now,
             updated_at: now,
@@ -987,9 +988,9 @@ fn storage_login_session_roundtrip() {
         status: "pending".to_string(),
         error: None,
         workspace_id: Some("org_123".to_string()),
-        note: None,
-        tags: None,
-        group_name: None,
+        note: Some("Primary account".to_string()),
+        tags: Some("work,plus".to_string()),
+        group_name: Some("Team A".to_string()),
         created_at: now_ts(),
         updated_at: now_ts(),
     };
@@ -1002,6 +1003,9 @@ fn storage_login_session_roundtrip() {
         .expect("session exists");
     assert_eq!(loaded.status, "pending");
     assert_eq!(loaded.workspace_id.as_deref(), Some("org_123"));
+    assert_eq!(loaded.note.as_deref(), Some("Primary account"));
+    assert_eq!(loaded.tags.as_deref(), Some("work,plus"));
+    assert_eq!(loaded.group_name.as_deref(), Some("Team A"));
 }
 
 #[test]
@@ -1356,6 +1360,66 @@ fn storage_updates_account_status_only_when_changed() {
         .expect("find account")
         .expect("account exists");
     assert_eq!(loaded.status, "inactive");
+}
+
+#[test]
+fn storage_updates_account_status_only_when_observed_context_still_matches() {
+    let storage = Storage::open_in_memory().expect("open in memory");
+    storage.init().expect("init schema");
+    let observed_updated_at = 1_700_000_000;
+    storage
+        .insert_account(&Account {
+            id: "acc-context-cas".to_string(),
+            label: "context cas".to_string(),
+            issuer: "https://auth.openai.com".to_string(),
+            chatgpt_account_id: Some("acct_context_cas".to_string()),
+            workspace_id: None,
+            group_name: None,
+            sort: 0,
+            status: "active".to_string(),
+            created_at: observed_updated_at,
+            updated_at: observed_updated_at,
+        })
+        .expect("insert account");
+
+    assert!(storage
+        .update_account_status_if_context_matches(
+            "acc-context-cas",
+            "active",
+            observed_updated_at,
+            "inactive",
+        )
+        .expect("matching context update"));
+    let changed = storage
+        .find_account_by_id("acc-context-cas")
+        .expect("find account")
+        .expect("account exists");
+    assert_eq!(changed.status, "inactive");
+    assert!(changed.updated_at > observed_updated_at);
+
+    assert!(!storage
+        .update_account_status_if_context_matches(
+            "acc-context-cas",
+            "active",
+            observed_updated_at,
+            "banned",
+        )
+        .expect("stale status update"));
+    assert!(!storage
+        .update_account_status_if_context_matches(
+            "acc-context-cas",
+            "inactive",
+            observed_updated_at,
+            "banned",
+        )
+        .expect("stale timestamp update"));
+    assert_eq!(
+        storage
+            .find_account_status_by_id("acc-context-cas")
+            .expect("read final status")
+            .as_deref(),
+        Some("inactive")
+    );
 }
 
 /// 函数 `storage_gateway_candidates_exclude_unavailable_or_missing_token_accounts`
@@ -2022,6 +2086,7 @@ fn request_token_stats_rollups_use_owner_and_actual_source_precedence() {
                 auth_params_json: None,
                 action: None,
                 model_override: None,
+                user_agent: None,
                 status: "active".to_string(),
                 created_at: base,
                 updated_at: base,
@@ -2174,10 +2239,10 @@ fn request_token_stats_rollups_use_owner_and_actual_source_precedence() {
         .summarize_request_token_stats_daily(base, base + 2 * 86_400, 86_400)
         .expect("daily rollup");
     assert_eq!(daily.len(), 2);
-    assert_eq!(daily[0].usage.total_tokens, 170);
-    assert_eq!(daily[0].usage.input_tokens, 180);
-    assert_eq!(daily[0].usage.cached_input_tokens, 50);
-    assert_eq!(daily[0].usage.output_tokens, 70);
+    assert_eq!(daily[0].usage.total_tokens, 100);
+    assert_eq!(daily[0].usage.input_tokens, 100);
+    assert_eq!(daily[0].usage.cached_input_tokens, 20);
+    assert_eq!(daily[0].usage.output_tokens, 50);
     assert_eq!(daily[0].usage.request_count, 2);
     assert_eq!(daily[0].usage.success_count, 1);
     assert_eq!(daily[0].usage.error_count, 1);
@@ -2195,7 +2260,7 @@ fn request_token_stats_rollups_use_owner_and_actual_source_precedence() {
         .find(|item| item.user_id == "current-user")
         .expect("current owner fallback rollup");
     assert_eq!(ledger_user.usage.total_tokens, 100);
-    assert_eq!(current_user.usage.total_tokens, 70);
+    assert_eq!(current_user.usage.total_tokens, 0);
 
     let ledger_direct = storage
         .summarize_request_token_stats_for_user_between("ledger-user", base, base + 86_400)
@@ -2221,7 +2286,7 @@ fn request_token_stats_rollups_use_owner_and_actual_source_precedence() {
             .expect("legacy account")
             .usage
             .total_tokens,
-        70
+        0
     );
 
     let aggregate_sources = storage

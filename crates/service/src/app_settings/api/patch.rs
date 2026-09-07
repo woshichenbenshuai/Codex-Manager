@@ -14,13 +14,13 @@ use super::{
     set_gateway_sse_keepalive_enabled, set_gateway_sse_keepalive_interval_ms,
     set_gateway_thread_aware_account_distribution_enabled, set_gateway_upstream_proxy_bypass_hosts,
     set_gateway_upstream_proxy_url, set_gateway_upstream_stream_timeout_ms,
-    set_gateway_upstream_total_timeout_ms, set_gateway_user_agent_version,
+    set_gateway_upstream_total_timeout_ms, set_gateway_user_agent, set_gateway_user_agent_version,
     set_keep_window_ui_mounted_setting, set_lightweight_mode_on_close_to_tray_setting,
-    set_saved_service_addr, set_service_bind_mode, set_ui_appearance_preset, set_ui_locale,
-    set_ui_low_transparency_enabled, set_ui_theme, set_update_auto_check_enabled,
-    BackgroundTasksInput, QuotaGuardInput, APP_SETTING_AUTHOR_SERVER_RECOMMENDATIONS_KEY,
-    APP_SETTING_AUTHOR_SPONSORS_KEY, APP_SETTING_PLUGIN_MARKET_MODE_KEY,
-    APP_SETTING_PLUGIN_MARKET_SOURCE_URL_KEY,
+    set_saved_service_addr, set_service_bind_mode, set_show_main_window_on_startup_setting,
+    set_ui_appearance_preset, set_ui_locale, set_ui_low_transparency_enabled, set_ui_theme,
+    set_ui_zoom_factor, set_update_auto_check_enabled, BackgroundTasksInput, QuotaGuardInput,
+    APP_SETTING_AUTHOR_SERVER_RECOMMENDATIONS_KEY, APP_SETTING_AUTHOR_SPONSORS_KEY,
+    APP_SETTING_PLUGIN_MARKET_MODE_KEY, APP_SETTING_PLUGIN_MARKET_SOURCE_URL_KEY,
 };
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -28,11 +28,13 @@ use super::{
 pub(super) struct AppSettingsPatch {
     update_auto_check: Option<bool>,
     auto_start_enabled: Option<bool>,
+    show_main_window_on_startup: Option<bool>,
     close_to_tray_on_close: Option<bool>,
     keep_window_ui_mounted: Option<bool>,
     lightweight_mode_on_close_to_tray: Option<bool>,
     codex_cli_guide_dismissed: Option<bool>,
     low_transparency: Option<bool>,
+    zoom_factor: Option<f64>,
     theme: Option<String>,
     appearance_preset: Option<String>,
     locale: Option<String>,
@@ -45,6 +47,7 @@ pub(super) struct AppSettingsPatch {
     account_max_inflight: Option<usize>,
     thread_aware_account_distribution_enabled: Option<bool>,
     gateway_originator: Option<String>,
+    gateway_user_agent: Option<String>,
     gateway_user_agent_version: Option<String>,
     gateway_residency_requirement: Option<String>,
     plugin_market_mode: Option<String>,
@@ -102,6 +105,9 @@ pub(super) fn apply_app_settings_patch(patch: AppSettingsPatch) -> Result<(), St
     if let Some(enabled) = patch.auto_start_enabled {
         set_auto_start_enabled_setting(enabled)?;
     }
+    if let Some(enabled) = patch.show_main_window_on_startup {
+        set_show_main_window_on_startup_setting(enabled)?;
+    }
     if let Some(enabled) = patch.close_to_tray_on_close {
         set_close_to_tray_on_close_setting(enabled)?;
     }
@@ -116,6 +122,9 @@ pub(super) fn apply_app_settings_patch(patch: AppSettingsPatch) -> Result<(), St
     }
     if let Some(enabled) = patch.low_transparency {
         set_ui_low_transparency_enabled(enabled)?;
+    }
+    if let Some(zoom_factor) = patch.zoom_factor {
+        let _ = set_ui_zoom_factor(zoom_factor)?;
     }
     if let Some(theme) = patch.theme {
         let _ = set_ui_theme(Some(&theme))?;
@@ -152,6 +161,9 @@ pub(super) fn apply_app_settings_patch(patch: AppSettingsPatch) -> Result<(), St
     }
     if let Some(originator) = patch.gateway_originator {
         let _ = set_gateway_originator(&originator)?;
+    }
+    if let Some(user_agent) = patch.gateway_user_agent {
+        let _ = set_gateway_user_agent(&user_agent)?;
     }
     if let Some(version) = patch.gateway_user_agent_version {
         let _ = set_gateway_user_agent_version(&version)?;

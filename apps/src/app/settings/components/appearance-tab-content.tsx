@@ -1,6 +1,7 @@
 "use client";
 
-import { Check, Palette } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Check, Minus, MonitorUp, Plus, RotateCcw, Palette } from "lucide-react";
 import { APPEARANCE_PRESETS } from "@/lib/appearance";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,19 +21,116 @@ interface AppearanceTabContentProps {
   t: TranslateFn;
   theme: string | undefined;
   appearancePreset: string | null | undefined;
+  isDesktopRuntime: boolean;
+  zoomFactor: number;
   onThemeChange: (nextTheme: string) => void;
   onAppearancePresetChange: (nextPreset: string) => void;
+  onZoomFactorChange: (nextZoomFactor: number) => void;
+}
+
+function normalizeZoomFactor(value: number): number {
+  return Math.round(Math.min(1.25, Math.max(0.75, value)) * 20) / 20;
 }
 
 export function AppearanceTabContent({
   t,
   theme,
   appearancePreset,
+  isDesktopRuntime,
+  zoomFactor,
   onThemeChange,
   onAppearancePresetChange,
+  onZoomFactorChange,
 }: AppearanceTabContentProps) {
+  const [zoomDraft, setZoomDraft] = useState(() => normalizeZoomFactor(zoomFactor));
+
+  useEffect(() => {
+    setZoomDraft(normalizeZoomFactor(zoomFactor));
+  }, [zoomFactor]);
+
+  const commitZoomFactor = (value: number) => {
+    const normalized = normalizeZoomFactor(value);
+    setZoomDraft(normalized);
+    if (normalized !== normalizeZoomFactor(zoomFactor)) {
+      onZoomFactorChange(normalized);
+    }
+  };
+
   return (
     <>
+      {isDesktopRuntime ? (
+        <Card className="glass-card mission-panel shadow-sm">
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <MonitorUp className="h-4 w-4 text-primary" />
+              <CardTitle className="text-base">{t("界面缩放")}</CardTitle>
+            </div>
+            <CardDescription>{t("调整桌面主窗口的整体显示比例")}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center gap-3">
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                className="h-9 w-9 shrink-0"
+                onClick={() => commitZoomFactor(zoomDraft - 0.05)}
+                disabled={zoomDraft <= 0.75}
+                aria-label={t("缩小界面")}
+                title={t("缩小界面")}
+              >
+                <Minus className="h-4 w-4" />
+              </Button>
+              <input
+                type="range"
+                min={75}
+                max={125}
+                step={5}
+                value={Math.round(zoomDraft * 100)}
+                onChange={(event) =>
+                  setZoomDraft(Number(event.currentTarget.value) / 100)
+                }
+                onPointerUp={(event) =>
+                  commitZoomFactor(Number(event.currentTarget.value) / 100)
+                }
+                onKeyUp={(event) =>
+                  commitZoomFactor(Number(event.currentTarget.value) / 100)
+                }
+                className="h-2 min-w-0 flex-1 cursor-pointer accent-primary"
+                aria-label={t("界面缩放比例")}
+              />
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                className="h-9 w-9 shrink-0"
+                onClick={() => commitZoomFactor(zoomDraft + 0.05)}
+                disabled={zoomDraft >= 1.25}
+                aria-label={t("放大界面")}
+                title={t("放大界面")}
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+              <div className="w-14 shrink-0 text-right text-sm font-semibold tabular-nums">
+                {Math.round(zoomDraft * 100)}%
+              </div>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="h-9 w-9 shrink-0"
+                onClick={() => commitZoomFactor(1)}
+                disabled={zoomDraft === 1}
+                aria-label={t("恢复默认缩放")}
+                title={t("恢复默认缩放")}
+              >
+                <RotateCcw className="h-4 w-4" />
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+
       <Card className="glass-card mission-panel shadow-sm">
         <CardHeader>
           <div className="flex items-center gap-2">
@@ -54,8 +152,8 @@ export function AppearanceTabContent({
                   className={cn(
                     "group relative h-auto justify-start rounded-lg p-4 text-left transition-all duration-200",
                     isActive
-                      ? "border-primary/45 bg-primary/10 shadow-sm ring-1 ring-primary/20"
-                      : "border-border/60 bg-background/60 hover:border-primary/25 hover:bg-accent/30",
+                      ? "border-primary/30 bg-primary/[0.055] shadow-[0_12px_28px_-24px_rgb(var(--primary-rgb)/0.28)] ring-1 ring-primary/10"
+                      : "border-border/50 bg-background/45 hover:border-primary/20 hover:bg-accent/20",
                   )}
                 >
                   <div className="flex items-start justify-between gap-3">
@@ -76,7 +174,7 @@ export function AppearanceTabContent({
                       className={cn(
                         "h-14 flex-1 rounded-lg border",
                         item.id === "modern"
-                          ? "border-primary/20 bg-accent/40"
+                          ? "border-primary/10 bg-primary/[0.035]"
                           : "border-border/70 bg-muted/60",
                       )}
                     />
@@ -85,7 +183,7 @@ export function AppearanceTabContent({
                         className={cn(
                           "h-4 rounded-lg border",
                           item.id === "modern"
-                            ? "border-primary/15 bg-card shadow-sm"
+                            ? "border-primary/10 bg-card/75 shadow-[0_8px_18px_-16px_rgb(var(--primary-rgb)/0.16)]"
                             : "border-border/70 bg-card",
                         )}
                       />
@@ -93,7 +191,7 @@ export function AppearanceTabContent({
                         className={cn(
                           "h-4 rounded-lg border",
                           item.id === "modern"
-                            ? "border-primary/15 bg-card/80 shadow-sm"
+                            ? "border-primary/10 bg-card/65 shadow-[0_8px_18px_-16px_rgb(var(--primary-rgb)/0.12)]"
                             : "border-border/70 bg-card/80",
                         )}
                       />

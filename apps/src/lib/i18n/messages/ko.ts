@@ -7,6 +7,7 @@ import { KO_ACCOUNTS_MESSAGES } from "./sections/ko-accounts";
 import { KO_API_KEYS_MESSAGES } from "./sections/ko-api-keys";
 import { KO_AGGREGATE_API_MESSAGES } from "./sections/ko-aggregate-api";
 import { KO_DASHBOARD_MESSAGES } from "./sections/ko-dashboard";
+import { KO_DESKTOP_DIAGNOSTICS_MESSAGES } from "./sections/ko-desktop-diagnostics";
 import { KO_DYNAMIC_UI_MESSAGES } from "./sections/ko-dynamic-ui";
 import { KO_MODEL_CATALOG_MESSAGES } from "./sections/ko-model-catalog";
 import { KO_MODEL_GROUPS_MESSAGES } from "./sections/ko-model-groups";
@@ -19,6 +20,7 @@ import { KO_SKILLS_MESSAGES } from "./sections/ko-skills";
 export const KO_MESSAGES: MessageCatalog = {
   ...KO_PROJECTS_MESSAGES,
   ...KO_SKILLS_MESSAGES,
+  ...KO_DESKTOP_DIAGNOSTICS_MESSAGES,
   仪表盘: "대시보드",
   概览: "개요",
   平台接入: "플랫폼 연결",
@@ -172,6 +174,10 @@ export const KO_MESSAGES: MessageCatalog = {
   线程感知账号分配: "스레드 인식 계정 분배",
   "开启后未绑定的新线程会优先选择当前承载线程更少的可用账号，已有线程仍保持账号粘性。":
     "켜면 아직 바인딩되지 않은 새 스레드는 할당된 스레드가 더 적은 사용 가능 계정을 우선 사용하고, 기존 스레드는 계정 고정을 유지합니다.",
+  "Free 账号模型上限": "Free 계정 모델 상한",
+  "选择 Free 账号模型上限": "Free 계정 모델 상한 선택",
+  "设为“不限制”时，Free 账号可参与所有模型请求；选择具体模型后，目录中排在该模型之上的请求会跳过 Free 账号，但不会改写请求模型。混合模式会继续尝试其他账号，账号候选耗尽后仍按现有策略转聚合 API。":
+    "제한 없음으로 설정하면 Free 계정이 모든 모델 요청에 참여합니다. 특정 모델을 선택하면 모델 카탈로그에서 그보다 위에 있는 요청은 Free 계정을 건너뛰며 요청 모델은 변경하지 않습니다. 혼합 모드는 다른 계정을 계속 시도하고 계정 후보가 소진되면 기존 정책에 따라 통합 API로 전환합니다.",
   "代理 Bypass 域名": "프록시 우회 호스트",
   留空表示不绕过代理: "비워 두면 우회하지 않음",
   "一行一个或用逗号分隔；命中的上游域名会绕过全局代理直连。支持精确域名和":
@@ -201,6 +207,9 @@ export const KO_MESSAGES: MessageCatalog = {
   开机自动启动: "시작 시 자동 실행",
   系统登录后自动启动桌面端并保持网关可用:
     "시스템 로그인 후 데스크톱 앱을 자동 실행하고 게이트웨이를 계속 사용할 수 있게 합니다.",
+  启动时显示主界面: "시작할 때 기본 창 표시",
+  "开启时直接显示主界面；关闭此项时保持隐藏，可从托盘菜单打开":
+    "끄면 앱이 기본 창을 숨긴 채 시작되며 트레이 메뉴에서 열 수 있습니다.",
   关闭时最小化到托盘: "닫을 때 트레이로 최소화",
   窗口界面资源常驻: "창 UI 리소스 유지",
   "需先开启关闭时最小化到托盘，才能选择窗口关闭后的资源策略":
@@ -278,6 +287,7 @@ export const KO_MESSAGES: MessageCatalog = {
   账号轮转: "계정 로테이션",
   聚合API轮转: "집계 API 로테이션",
   "混合轮转（账号优先）": "하이브리드 로테이션(계정 우선)",
+  "混合轮转（聚合优先）": "하이브리드 로테이션(집계 API 우선)",
   协议: "프로토콜",
   轮转策略: "로테이션 전략",
   绑定模型: "바인딩 모델",
@@ -400,6 +410,8 @@ export const KO_MESSAGES: MessageCatalog = {
   未提供: "제공 안 됨",
   上移一位: "한 칸 위로",
   下移一位: "한 칸 아래로",
+  移到顶部: "맨 위로 이동",
+  移到底部: "맨 아래로 이동",
   编辑账号信息: "계정 정보 편집",
   用量详情: "사용량 상세",
   套餐信息: "구독 정보",
@@ -453,6 +465,8 @@ export const KO_MESSAGES: MessageCatalog = {
   保存: "저장",
   清除: "지우기",
   确定: "확인",
+  首页: "첫 페이지",
+  跳至: "이동",
   "服务未连接，暂时无法":
     "서비스가 연결되지 않아 다음 작업을 수행할 수 없습니다",
   更新密钥: "키 업데이트",
@@ -468,16 +482,8 @@ export const KO_MESSAGES: MessageCatalog = {
   更新状态失败: "상태 업데이트 실패",
   模型列表已刷新: "모델 목록이 새로고침되었습니다",
   刷新模型失败: "모델 새로고침 실패",
-  "导出到本地 Codex 缓存": "로컬 Codex 캐시로 내보내기",
-  "已导出到本地 Codex 缓存": "로컬 Codex 캐시로 내보냈습니다",
-  "Codex 缓存已下载，请保存到 `~/.codex/models_cache.json`":
-    "Codex 캐시가 다운로드되었습니다. `~/.codex/models_cache.json`에 저장하세요.",
   当前环境不支持浏览器导出:
     "현재 실행 환경은 브라우저 내보내기를 지원하지 않습니다",
-  "当前环境不支持导出 Codex 缓存":
-    "현재 실행 환경은 Codex 캐시 내보내기를 지원하지 않습니다",
-  "当前服务未返回可用的 Codex CLI 标识":
-    "현재 서비스가 사용할 수 있는 Codex CLI 식별자를 반환하지 않았습니다",
   模型目录为空: "모델 카탈로그가 비어 있습니다",
   读取密钥失败: "키 읽기 실패",
   累计Token: "누적 Token",
@@ -564,8 +570,8 @@ export const KO_MESSAGES: MessageCatalog = {
     "서비스가 연결되지 않아 계정 인증 및 콜백 파싱을 현재 사용할 수 없습니다. 재연결 후 계속할 수 있습니다.",
   "备注/描述": "메모 / 설명",
   "例如：主号 / 测试号": "예: 주계정 / 테스트계정",
-  "手动解析回调（当本地 48760 端口占用时）":
-    "수동 콜백 파싱(로컬 48760 포트가 사용 중일 때)",
+  "手动解析回调（仅在自动回调未完成时使用）":
+    "수동 콜백 파싱(자동 콜백이 완료되지 않을 때만 사용)",
   "粘贴浏览器跳转后的完整回调 URL（包含 state 和 code）":
     "브라우저 리디렉션 후의 전체 콜백 URL을 붙여넣으세요(state 와 code 포함)",
   解析: "파싱",
@@ -632,6 +638,12 @@ export const KO_MESSAGES: MessageCatalog = {
   默认: "기본",
   渐变版本: "그라데이션 버전",
   界面主题: "인터페이스 테마",
+  界面缩放: "인터페이스 배율",
+  调整桌面主窗口的整体显示比例: "데스크톱 기본 창의 전체 배율을 조정합니다.",
+  缩小界面: "축소",
+  放大界面: "확대",
+  界面缩放比例: "인터페이스 배율",
+  恢复默认缩放: "배율 초기화",
   网关策略: "게이트웨이 정책",
   后台任务线程: "백그라운드 작업 스레드",
   "Worker 并发参数": "Worker 동시성 설정",
@@ -1179,8 +1191,8 @@ export const KO_MESSAGES: MessageCatalog = {
     "원하는 색상 테마를 선택해 작업 분위기에 맞추세요",
   在渐变版本和默认版本之间切换: "그라데이션 버전과 기본 버전 사이 전환",
   暂无请求日志: "요청 로그가 없습니다",
-  "账号轮转只走账号池；聚合API轮转只走聚合API；混合轮转先走账号池，账号耗尽后使用聚合API兜底。":
-    "계정 로테이션은 계정 풀만 사용하고, 집계 API 로테이션은 집계 API만 사용합니다. 하이브리드는 계정을 먼저 사용한 뒤 계정이 소진되면 집계 API로 폴백합니다.",
+  "账号轮转只走账号池；聚合API轮转只走聚合API；混合轮转（账号优先）先走账号池，账号耗尽后使用聚合API兜底；混合轮转（聚合优先）先走聚合API，聚合不可用时回落账号池。":
+    "계정 로테이션은 계정 풀만 사용하고, 집계 API 로테이션은 집계 API만 사용합니다. 하이브리드(계정 우선)는 계정을 먼저 사용한 뒤 계정이 소진되면 집계 API로 폴백하고, 하이브리드(집계 API 우선)는 집계 API를 먼저 사용한 뒤 사용할 수 없을 때 계정 풀로 폴백합니다.",
   "仅对账号轮转和混合轮转生效，可限制这把平台密钥只从指定账号计划类型中选路由账号。":
     "계정 로테이션과 하이브리드 로테이션에만 적용되며, 이 API 키가 지정한 계정 플랜 유형에서만 라우팅 계정을 선택하도록 제한합니다.",
   账号选路策略: "계정 라우팅 전략",
@@ -1198,8 +1210,12 @@ export const KO_MESSAGES: MessageCatalog = {
   最近调用: "최근 호출",
   从未调用: "호출 없음",
   "走 Claude 语义，": "Claude 의미 사용,",
-  "Fast 会映射为上游 priority；未设置时跟随请求。":
-    "Fast는 업스트림 priority로 매핑되며, 미설정 시 요청을 따릅니다.",
+  "标准 (Standard)": "표준 (Standard)",
+  "快速 (Fast)": "빠름 (Fast)",
+  "超快 (Ultrafast)": "초고속 (Ultrafast)",
+  "弹性 (Flex)": "유연 (Flex)",
+  "Standard 会强制标准速度；Fast 会映射为上游 priority；Ultrafast 与 Flex 会按原值透传，是否可用取决于模型和上游；未设置时跟随请求。":
+    "Standard는 표준 속도를 강제하고, Fast는 업스트림 priority로 매핑합니다. Ultrafast와 Flex는 선택한 모델 및 업스트림에서 지원될 때 그대로 전달되며, 설정하지 않으면 요청 값을 따릅니다.",
   系统设置: "시스템 설정",
   "加载配置中...": "설정 불러오는 중...",
   额外额度: "추가 할당량",
@@ -1289,10 +1305,6 @@ export const KO_MESSAGES: MessageCatalog = {
     "먼저 전체를 한 번 읽은 뒤 템플릿을 복사하는 것을 권장합니다. provider 이름과 주소를 직접 입력하는 것보다 실수가 훨씬 적습니다.",
   "推荐先完整读一遍，再复制模板；这比自己手写平台 Key、provider 名称和地址更不容易出错。":
     "먼저 전체를 한 번 읽은 뒤 템플릿을 복사하는 것을 권장합니다. 플랫폼 Key, provider 이름, 주소를 직접 입력하는 것보다 실수가 훨씬 적습니다.",
-  "如果你要把当前模型目录替换到本地 Codex 缓存，可以去模型管理页点击“导出到本地 Codex 缓存”；桌面端会直接写入 `~/.codex/models_cache.json`，浏览器模式会下载同名文件。":
-    "현재 모델 목록을 로컬 Codex 캐시로 교체하려면 모델 관리 페이지에서 “로컬 Codex 캐시로 내보내기”를 클릭하세요. 데스크톱 모드는 `~/.codex/models_cache.json`에 직접 기록하고, 브라우저 모드는 같은 이름의 파일을 다운로드합니다.",
-  "如果你在 Web 端部署并访问，可以去模型管理页点击“导出到本地 Codex 缓存”；浏览器会下载同名 `models_cache.json`，你再手动放入本地 `~/.codex/models_cache.json`。":
-    "웹 배포에 접속 중이라면 모델 관리 페이지에서 “로컬 Codex 캐시로 내보내기”를 클릭하세요. 브라우저가 같은 이름의 `models_cache.json` 파일을 다운로드하면, 이를 로컬 `~/.codex/models_cache.json`에 직접 넣으면 됩니다.",
   建议按下面的顺序完成接入: "아래 순서대로 연결하는 것을 권장합니다",
   分步导引: "단계별 안내",
   "你当前在第 {current} 步，共 {total} 步。":
@@ -1347,10 +1359,6 @@ export const KO_MESSAGES: MessageCatalog = {
     '`model_provider = "cm"`는 `[model_providers.cm]`와 완전히 일치해야 합니다.',
   "`base_url` 默认应指向 `http://localhost:48760/v1`。":
     "`base_url`은 기본적으로 `http://localhost:48760/v1`을 가리켜야 합니다.",
-  "如果你要把当前模型目录替换到本地 Codex 缓存，可以去模型管理页点击“导出到本地 Codex 缓存”；桌面端会直接写入 `~/.codex/models_cache.json`，浏览器模式会下载同名文件供你手动放入 `.codex` 目录。":
-    "현재 모델 카탈로그를 로컬 Codex 캐시로 교체하려면 모델 관리 페이지에서 “로컬 Codex 캐시로 내보내기”를 클릭하세요. 데스크톱 모드는 `~/.codex/models_cache.json`에 직접 쓰고, 브라우저 모드는 같은 이름의 파일을 다운로드하여 `.codex` 디렉터리에 수동으로 넣을 수 있습니다.",
-  "如果你在 Web 端想手动替换本地 Codex 缓存，优先用模型管理页右上角的导出按钮；它会下载同名 `models_cache.json` 供你手动放入本地 `.codex` 目录。":
-    "웹에서 로컬 Codex 캐시를 수동으로 교체하려면 모델 관리 페이지 우측 상단의 내보내기 버튼을 사용하세요. 같은 이름의 `models_cache.json` 파일이 다운로드되며, 이를 로컬 `.codex` 디렉터리에 직접 넣을 수 있습니다.",
   "修改 `auth.json` 后请重新启动 Codex CLI，避免旧认证缓存继续生效。":
     "`auth.json`을 수정한 뒤에는 이전 인증 캐시가 계속 적용되지 않도록 Codex CLI를 다시 시작하세요.",
   "如果你在设置里换过端口，把这里同步改掉后再重新打开 CLI 测试。":
@@ -1387,6 +1395,21 @@ export const KO_MESSAGES: MessageCatalog = {
   下一步: "다음 단계",
   已经是最后一步: "이미 마지막 단계입니다",
   "Codex 首次接入引导": "Codex 첫 연결 안내",
+  "无需手动编辑 auth.json 或 config.toml。CodexManager 会通过平台模式安全写入并备份 Codex profile。":
+    "auth.json 또는 config.toml을 직접 편집할 필요가 없습니다. CodexManager가 플랫폼 모드를 통해 Codex profile을 안전하게 기록하고 백업합니다.",
+  "先确认 CodexManager 本地服务可用，再选择 Codex 接入模式。":
+    "먼저 CodexManager 로컬 서비스를 사용할 수 있는지 확인한 다음 Codex 연결 방식을 선택하세요.",
+  "第二步：准备账号或平台密钥": "2단계: 계정 또는 플랫폼 키 준비",
+  "账号直连需要 active OpenAI 账号；本地网关需要可用的平台密钥。":
+    "직접 연결에는 활성 OpenAI 계정이 필요하고, 로컬 게이트웨이에는 사용 가능한 플랫폼 키가 필요합니다.",
+  "第三步：在平台模式应用配置": "3단계: 플랫폼 모드에서 구성 적용",
+  "选择模式与目标后点击应用，页面会调用现有 profile 接口写入配置。":
+    "모드와 대상을 선택한 뒤 적용하면 기존 profile API를 사용해 구성을 기록합니다.",
+  "无需复制配置模板，也不要把账号 token 手动写进 auth.json。":
+    "구성 템플릿을 복사하거나 계정 token을 auth.json에 직접 기록하지 마세요.",
+  "请统一使用平台模式，避免 provider、模型目录和运行时重载配置彼此不一致。":
+    "provider, 모델 카탈로그, 런타임 재로드 설정이 어긋나지 않도록 모든 변경은 플랫폼 모드에서 수행하세요.",
+  "打开平台模式": "플랫폼 모드 열기",
   "只需要准备 `auth.json` 和 `config.toml` 两个文件。没有勾选“不再显示”时，下次进入软件仍会看到它。":
     "`auth.json`과 `config.toml` 두 파일만 준비하면 됩니다. “다시 표시하지 않음”을 선택하지 않으면 다음 실행 시에도 안내가 표시됩니다.",
   "右侧只保留基础配置；复制后按实际端口改 `base_url` 即可。":

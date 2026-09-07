@@ -3,7 +3,7 @@ use super::{
     encode_request_body, is_session_scoped_header, resolve_request_compression,
     resolve_request_compression_with_flag, send_async_stream_request,
     should_retry_transport_without_compression, should_wrap_upstream_as_stream_response,
-    strip_compact_service_tier_for_transport, RequestCompression, CPA_GEMINI_CODEX_USER_AGENT,
+    strip_compact_service_tier_for_transport, RequestCompression,
 };
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -13,6 +13,10 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder;
+use tokio_tungstenite::accept_hdr_async_with_config;
+use tokio_tungstenite::tungstenite::extensions::compression::deflate::DeflateConfig;
+use tokio_tungstenite::tungstenite::extensions::ExtensionsConfig;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 type WsServerRequest = tokio_tungstenite::tungstenite::handshake::server::Request;
 type WsServerResponse = tokio_tungstenite::tungstenite::handshake::server::Response;
@@ -53,6 +57,14 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .iter()
         .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
         .map(|(_, value)| value.as_str())
+}
+
+fn mock_websocket_config() -> WebSocketConfig {
+    let mut config = WebSocketConfig::default();
+    let mut extensions = ExtensionsConfig::default();
+    extensions.permessage_deflate = Some(DeflateConfig::default());
+    config.extensions = extensions;
+    config
 }
 
 #[test]
@@ -135,6 +147,79 @@ fn spawn_raw_http_response(
     (format!("http://{addr}/v1/responses"), release_tx, handle)
 }
 
+fn spawn_active_streaming_http_response(
+    chunks: Vec<Vec<u8>>,
+    chunk_interval: Duration,
+) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind streaming mock upstream");
+    let addr = listener.local_addr().expect("streaming mock upstream addr");
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept streaming mock upstream");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set streaming mock read timeout");
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(read) => request.extend_from_slice(&buf[..read]),
+                Err(_) => break,
+            }
+        }
+
+        let body_len = chunks.iter().map(Vec::len).sum::<usize>();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+        )
+        .expect("write streaming mock response headers");
+        stream.flush().expect("flush streaming mock headers");
+
+        for chunk in chunks {
+            thread::sleep(chunk_interval);
+            stream
+                .write_all(chunk.as_slice())
+                .expect("write streaming mock body chunk");
+            stream.flush().expect("flush streaming mock body chunk");
+        }
+    });
+
+    (format!("http://{addr}/v1/responses"), handle)
+}
+
+fn spawn_delayed_http_response_headers(delay: Duration) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind delayed-header mock upstream");
+    let addr = listener
+        .local_addr()
+        .expect("delayed-header mock upstream addr");
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener
+            .accept()
+            .expect("accept delayed-header mock upstream");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set delayed-header mock read timeout");
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(read) => request.extend_from_slice(&buf[..read]),
+                Err(_) => break,
+            }
+        }
+
+        thread::sleep(delay);
+        let _ = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 14\r\nConnection: close\r\n\r\ndata: [DONE]\n\n",
+        );
+        let _ = stream.flush();
+    });
+
+    (format!("http://{addr}/v1/responses"), handle)
+}
+
 fn send_mock_stream_request(url: &str) -> super::super::super::GatewayStreamResponse {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(1))
@@ -177,7 +262,7 @@ fn spawn_mock_websocket_upstream(
             let listener =
                 tokio::net::TcpListener::from_std(listener).expect("convert websocket listener");
             let (stream, _) = listener.accept().await.expect("accept websocket client");
-            let mut websocket = tokio_tungstenite::accept_hdr_async(
+            let mut websocket = accept_hdr_async_with_config(
                 stream,
                 |request: &WsServerRequest, response: WsServerResponse| {
                     let headers = request
@@ -193,6 +278,7 @@ fn spawn_mock_websocket_upstream(
                     let _ = headers_tx.send(headers);
                     Ok(response)
                 },
+                Some(mock_websocket_config()),
             )
             .await
             .expect("accept websocket handshake");
@@ -350,6 +436,9 @@ fn gemini_codex_compat_does_not_preserve_client_identity_like_cpa() {
 
 #[test]
 fn gemini_codex_compat_header_profile_matches_cpa_executor_shape() {
+    let _guard = crate::test_env_guard();
+    crate::gateway::set_gateway_user_agent(Some("global-gateway/1.0"))
+        .expect("set global gateway user agent");
     let mut headers = vec![
         (
             "User-Agent".to_string(),
@@ -371,7 +460,7 @@ fn gemini_codex_compat_header_profile_matches_cpa_executor_shape() {
 
     assert_eq!(
         header_value(&headers, "User-Agent"),
-        Some(CPA_GEMINI_CODEX_USER_AGENT)
+        Some("global-gateway/1.0")
     );
     assert_eq!(header_value(&headers, "originator"), Some("codex-tui"));
     assert_eq!(header_value(&headers, "Connection"), Some("Keep-Alive"));
@@ -382,6 +471,7 @@ fn gemini_codex_compat_header_profile_matches_cpa_executor_shape() {
     assert_eq!(header_value(&headers, "session-id"), None);
     assert_eq!(header_value(&headers, "thread-id"), None);
     assert_eq!(header_value(&headers, "session_id").map(str::len), Some(36));
+    crate::gateway::set_gateway_user_agent(None).expect("clear global gateway user agent");
 }
 
 /// 函数 `encode_request_body_adds_zstd_content_encoding`
@@ -612,6 +702,71 @@ fn stream_transport_does_not_fast_close_successful_sse_body() {
 // ── WebSocket upstream selection & fallback ────────────────────────────────
 
 #[test]
+fn stream_transport_timeout_does_not_cap_active_body_duration() {
+    let _env_lock = crate::test_env_guard();
+    let _reload_guard = RuntimeConfigReloadGuard;
+    let _stream_timeout_guard = EnvGuard::set("CODEXMANAGER_UPSTREAM_STREAM_TIMEOUT_MS", "200");
+    crate::gateway::reload_runtime_config_from_env();
+
+    let chunks = vec![
+        b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"one\"}\n\n".to_vec(),
+        b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"two\"}\n\n".to_vec(),
+        b"data: {\"type\":\"response.completed\"}\n\n".to_vec(),
+    ];
+    let expected = chunks.concat();
+    let (url, handle) = spawn_active_streaming_http_response(chunks, Duration::from_millis(80));
+
+    let response = send_mock_stream_request(url.as_str());
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body = response
+        .read_all_bytes()
+        .expect("active response body may outlive the header deadline");
+
+    assert_eq!(body.as_ref(), expected.as_slice());
+    handle.join().expect("join streaming mock upstream");
+}
+
+#[test]
+fn stream_transport_reports_response_headers_timeout() {
+    let _env_lock = crate::test_env_guard();
+    let _reload_guard = RuntimeConfigReloadGuard;
+    let _stream_timeout_guard = EnvGuard::set("CODEXMANAGER_UPSTREAM_STREAM_TIMEOUT_MS", "50");
+    crate::gateway::reload_runtime_config_from_env();
+
+    let (url, handle) = spawn_delayed_http_response_headers(Duration::from_millis(200));
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(1))
+        .build()
+        .expect("build reqwest client");
+    let started_at = Instant::now();
+    let result = send_async_stream_request(
+        &client,
+        &reqwest::Method::GET,
+        url.as_str(),
+        "/v1/responses",
+        Some(Instant::now() + Duration::from_secs(5)),
+        &[],
+        &Bytes::new(),
+        true,
+    );
+
+    assert!(
+        matches!(
+            result,
+            Err(super::AsyncStreamRequestError::ResponseHeadersTimeout(timeout))
+                if timeout == Duration::from_millis(50)
+        ),
+        "delayed response headers must report ResponseHeadersTimeout, got {result:?}"
+    );
+    assert!(
+        started_at.elapsed() < Duration::from_millis(500),
+        "configured response-header timeout was not enforced: {:?}",
+        started_at.elapsed()
+    );
+    handle.join().expect("join delayed-header mock upstream");
+}
+
+#[test]
 fn websocket_upstream_not_selected_when_flag_disabled() {
     let _env_lock = crate::test_env_guard();
     let _reload_guard = RuntimeConfigReloadGuard;
@@ -669,7 +824,7 @@ fn websocket_upstream_terminal_detection_parses_json_type() {
     assert!(super::is_websocket_upstream_terminal_text(
         r#"{"type":"response.completed"}"#
     ));
-    assert!(super::is_websocket_upstream_terminal_text(
+    assert!(!super::is_websocket_upstream_terminal_text(
         r#"{"type":"response.done"}"#
     ));
     assert!(super::is_websocket_upstream_terminal_text(
@@ -683,6 +838,50 @@ fn websocket_upstream_terminal_detection_parses_json_type() {
     ));
     assert!(!super::is_websocket_upstream_terminal_text(
         r#"not json response.completed"#
+    ));
+}
+
+#[test]
+fn websocket_upstream_recovery_requires_one_probe_and_completed_event() {
+    let start = Instant::now();
+    let cooldown = Duration::from_secs(30);
+    let mut state = super::WebsocketUpstreamRecoveryState::default();
+
+    assert!(state.try_acquire_probe(start, cooldown));
+    assert!(
+        !state.try_acquire_probe(start + Duration::from_secs(1), cooldown),
+        "only one recovery probe may be in flight"
+    );
+
+    state.mark_failed(start);
+    assert!(
+        !state.try_acquire_probe(start + Duration::from_secs(29), cooldown),
+        "failed probe must keep subsequent requests on HTTP during cooldown"
+    );
+    assert!(state.try_acquire_probe(start + cooldown, cooldown));
+    state.mark_completed();
+    assert!(
+        state.try_acquire_probe(start + cooldown, cooldown),
+        "response.completed must clear the cooldown after the probe"
+    );
+
+    state.mark_failed(start + cooldown);
+    assert!(
+        !state.try_acquire_probe(start + cooldown + Duration::from_secs(1), cooldown),
+        "an incomplete recovery must continue using HTTP"
+    );
+}
+
+#[test]
+fn websocket_upstream_recovery_success_is_only_response_completed() {
+    assert!(super::is_websocket_upstream_completed_text(
+        r#"{"type":"response.completed"}"#
+    ));
+    assert!(!super::is_websocket_upstream_completed_text(
+        r#"{"type":"response.done"}"#
+    ));
+    assert!(!super::is_websocket_upstream_completed_text(
+        r#"{"type":"response.failed"}"#
     ));
 }
 
@@ -712,7 +911,7 @@ fn websocket_upstream_request_text_from_http_body_wraps_response_create() {
     );
     assert_eq!(
         value.get("stream").and_then(serde_json::Value::as_bool),
-        Some(true)
+        None
     );
     assert_eq!(
         value
@@ -737,14 +936,14 @@ fn websocket_upstream_request_text_from_http_body_rejects_invalid_payload() {
 }
 
 #[test]
-fn send_websocket_upstream_request_builds_valid_handshake_and_stops_on_done() {
+fn send_websocket_upstream_request_builds_valid_handshake_and_stops_on_completed() {
     let _env_lock = crate::test_env_guard();
     let _reload_guard = RuntimeConfigReloadGuard;
     let _proxy_guard = EnvGuard::set("CODEXMANAGER_UPSTREAM_PROXY_URL", "");
     let _proxy_list_guard = EnvGuard::set("CODEXMANAGER_PROXY_LIST", "");
     crate::gateway::reload_runtime_config_from_env();
     let (url, headers_rx, frame_rx, handle) =
-        spawn_mock_websocket_upstream(r#"{"type":"response.done"}"#);
+        spawn_mock_websocket_upstream(r#"{"type":"response.completed"}"#);
     let body = Bytes::from(r#"{"model":"codex","input":"hello"}"#);
     let response = super::send_websocket_upstream_request(
         url.as_str(),
@@ -761,7 +960,7 @@ fn send_websocket_upstream_request_builds_valid_handshake_and_stops_on_done() {
     let response_body = response.read_all_bytes().expect("read websocket body");
     assert_eq!(
         response_body.as_ref(),
-        b"data: {\"type\":\"response.done\"}\n\n"
+        b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
     );
 
     let headers = headers_rx
@@ -809,7 +1008,44 @@ fn send_websocket_upstream_request_builds_valid_handshake_and_stops_on_done() {
 }
 
 #[test]
-fn send_websocket_upstream_request_uses_configured_proxy() {
+fn send_websocket_upstream_request_does_not_mark_recovery_completed_after_application_failure() {
+    let _env_lock = crate::test_env_guard();
+    let _reload_guard = RuntimeConfigReloadGuard;
+    let _proxy_guard = EnvGuard::set("CODEXMANAGER_UPSTREAM_PROXY_URL", "");
+    let _proxy_list_guard = EnvGuard::set("CODEXMANAGER_PROXY_LIST", "");
+    crate::gateway::reload_runtime_config_from_env();
+    let (url, _headers_rx, _frame_rx, handle) =
+        spawn_mock_websocket_upstream(r#"{"type":"response.failed"}"#);
+    let body = Bytes::from(r#"{"model":"codex","input":"hello"}"#);
+
+    let response = super::send_websocket_upstream_request(
+        url.as_str(),
+        "acct_ws_incomplete_probe",
+        Some(Instant::now() + Duration::from_secs(5)),
+        &[],
+        &body,
+    )
+    .expect("incomplete websocket probe still returns its terminal event");
+    let response_body = response
+        .read_all_bytes()
+        .expect("read incomplete websocket probe body");
+    assert!(String::from_utf8_lossy(response_body.as_ref()).contains("response.failed"));
+
+    assert!(
+        super::is_websocket_upstream_transport_healthy_terminal_text(
+            r#"{"type":"response.completed"}"#
+        )
+    );
+    assert!(
+        !super::is_websocket_upstream_transport_healthy_terminal_text(
+            r#"{"type":"response.failed"}"#
+        )
+    );
+    handle.join().expect("join incomplete websocket upstream");
+}
+
+#[test]
+fn send_websocket_upstream_request_uses_system_environment_proxy() {
     let _env_lock = crate::test_env_guard();
     let _reload_guard = RuntimeConfigReloadGuard;
     let (target_url, headers_rx, _frame_rx, target_handle) =
@@ -822,8 +1058,14 @@ fn send_websocket_upstream_request_uses_configured_proxy() {
         .expect("target has addr")
         .to_string();
     let (proxy_url, connect_rx, proxy_handle) = spawn_http_connect_proxy(target_addr);
-    let _proxy_guard = EnvGuard::set("CODEXMANAGER_UPSTREAM_PROXY_URL", proxy_url.as_str());
+    let _proxy_guard = EnvGuard::set("CODEXMANAGER_UPSTREAM_PROXY_URL", "");
     let _proxy_list_guard = EnvGuard::set("CODEXMANAGER_PROXY_LIST", "");
+    let _upper_http_proxy_guard = EnvGuard::set("HTTP_PROXY", "");
+    let _http_proxy_guard = EnvGuard::set("http_proxy", proxy_url.as_str());
+    let _all_proxy_guard = EnvGuard::set("all_proxy", "");
+    let _upper_all_proxy_guard = EnvGuard::set("ALL_PROXY", "");
+    let _no_proxy_guard = EnvGuard::set("no_proxy", "");
+    let _upper_no_proxy_guard = EnvGuard::set("NO_PROXY", "");
     crate::gateway::reload_runtime_config_from_env();
 
     let body = Bytes::from(r#"{"model":"codex","input":"hello"}"#);
@@ -840,7 +1082,7 @@ fn send_websocket_upstream_request_uses_configured_proxy() {
         .expect("read proxy websocket body");
     assert_eq!(
         response_body.as_ref(),
-        b"data: {\"type\":\"response.completed\"}\n\n"
+        b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
     );
     assert_eq!(
         connect_rx

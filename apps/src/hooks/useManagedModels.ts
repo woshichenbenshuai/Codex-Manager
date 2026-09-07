@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
@@ -8,11 +7,11 @@ import { useDeferredDesktopActivation } from "@/hooks/useDeferredDesktopActivati
 import { useDesktopPageActive } from "@/hooks/useDesktopPageActive";
 import { useRuntimeCapabilities } from "@/hooks/useRuntimeCapabilities";
 import {
-  buildCodexModelsCachePayloadV2,
-  managedModelsV2Client,
-  serializeManagedModelsV2ForCodexCache,
-} from "@/lib/api/managed-models-v2";
-import { serviceClient } from "@/lib/api/service-client";
+  buildManagedModelListQueryKey,
+  buildModelGroupListQueryKey,
+  normalizeQueryServiceAddress,
+} from "@/lib/api/account-query-keys";
+import { managedModelsV2Client } from "@/lib/api/managed-models-v2";
 import { getAppErrorMessage } from "@/lib/api/transport";
 import { useI18n } from "@/lib/i18n/provider";
 import { useAppStore } from "@/lib/store/useAppStore";
@@ -76,17 +75,16 @@ export function useManagedModels() {
   const queryClient = useQueryClient();
   const { t } = useI18n();
   const serviceStatus = useAppStore((state) => state.serviceStatus);
-  const {
-    canAccessManagementRpc,
-    isDesktopRuntime,
-    canUseBrowserDownloadExport,
-  } = useRuntimeCapabilities();
+  const serviceAddr = normalizeQueryServiceAddress(serviceStatus.addr);
+  const managedModelsQueryKey = buildManagedModelListQueryKey(serviceAddr, true);
+  const modelGroupListQueryKey = buildModelGroupListQueryKey(serviceAddr);
+  const startupSnapshotQueryKey = ["startup-snapshot", serviceAddr] as const;
+  const { canAccessManagementRpc } = useRuntimeCapabilities();
   const isServiceReady = canAccessManagementRpc && serviceStatus.connected;
   const isPageActive = useDesktopPageActive("/models/");
   const isQueryEnabled = useDeferredDesktopActivation(
     isServiceReady && isPageActive,
   );
-  const codexUserAgentRef = useRef("");
 
   const ensureServiceReady = (actionLabel: string): boolean => {
     if (isServiceReady) return true;
@@ -95,16 +93,16 @@ export function useManagedModels() {
   };
 
   const query = useQuery({
-    queryKey: MANAGED_MODELS_V2_QUERY_KEY,
-    queryFn: () => managedModelsV2Client.list(true),
+    queryKey: managedModelsQueryKey,
+    queryFn: () => managedModelsV2Client.list(true, serviceAddr),
     enabled: isQueryEnabled,
     retry: 1,
   });
 
   const invalidateConsumers = async () => {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["model-groups"] }),
-      queryClient.invalidateQueries({ queryKey: ["startup-snapshot"] }),
+      queryClient.invalidateQueries({ queryKey: modelGroupListQueryKey }),
+      queryClient.invalidateQueries({ queryKey: startupSnapshotQueryKey }),
     ]);
   };
 
@@ -131,7 +129,7 @@ export function useManagedModels() {
     const hidden = new Set(hiddenSlugs);
     const deleted = new Set(deletedSlugs);
     queryClient.setQueryData<ManagedModelListV2Result>(
-      MANAGED_MODELS_V2_QUERY_KEY,
+      managedModelsQueryKey,
       (current) => {
         if (!current) return current;
         const items = current.items
@@ -159,7 +157,7 @@ export function useManagedModels() {
       savedModels.map((model) => [model.slug, model] as const),
     );
     queryClient.setQueryData<ManagedModelListV2Result>(
-      MANAGED_MODELS_V2_QUERY_KEY,
+      managedModelsQueryKey,
       (current) => {
         if (!current) return current;
         const items = current.items.map((model) =>
@@ -172,7 +170,7 @@ export function useManagedModels() {
 
   const saveMutation = useMutation({
     mutationFn: (input: ManagedModelV2Upsert) =>
-      managedModelsV2Client.upsert(input),
+      managedModelsV2Client.upsert(input, serviceAddr),
     onSuccess: async () => {
       await reloadCatalog();
       await invalidateConsumers();
@@ -189,11 +187,14 @@ export function useManagedModels() {
       enabled,
       visibility,
     }: UpdateManagedModelStateInput) =>
-      managedModelsV2Client.updateState({
-        slug: model.slug,
-        enabled,
-        visibility,
-      }),
+      managedModelsV2Client.updateState(
+        {
+          slug: model.slug,
+          enabled,
+          visibility,
+        },
+        serviceAddr,
+      ),
     onSuccess: (savedModel, input) => {
       applyCommittedModelsToCache([savedModel]);
       if (input.visibility === "hide") {
@@ -234,11 +235,14 @@ export function useManagedModels() {
         new Set(slugs.map((slug) => slug.trim()).filter(Boolean)),
       );
       if (normalizedSlugs.length === 0) return [];
-      return managedModelsV2Client.updateStates({
-        slugs: normalizedSlugs,
-        enabled,
-        visibility,
-      });
+      return managedModelsV2Client.updateStates(
+        {
+          slugs: normalizedSlugs,
+          enabled,
+          visibility,
+        },
+        serviceAddr,
+      );
     },
     onSuccess: (updated) => {
       if (updated.length > 0) {
@@ -266,12 +270,12 @@ export function useManagedModels() {
     mutationFn: async (slug: string) => {
       const catalog =
         queryClient.getQueryData<ManagedModelListV2Result>(
-          MANAGED_MODELS_V2_QUERY_KEY,
+          managedModelsQueryKey,
         ) ?? query.data;
       const isBuiltin =
         catalog?.items.find((model) => model.slug === slug)?.origin ===
         "builtin";
-      await managedModelsV2Client.delete(slug);
+      await managedModelsV2Client.delete(slug, serviceAddr);
       return { isBuiltin, slug };
     },
     onSuccess: ({ isBuiltin, slug }) => {
@@ -298,14 +302,14 @@ export function useManagedModels() {
       );
       const catalog =
         queryClient.getQueryData<ManagedModelListV2Result>(
-          MANAGED_MODELS_V2_QUERY_KEY,
+          managedModelsQueryKey,
         ) ?? query.data;
       const hidden: string[] = [];
       const deleted: string[] = [];
       const failed: Array<{ slug: string; reason: string }> = [];
       for (const slug of normalizedSlugs) {
         try {
-          await managedModelsV2Client.delete(slug);
+          await managedModelsV2Client.delete(slug, serviceAddr);
           if (
             catalog?.items.find((model) => model.slug === slug)?.origin ===
             "builtin"
@@ -374,7 +378,7 @@ export function useManagedModels() {
     ): Promise<ManagedModelBatchRouteResultV2> => {
       const catalog =
         queryClient.getQueryData<ManagedModelListV2Result>(
-          MANAGED_MODELS_V2_QUERY_KEY,
+          managedModelsQueryKey,
         ) ?? query.data;
       const normalizedSlugs = Array.from(
         new Set(input.slugs.map((slug) => slug.trim()).filter(Boolean)),
@@ -435,10 +439,13 @@ export function useManagedModels() {
               ];
 
         try {
-          await managedModelsV2Client.upsert({
-            previousSlug: model.slug,
-            model: { ...model, routes },
-          });
+          await managedModelsV2Client.upsert(
+            {
+              previousSlug: model.slug,
+              model: { ...model, routes },
+            },
+            serviceAddr,
+          );
           updated.push(slug);
         } catch (error) {
           failed.push({ slug, reason: getAppErrorMessage(error) });
@@ -473,7 +480,7 @@ export function useManagedModels() {
 
   const previewImportMutation = useMutation({
     mutationFn: (input: ManagedModelImportV2Params) =>
-      managedModelsV2Client.previewImport(input),
+      managedModelsV2Client.previewImport(input, serviceAddr),
     onError: (error: unknown) => {
       toast.error(`${t("导入预览失败")}: ${getAppErrorMessage(error)}`);
     },
@@ -481,7 +488,7 @@ export function useManagedModels() {
 
   const commitImportMutation = useMutation({
     mutationFn: (input: ManagedModelImportV2Params) =>
-      managedModelsV2Client.commitImport(input),
+      managedModelsV2Client.commitImport(input, serviceAddr),
     onSuccess: async (result) => {
       await reloadCatalog();
       await invalidateConsumers();
@@ -491,73 +498,6 @@ export function useManagedModels() {
       toast.error(`${t("导入提交失败")}: ${getAppErrorMessage(error)}`);
     },
   });
-
-  const resolveCodexUserAgent = async (): Promise<string> => {
-    const cachedUserAgent = codexUserAgentRef.current.trim();
-    if (cachedUserAgent.includes("codex_cli_rs/")) return cachedUserAgent;
-    const initializeResult = await serviceClient.initialize(serviceStatus.addr);
-    const userAgent = String(initializeResult.userAgent || "").trim();
-    if (!userAgent.includes("codex_cli_rs/")) {
-      throw new Error(t("当前服务未返回可用的 Codex CLI 标识"));
-    }
-    codexUserAgentRef.current = userAgent;
-    return userAgent;
-  };
-
-  const triggerBrowserDownload = (fileName: string, content: string): void => {
-    if (typeof document === "undefined") {
-      throw new Error(t("当前环境不支持浏览器导出"));
-    }
-    const blob = new Blob([content], {
-      type: "application/json;charset=utf-8",
-    });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = fileName;
-    anchor.style.display = "none";
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 0);
-  };
-
-  const exportMutation = useMutation({
-    mutationFn: async () => {
-      const catalog = query.data ?? (await reloadCatalog());
-      const models = serializeManagedModelsV2ForCodexCache(catalog.items);
-      if (models.length === 0) throw new Error(t("模型目录为空"));
-      const userAgent = await resolveCodexUserAgent();
-
-      if (isDesktopRuntime) {
-        await serviceClient.exportCodexModelsCache({ userAgent, models });
-        return "desktop" as const;
-      }
-      if (!canUseBrowserDownloadExport) {
-        throw new Error(t("当前环境不支持导出 Codex 缓存"));
-      }
-      const payload = buildCodexModelsCachePayloadV2(catalog.items, userAgent);
-      triggerBrowserDownload(
-        "models_cache.json",
-        `${JSON.stringify(payload, null, 2)}\n`,
-      );
-      return "browser" as const;
-    },
-    onSuccess: (mode) => {
-      toast.success(
-        mode === "browser"
-          ? t("Codex 缓存已下载，请保存到 `~/.codex/models_cache.json`")
-          : t("已导出到本地 Codex 缓存"),
-      );
-    },
-    onError: (error: unknown) => {
-      toast.error(`${t("导出失败")}: ${getAppErrorMessage(error)}`);
-    },
-  });
-
-  useEffect(() => {
-    codexUserAgentRef.current = "";
-  }, [serviceStatus.addr]);
 
   return {
     models: query.data?.items || [],
@@ -569,7 +509,7 @@ export function useManagedModels() {
       if (!ensureServiceReady("读取模型")) return null;
       try {
         const result = await reloadCatalog();
-        toast.success(t("模型目录已重新读取"));
+        toast.success(t("本地网关模型目录已刷新"));
         return result;
       } catch (error) {
         toast.error(`${t("读取模型失败")}: ${getAppErrorMessage(error)}`);
@@ -624,11 +564,6 @@ export function useManagedModels() {
       if (!ensureServiceReady("导入模型")) return null;
       return commitImportMutation.mutateAsync(input);
     },
-    exportCodexCache: async () => {
-      if (!ensureServiceReady("导出模型目录")) return false;
-      await exportMutation.mutateAsync();
-      return true;
-    },
     isRefreshing: query.isRefetching,
     isSaving: saveMutation.isPending,
     isUpdatingModelState:
@@ -641,10 +576,5 @@ export function useManagedModels() {
     isAssigningRoutes: batchAssignRoutesMutation.isPending,
     isImporting:
       previewImportMutation.isPending || commitImportMutation.isPending,
-    isExporting: exportMutation.isPending,
-    canExportCodexCache:
-      isServiceReady &&
-      Boolean(query.data?.items?.length) &&
-      (isDesktopRuntime || canUseBrowserDownloadExport),
   };
 }

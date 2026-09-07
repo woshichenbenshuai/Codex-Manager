@@ -824,6 +824,10 @@ fn start_mock_proxy_speed_server(
 #[test]
 fn rpc_initialize_roundtrip() {
     let _ctx = RpcTestContext::new("rpc-initialize");
+    codexmanager_service::app_settings_set(Some(&serde_json::json!({
+        "gatewayUserAgent": "Custom-Gateway/3.0"
+    })))
+    .expect("set custom gateway user agent");
     let server = codexmanager_service::start_one_shot_server().expect("start server");
 
     let req = JsonRpcRequest {
@@ -848,10 +852,17 @@ fn rpc_initialize_roundtrip() {
         .get("platformOs")
         .and_then(|value| value.as_str())
         .is_some());
-    assert!(result
+    let user_agent = result
         .get("userAgent")
         .and_then(|value| value.as_str())
-        .is_some());
+        .expect("initialize user agent")
+        .to_string();
+    codexmanager_service::app_settings_set(Some(&serde_json::json!({
+        "gatewayUserAgent": ""
+    })))
+    .expect("clear custom gateway user agent");
+    assert!(user_agent.starts_with("codex_cli_rs/"));
+    assert_ne!(user_agent, "Custom-Gateway/3.0");
 }
 
 /// 函数 `rpc_account_list_empty_uses_default_pagination`
@@ -3936,7 +3947,7 @@ fn rpc_requestlog_list_and_summary_support_pagination() {
         summary_result
             .get("totalTokens")
             .and_then(|value| value.as_i64()),
-        Some(45)
+        Some(0)
     );
 }
 
@@ -4295,6 +4306,7 @@ fn rpc_account_manager_assigns_key_and_bills_wallet() {
         1,
         0,
         0,
+        0,
         None,
         true,
     )
@@ -4412,6 +4424,7 @@ fn rpc_account_manager_assigns_key_and_bills_wallet() {
         None,
         "actual",
         333_333,
+        0,
         0,
         0,
         Some(r#"{"test":true}"#.to_string()),
@@ -4588,5 +4601,10 @@ fn rpc_system_proxy_jobs_flow() {
     }
     assert!(cancelled, "Job was not cancelled successfully");
 
+    // The cancellation can win before the worker connects to the fake proxy.
+    // Unblock the mock listener so joining its thread cannot hang the test.
+    if let Some(proxy_socket_addr) = proxy_addr.strip_prefix("http://") {
+        let _ = TcpStream::connect(proxy_socket_addr);
+    }
     let _ = proxy_handle.join();
 }

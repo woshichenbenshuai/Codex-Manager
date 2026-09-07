@@ -3,14 +3,18 @@ use super::{
     get_persisted_app_setting, save_persisted_app_setting, save_persisted_bool_setting,
     APP_SETTING_AUTO_START_ENABLED_KEY, APP_SETTING_CLOSE_TO_TRAY_ON_CLOSE_KEY,
     APP_SETTING_KEEP_WINDOW_UI_MOUNTED_KEY, APP_SETTING_LIGHTWEIGHT_MODE_ON_CLOSE_TO_TRAY_KEY,
-    APP_SETTING_UI_APPEARANCE_PRESET_KEY, APP_SETTING_UI_CODEX_CLI_GUIDE_DISMISSED_KEY,
-    APP_SETTING_UI_LOCALE_KEY, APP_SETTING_UI_LOW_TRANSPARENCY_KEY, APP_SETTING_UI_THEME_KEY,
+    APP_SETTING_SHOW_MAIN_WINDOW_ON_STARTUP_KEY, APP_SETTING_UI_APPEARANCE_PRESET_KEY,
+    APP_SETTING_UI_CODEX_CLI_GUIDE_DISMISSED_KEY, APP_SETTING_UI_LOCALE_KEY,
+    APP_SETTING_UI_LOW_TRANSPARENCY_KEY, APP_SETTING_UI_THEME_KEY, APP_SETTING_UI_ZOOM_FACTOR_KEY,
     APP_SETTING_UPDATE_AUTO_CHECK_KEY,
 };
 
 const DEFAULT_UI_THEME: &str = "tech";
 const DEFAULT_UI_APPEARANCE_PRESET: &str = "classic";
 const DEFAULT_UI_LOCALE: &str = "zh-CN";
+pub const DEFAULT_UI_ZOOM_FACTOR: f64 = 1.0;
+pub const MIN_UI_ZOOM_FACTOR: f64 = 0.75;
+pub const MAX_UI_ZOOM_FACTOR: f64 = 1.25;
 const VALID_UI_THEMES: &[&str] = &[
     "tech", "dark", "dark-one", "business", "mint", "sunset", "grape", "ocean", "forest", "rose",
     "slate", "aurora",
@@ -81,6 +85,14 @@ pub(super) fn normalize_ui_locale(raw: Option<&str>) -> String {
     }
 }
 
+pub(super) fn normalize_ui_zoom_factor(value: f64) -> f64 {
+    if !value.is_finite() {
+        return DEFAULT_UI_ZOOM_FACTOR;
+    }
+    let clamped = value.clamp(MIN_UI_ZOOM_FACTOR, MAX_UI_ZOOM_FACTOR);
+    (clamped * 20.0).round() / 20.0
+}
+
 /// 函数 `current_update_auto_check_enabled`
 ///
 /// 作者: gaohongshun
@@ -122,6 +134,17 @@ pub fn current_auto_start_enabled_setting() -> bool {
 
 pub fn set_auto_start_enabled_setting(enabled: bool) -> Result<bool, String> {
     save_persisted_bool_setting(APP_SETTING_AUTO_START_ENABLED_KEY, enabled)?;
+    Ok(enabled)
+}
+
+pub fn current_show_main_window_on_startup_setting() -> bool {
+    get_persisted_app_setting(APP_SETTING_SHOW_MAIN_WINDOW_ON_STARTUP_KEY)
+        .map(|value| parse_bool_with_default(&value, true))
+        .unwrap_or(true)
+}
+
+pub fn set_show_main_window_on_startup_setting(enabled: bool) -> Result<bool, String> {
+    save_persisted_bool_setting(APP_SETTING_SHOW_MAIN_WINDOW_ON_STARTUP_KEY, enabled)?;
     Ok(enabled)
 }
 
@@ -246,6 +269,15 @@ pub fn current_codex_cli_guide_dismissed() -> bool {
 pub fn set_ui_low_transparency_enabled(enabled: bool) -> Result<bool, String> {
     save_persisted_bool_setting(APP_SETTING_UI_LOW_TRANSPARENCY_KEY, enabled)?;
     Ok(enabled)
+}
+
+pub fn set_ui_zoom_factor(value: f64) -> Result<f64, String> {
+    let normalized = normalize_ui_zoom_factor(value);
+    save_persisted_app_setting(
+        APP_SETTING_UI_ZOOM_FACTOR_KEY,
+        Some(&normalized.to_string()),
+    )?;
+    Ok(normalized)
 }
 
 pub fn set_codex_cli_guide_dismissed(dismissed: bool) -> Result<bool, String> {

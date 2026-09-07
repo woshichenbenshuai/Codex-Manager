@@ -17,6 +17,18 @@ fn cleanup_profile(dir: &Path) {
     let _ = fs::remove_dir_all(dir);
 }
 
+fn provider_http_header<'a>(provider: &'a Table, name: &str) -> Option<&'a str> {
+    let headers = provider.get("http_headers")?;
+    if let Some(table) = headers.as_table() {
+        return table.get(name).and_then(Item::as_str);
+    }
+    headers
+        .as_value()
+        .and_then(Value::as_inline_table)
+        .and_then(|inline| inline.get(name))
+        .and_then(Value::as_str)
+}
+
 struct EnvGuard {
     key: &'static str,
     original: Option<std::ffi::OsString>,
@@ -119,7 +131,7 @@ fn sqlite_provider(dir: &Path, thread_id: &str) -> String {
 }
 
 #[test]
-fn direct_config_removes_only_managed_provider() {
+fn direct_config_uses_openai_and_keeps_secret_free_legacy_provider() {
     let input = r#"
 model_provider = "cm"
 model = "gpt-5.4"
@@ -128,6 +140,8 @@ model = "gpt-5.4"
 name = "CodexManager"
 base_url = "http://localhost:48760/v1"
 wire_api = "responses"
+experimental_bearer_token = "must-be-removed"
+custom_header = "must-also-be-removed"
 
 [model_providers.other]
 name = "Other"
@@ -138,8 +152,13 @@ base_url = "https://example.test/v1"
     let output = patch_config_for_direct(Some(input.to_string()), &managed_catalog, None)
         .expect("patch direct");
 
-    assert!(!output.contains("model_provider = \"cm\""));
-    assert!(!output.contains("[model_providers.cm]"));
+    assert!(output.contains("model_provider = \"openai\""));
+    assert!(output.contains("[model_providers.cm]"));
+    assert!(output.contains("wire_api = \"responses\""));
+    assert!(output.contains("requires_openai_auth = true"));
+    assert!(!output.contains("base_url = \"http://localhost:48760/v1\""));
+    assert!(!output.contains("experimental_bearer_token"));
+    assert!(!output.contains("custom_header"));
     assert!(output.contains("[model_providers.other]"));
     assert!(output.contains("model = \"gpt-5.4\""));
 }
@@ -158,16 +177,126 @@ name = "Other"
         Some(input.to_string()),
         "http://127.0.0.1:48770/v1",
         &managed_catalog,
+        true,
+        "cm-managed-key",
     )
     .expect("patch gateway");
 
     assert!(output.contains("model_provider = \"cm\""));
     assert!(output.contains("[model_providers.cm]"));
+    assert!(output.contains("name = \"CodexManager\""));
     assert!(output.contains("base_url = \"http://127.0.0.1:48770/v1\""));
     assert!(output.contains("wire_api = \"responses\""));
+    assert!(!output.contains("requires_openai_auth"));
     assert!(output.contains("supports_websockets = true"));
+    assert!(output.contains("experimental_bearer_token = \"cm-managed-key\""));
+    assert!(!output.contains("[model_providers.cm.auth]"));
     assert!(output.contains("model_catalog_json = \"/tmp/codexmanager/gateway-models.json\""));
     assert!(output.contains("[model_providers.other]"));
+    let doc = parse_config(&output).expect("parse gateway config");
+    let provider = doc
+        .get("model_providers")
+        .and_then(Item::as_table)
+        .and_then(|providers| providers.get(PROVIDER_ID))
+        .and_then(Item::as_table)
+        .expect("managed provider");
+    assert_eq!(
+        provider_http_header(
+            provider,
+            crate::gateway::X_OPENAI_ACTOR_AUTHORIZATION_HEADER
+        ),
+        Some(crate::gateway::CODEXMANAGER_IMAGE_EXTENSION_ACTOR_AUTHORIZATION)
+    );
+    assert_eq!(
+        provider
+            .get("experimental_bearer_token")
+            .and_then(Item::as_str),
+        Some("cm-managed-key")
+    );
+
+    let without_websocket = patch_config_for_gateway(
+        Some(output),
+        "http://127.0.0.1:48770/v1",
+        &managed_catalog,
+        false,
+        "cm-managed-key",
+    )
+    .expect("disable gateway websocket");
+    assert!(without_websocket.contains("supports_websockets = false"));
+}
+
+#[test]
+fn gateway_config_preserves_custom_managed_provider_values() {
+    let input = r#"
+model_provider = "cm"
+
+[model_providers.cm]
+name = "Custom Gateway"
+base_url = "https://stale.example.test/v1"
+wire_api = "chat"
+requires_openai_auth = false
+supports_websockets = false
+experimental_bearer_token = "custom-key"
+custom_header = "custom-value"
+http_headers = { "x-existing-header" = "keep", "x-openai-actor-authorization" = "stale" }
+"#;
+
+    let managed_catalog = PathBuf::from("/tmp/codexmanager/gateway-models.json");
+    let output = patch_config_for_gateway(
+        Some(input.to_string()),
+        "http://127.0.0.1:48770/v1",
+        &managed_catalog,
+        true,
+        "cm-managed-key",
+    )
+    .expect("patch gateway");
+    let doc = parse_config(&output).expect("parse patched gateway config");
+    let provider = doc
+        .get("model_providers")
+        .and_then(Item::as_table)
+        .and_then(|providers| providers.get(PROVIDER_ID))
+        .and_then(Item::as_table)
+        .expect("managed provider");
+
+    assert_eq!(
+        provider.get("name").and_then(Item::as_str),
+        Some("Custom Gateway")
+    );
+    assert_eq!(
+        provider
+            .get("experimental_bearer_token")
+            .and_then(Item::as_str),
+        Some("cm-managed-key")
+    );
+    assert_eq!(
+        provider.get("custom_header").and_then(Item::as_str),
+        Some("custom-value")
+    );
+    assert_eq!(
+        provider.get("base_url").and_then(Item::as_str),
+        Some("http://127.0.0.1:48770/v1")
+    );
+    assert_eq!(
+        provider.get("wire_api").and_then(Item::as_str),
+        Some("responses")
+    );
+    assert!(provider.get("requires_openai_auth").is_none());
+    assert!(provider.get("auth").is_none());
+    assert_eq!(
+        provider.get("supports_websockets").and_then(Item::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        provider_http_header(provider, "x-existing-header"),
+        Some("keep")
+    );
+    assert_eq!(
+        provider_http_header(
+            provider,
+            crate::gateway::X_OPENAI_ACTOR_AUTHORIZATION_HEADER
+        ),
+        Some(crate::gateway::CODEXMANAGER_IMAGE_EXTENSION_ACTOR_AUTHORIZATION)
+    );
 }
 
 #[test]
@@ -205,8 +334,64 @@ fn invalid_toml_is_rejected() {
         Some("bad = [".to_string()),
         "http://x/v1",
         Path::new("/tmp/gateway-models.json"),
+        false,
+        "cm-managed-key",
     )
     .is_err());
+}
+
+#[test]
+fn rotation_strategy_selects_catalog_ownership() {
+    assert_eq!(
+        crate::codex_model_catalog::gateway_catalog_policy_for_rotation_strategy(
+            crate::apikey_profile::ROTATION_ACCOUNT
+        ),
+        crate::codex_model_catalog::GatewayCatalogPolicy::OfficialAccountPool
+    );
+    assert_eq!(
+        crate::codex_model_catalog::gateway_catalog_policy_for_rotation_strategy(
+            crate::apikey_profile::ROTATION_AGGREGATE_API
+        ),
+        crate::codex_model_catalog::GatewayCatalogPolicy::Managed
+    );
+    assert_eq!(
+        crate::codex_model_catalog::gateway_catalog_policy_for_rotation_strategy(
+            crate::apikey_profile::ROTATION_HYBRID
+        ),
+        crate::codex_model_catalog::GatewayCatalogPolicy::Managed
+    );
+    assert_eq!(
+        crate::codex_model_catalog::gateway_catalog_policy_for_rotation_strategy(
+            crate::apikey_profile::ROTATION_HYBRID_AGGREGATE_FIRST
+        ),
+        crate::codex_model_catalog::GatewayCatalogPolicy::Managed
+    );
+}
+
+#[test]
+fn api_key_candidates_expose_route_and_catalog_ownership() {
+    for (rotation_strategy, catalog_source) in [
+        (crate::apikey_profile::ROTATION_ACCOUNT, "official"),
+        (crate::apikey_profile::ROTATION_AGGREGATE_API, "managed"),
+        (crate::apikey_profile::ROTATION_HYBRID, "managed"),
+        (
+            crate::apikey_profile::ROTATION_HYBRID_AGGREGATE_FIRST,
+            "managed",
+        ),
+    ] {
+        let candidate = api_key_candidate(ApiKeyCodexProfileCandidate {
+            id: format!("key-{rotation_strategy}"),
+            name: Some("Platform key".to_string()),
+            model_slug: None,
+            reasoning_effort: None,
+            rotation_strategy: rotation_strategy.to_string(),
+            status: "active".to_string(),
+        })
+        .expect("active candidate");
+
+        assert_eq!(candidate.rotation_strategy, rotation_strategy);
+        assert_eq!(candidate.catalog_source, catalog_source);
+    }
 }
 
 #[test]
@@ -268,6 +453,8 @@ fn list_candidates_uses_active_account_projection_and_usable_tokens() {
     active.group_name = Some("candidate-group".to_string());
     let mut disabled = test_account("acc-disabled-candidate", "disabled");
     disabled.label = "Disabled Candidate".to_string();
+    let mut force_enabled = test_account("acc-force-candidate", "force_enabled");
+    force_enabled.label = "Force Candidate".to_string();
     storage
         .insert_account(&active)
         .expect("insert active account");
@@ -275,11 +462,17 @@ fn list_candidates_uses_active_account_projection_and_usable_tokens() {
         .insert_account(&disabled)
         .expect("insert disabled account");
     storage
+        .insert_account(&force_enabled)
+        .expect("insert force-enabled account");
+    storage
         .insert_token(&test_token("acc-active-candidate", "access", "refresh"))
         .expect("insert active token");
     storage
         .insert_token(&test_token("acc-disabled-candidate", "access", "refresh"))
         .expect("insert disabled token");
+    storage
+        .insert_token(&test_token("acc-force-candidate", "access", "refresh"))
+        .expect("insert force-enabled token");
     storage
         .insert_account(&test_account("acc-missing-refresh", "active"))
         .expect("insert missing refresh account");
@@ -290,7 +483,7 @@ fn list_candidates_uses_active_account_projection_and_usable_tokens() {
 
     let result = list_candidates().expect("list candidates");
 
-    assert_eq!(result.accounts.len(), 1);
+    assert_eq!(result.accounts.len(), 2);
     let account = &result.accounts[0];
     assert_eq!(account.id, "acc-active-candidate");
     assert_eq!(account.label, "Active Candidate");
@@ -306,6 +499,9 @@ fn list_candidates_uses_active_account_projection_and_usable_tokens() {
     );
     assert_eq!(account.issuer, "issuer-acc-active-candidate");
     assert_eq!(account.last_refresh, 123);
+    let force_account = &result.accounts[1];
+    assert_eq!(force_account.id, "acc-force-candidate");
+    assert_eq!(force_account.status, "force_enabled");
     cleanup_profile(&dir);
 }
 
@@ -539,6 +735,7 @@ experimental_bearer_token = "cm-key"
         account_id: Some("acc-1".to_string()),
         api_key_id: None,
         gateway_base_url: None,
+        supports_websockets: None,
         provider_id: PROVIDER_ID.to_string(),
         updated_at: now_ts(),
     };
@@ -607,6 +804,7 @@ fn write_profile_files_uses_internal_marker() {
         account_id: None,
         api_key_id: Some("key-1".to_string()),
         gateway_base_url: Some("http://localhost:48760/v1".to_string()),
+        supports_websockets: Some(false),
         provider_id: PROVIDER_ID.to_string(),
         previous_model_catalog_json: None,
         updated_at: now_ts(),
@@ -638,6 +836,7 @@ fn legacy_marker_migrates_to_internal_marker() {
         account_id: Some("acc-1".to_string()),
         api_key_id: None,
         gateway_base_url: None,
+        supports_websockets: None,
         provider_id: PROVIDER_ID.to_string(),
         updated_at: now_ts(),
     };

@@ -1577,6 +1577,39 @@ fn set_model_group_models_validates_requested_catalog_slugs_only() {
 }
 
 #[test]
+fn set_model_group_models_treats_default_group_as_all_enabled_models() {
+    let _guard = test_env_guard();
+    let db_path = setup_dashboard_test_db("codexmanager-default-model-group-all-enabled");
+    set_web_auth_mode("accounts").expect("enable accounts mode");
+    let storage = storage_helpers::open_storage().expect("open storage");
+    let group_id = storage
+        .default_model_group_id()
+        .expect("read default model group")
+        .expect("default model group");
+    drop(storage);
+
+    let result = set_model_group_models(ModelGroupModelsSetParams {
+        group_id: group_id.clone(),
+        models: vec![ModelGroupModelUpsertParams {
+            platform_model_slug: "gpt-5.4-mini".to_string(),
+            enabled: Some(true),
+            rate_multiplier_millis: Some(1200),
+            billing_model_slug: None,
+            note: Some("ignored for default group".to_string()),
+        }],
+    })
+    .expect("default model group setModels is a no-op");
+
+    assert!(result
+        .groups
+        .iter()
+        .any(|item| item.id == group_id && item.is_default));
+    assert!(!result.models.iter().any(|item| item.group_id == group_id));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
 fn set_model_group_users_batches_member_validation_and_dedupes() {
     let _guard = test_env_guard();
     let db_path = setup_dashboard_test_db("codexmanager-model-group-users-batch-validation");
@@ -1671,6 +1704,7 @@ fn wallet_charge_uses_v2_integer_snapshot_and_group_multiplier() {
         "actual",
         1_000,
         0,
+        0,
         1_000,
         Some(serde_json::json!({ "test": true }).to_string()),
         true,
@@ -1694,6 +1728,7 @@ fn wallet_charge_uses_v2_integer_snapshot_and_group_multiplier() {
         "estimated",
         99_999,
         0,
+        0,
         99_999,
         None,
         true,
@@ -1705,6 +1740,69 @@ fn wallet_charge_uses_v2_integer_snapshot_and_group_multiplier() {
         .expect("read wallet")
         .expect("wallet");
     assert_eq!(wallet.balance_credit_micros, 992_125);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn reserve_alias_uses_luna_access_and_pricing_but_stays_visible_in_snapshot() {
+    let _guard = test_env_guard();
+    let db_path = setup_dashboard_test_db("codexmanager-reserve-alias-billing-v2");
+    set_web_auth_mode("accounts").expect("enable accounts mode");
+    set_distribution_enabled(true).expect("enable distribution");
+    let user = create_test_member("member-reserve-alias-billing", Some(1_000_000));
+    let key_id = create_owned_test_api_key(&user.id, "member reserve alias key", "gpt-reserve");
+    let storage = storage_helpers::open_storage().expect("open storage");
+    let access = crate::resolve_api_key_model_group_access(&storage, &key_id, "gpt-reserve")
+        .expect("resolve Reserve model access")
+        .expect("default model group access");
+    assert_eq!(
+        access.platform_model_slug,
+        codexmanager_core::usage::LUNA_MODEL_SLUG
+    );
+    let luna_model_id = storage
+        .get_managed_model_v2(codexmanager_core::usage::LUNA_MODEL_SLUG)
+        .expect("read Luna model")
+        .expect("Luna model")
+        .id;
+    let now = codexmanager_core::storage::now_ts();
+    let request_log_id = storage
+        .insert_request_log(&RequestLog {
+            key_id: Some(key_id.clone()),
+            request_path: "/v1/responses".to_string(),
+            method: "POST".to_string(),
+            model: Some("gpt-reserve".to_string()),
+            status_code: Some(200),
+            created_at: now,
+            ..RequestLog::default()
+        })
+        .expect("insert request log");
+
+    let snapshot = auth::app_manager::record_request_charge_v2(
+        &storage,
+        Some(&key_id),
+        request_log_id,
+        "gpt-reserve",
+        None,
+        "actual",
+        1_000,
+        0,
+        0,
+        1_000,
+        None,
+        true,
+    )
+    .expect("charge Reserve alias with Luna pricing");
+
+    assert_eq!(snapshot.model_slug, "gpt-reserve");
+    assert_eq!(snapshot.model_id.as_deref(), Some(luna_model_id.as_str()));
+    assert_eq!(snapshot.base_cost_microusd, 1_400);
+    assert_eq!(snapshot.charged_cost_microusd, 1_400);
+    let wallet = storage
+        .find_wallet_by_owner("user", &user.id)
+        .expect("read wallet")
+        .expect("wallet");
+    assert_eq!(wallet.balance_credit_micros, 998_600);
 
     let _ = std::fs::remove_file(db_path);
 }

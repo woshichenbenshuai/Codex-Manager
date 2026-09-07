@@ -11,12 +11,21 @@ const MIGRATION_VERSION: &str = "112_model_catalog_v2";
 const GPT56_PRICING_MIGRATION_VERSION: &str = "114_model_catalog_gpt56_prices";
 const CODEX_METADATA_MIGRATION_VERSION: &str = "115_model_catalog_codex_metadata";
 const GPT56_OFFICIAL_PRICING_MIGRATION_VERSION: &str = "121_model_catalog_gpt56_official_prices";
+const GPT56_CURRENT_PRICING_MIGRATION_VERSION: &str = "126_model_catalog_gpt56_current_prices";
 const GPT56_OFFICIAL_PRICE_SOURCE: &str = "https://developers.openai.com/api/docs/models/compare";
+const GPT6_ASTRA_MIGRATION_VERSION: &str = "131_model_catalog_gpt6_astra";
+const GPT6_ASTRA_MIGRATION_REVISION: i64 = 8;
+const GPT56_METADATA_FIX_MIGRATION_VERSION: &str = "132_model_catalog_gpt56_metadata_fix";
+const GPT56_METADATA_FIX_CONTEXT_WINDOW: i64 = 272_000;
+const GPT56_METADATA_FIX_MAX_CONTEXT_WINDOW: i64 = 872_000;
+const GPT56_METADATA_FIX_SHELL_TYPE: &str = "unified_exec";
+const GPT6_ASTRA_SLUG: &str = "gpt-6-astra";
+const GPT6_ASTRA_PRICE_SOURCE: &str = "https://developers.openai.com/api/docs/models/gpt-6-astra";
 #[cfg(test)]
 const GPT_IMAGE_2_PRICE_SOURCE: &str =
     "https://developers.openai.com/api/docs/pricing#image-generation";
 const DEFAULT_MODEL_GROUP_ID: &str = "mg_default";
-const TOLERATED_CUSTOM_SEED_COLLISIONS: &[&str] = &["gpt-image-2"];
+const TOLERATED_CUSTOM_SEED_COLLISIONS: &[&str] = &["gpt-image-2", GPT6_ASTRA_SLUG];
 
 #[derive(Debug, Clone, Deserialize)]
 struct BuiltinCatalogFixture {
@@ -41,6 +50,15 @@ struct BuiltinModelSeed {
     price_tiers: Vec<ModelPriceTierV2>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct Gpt6AstraMigrationFixture {
+    revision: i64,
+    source_sha256: String,
+    astra: BuiltinModelSeed,
+    sol_slug: String,
+    sol_capabilities: Value,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelPriceV2 {
@@ -51,6 +69,8 @@ pub struct ModelPriceV2 {
     pub input_microusd_per_1m: Option<i64>,
     #[serde(default)]
     pub cached_input_microusd_per_1m: Option<i64>,
+    #[serde(default)]
+    pub cache_write_microusd_per_1m: Option<i64>,
     #[serde(default)]
     pub output_microusd_per_1m: Option<i64>,
 }
@@ -69,6 +89,27 @@ pub struct ModelRouteV2 {
     pub priority: i64,
     #[serde(default = "default_weight")]
     pub weight: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelFastPolicyV2 {
+    #[default]
+    Passthrough,
+    Filter,
+    Force,
+    Block,
+}
+
+impl ModelFastPolicyV2 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Passthrough => "passthrough",
+            Self::Filter => "filter",
+            Self::Force => "force",
+            Self::Block => "block",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -104,6 +145,8 @@ pub struct ManagedModelV2 {
     #[serde(default)]
     pub instructions_text: Option<String>,
     #[serde(default)]
+    pub fast_policy: ModelFastPolicyV2,
+    #[serde(default)]
     pub builtin_revision: Option<i64>,
     #[serde(default)]
     pub user_edited: bool,
@@ -124,6 +167,21 @@ pub struct ManagedModelV2Upsert {
     #[serde(default)]
     pub previous_slug: Option<String>,
     pub model: ManagedModelV2,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedModelRouteEnsureV2 {
+    pub model_slug: String,
+    pub route: ModelRouteV2,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedModelRouteEnsureResultV2 {
+    pub created_models: Vec<String>,
+    pub added_routes: Vec<String>,
+    pub unchanged_routes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -166,6 +224,37 @@ fn fixture() -> BuiltinCatalogFixture {
         .expect("model catalog V2 fixture must be valid")
 }
 
+fn gpt6_astra_migration_fixture() -> Gpt6AstraMigrationFixture {
+    let fixture: Gpt6AstraMigrationFixture =
+        serde_json::from_str(include_str!("../../seeds/model_catalog_gpt6_astra_v8.json"))
+            .expect("GPT-6 Astra migration fixture must be valid");
+    assert_eq!(
+        fixture.revision, GPT6_ASTRA_MIGRATION_REVISION,
+        "GPT-6 Astra migration fixture revision must remain frozen"
+    );
+    assert!(fixture.astra.slug.eq_ignore_ascii_case(GPT6_ASTRA_SLUG));
+    assert_eq!(
+        fixture.astra.price_source.as_deref(),
+        Some(GPT6_ASTRA_PRICE_SOURCE)
+    );
+    fixture
+}
+
+fn sol_matches_gpt6_astra_migration_or_metadata_fix(
+    model: &ManagedModelV2,
+    migration_fixture: &Gpt6AstraMigrationFixture,
+) -> bool {
+    if model.capabilities == migration_fixture.sol_capabilities {
+        return true;
+    }
+
+    let mut fixed_capabilities = migration_fixture.sol_capabilities.clone();
+    fixed_capabilities["shell_type"] = Value::String(GPT56_METADATA_FIX_SHELL_TYPE.to_string());
+    model.context_window == Some(GPT56_METADATA_FIX_CONTEXT_WINDOW)
+        && model.max_context_window == Some(GPT56_METADATA_FIX_MAX_CONTEXT_WINDOW)
+        && model.capabilities == fixed_capabilities
+}
+
 fn clean_optional(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
@@ -177,6 +266,17 @@ fn stable_hash(value: &str) -> String {
         .take(12)
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn connection_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for current in columns {
+        if current?.eq_ignore_ascii_case(column) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn builtin_id(slug: &str) -> String {
@@ -203,18 +303,25 @@ fn validate_price(model: &ManagedModelV2) -> Result<()> {
             "invalid price_status".to_string(),
         ));
     }
-    let rates = [
+    let required_rates = [
         price.input_microusd_per_1m,
         price.cached_input_microusd_per_1m,
         price.output_microusd_per_1m,
     ];
-    if rates.iter().flatten().any(|rate| *rate < 0) {
+    if required_rates.iter().flatten().any(|rate| *rate < 0)
+        || price
+            .cache_write_microusd_per_1m
+            .is_some_and(|rate| rate < 0)
+    {
         return Err(rusqlite::Error::InvalidParameterName(
             "model prices cannot be negative".to_string(),
         ));
     }
     if status == "missing" {
-        if rates.iter().any(Option::is_some) || !model.price_tiers.is_empty() {
+        if required_rates.iter().any(Option::is_some)
+            || price.cache_write_microusd_per_1m.is_some()
+            || !model.price_tiers.is_empty()
+        {
             return Err(rusqlite::Error::InvalidParameterName(
                 "missing price must not contain rates or tiers".to_string(),
             ));
@@ -226,7 +333,7 @@ fn validate_price(model: &ManagedModelV2) -> Result<()> {
         }
         return Ok(());
     }
-    if rates.iter().any(Option::is_none) {
+    if required_rates.iter().any(Option::is_none) {
         return Err(rusqlite::Error::InvalidParameterName(
             "priced model requires input, cached input, and output rates".to_string(),
         ));
@@ -242,6 +349,7 @@ fn validate_price(model: &ManagedModelV2) -> Result<()> {
         })?;
     if Some(base.input_microusd_per_1m) != price.input_microusd_per_1m
         || Some(base.cached_input_microusd_per_1m) != price.cached_input_microusd_per_1m
+        || base.cache_write_microusd_per_1m != price.cache_write_microusd_per_1m
         || Some(base.output_microusd_per_1m) != price.output_microusd_per_1m
     {
         return Err(rusqlite::Error::InvalidParameterName(
@@ -253,6 +361,9 @@ fn validate_price(model: &ManagedModelV2) -> Result<()> {
         if tier.min_input_tokens < 0
             || tier.input_microusd_per_1m < 0
             || tier.cached_input_microusd_per_1m < 0
+            || tier
+                .cache_write_microusd_per_1m
+                .is_some_and(|rate| rate < 0)
             || tier.output_microusd_per_1m < 0
             || !thresholds.insert(tier.min_input_tokens)
         {
@@ -260,6 +371,19 @@ fn validate_price(model: &ManagedModelV2) -> Result<()> {
                 "invalid or duplicate model price tier".to_string(),
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_route(route: &ModelRouteV2) -> Result<()> {
+    if !matches!(route.source_kind.as_str(), "account_pool" | "aggregate_api")
+        || route.source_id.trim().is_empty()
+        || route.upstream_model.trim().is_empty()
+        || route.weight <= 0
+    {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "invalid model route".to_string(),
+        ));
     }
     Ok(())
 }
@@ -299,15 +423,7 @@ fn validate_model(model: &ManagedModelV2) -> Result<()> {
         ));
     }
     for route in &model.routes {
-        if !matches!(route.source_kind.as_str(), "account_pool" | "aggregate_api")
-            || route.source_id.trim().is_empty()
-            || route.upstream_model.trim().is_empty()
-            || route.weight <= 0
-        {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "invalid model route".to_string(),
-            ));
-        }
+        validate_route(route)?;
     }
     validate_price(model)
 }
@@ -337,6 +453,17 @@ fn map_model(conn: &Connection, row: &rusqlite::Row<'_>) -> Result<ManagedModelV
             .unwrap_or(Value::Object(Default::default())),
         instructions_mode: row.get(17)?,
         instructions_text: row.get(18)?,
+        fast_policy: match row.get::<_, String>(29)?.as_str() {
+            "passthrough" => ModelFastPolicyV2::Passthrough,
+            "filter" => ModelFastPolicyV2::Filter,
+            "force" => ModelFastPolicyV2::Force,
+            "block" => ModelFastPolicyV2::Block,
+            value => {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "invalid model fast policy: {value}"
+                )))
+            }
+        },
         builtin_revision: row.get(19)?,
         user_edited: row.get::<_, i64>(20)? != 0,
         created_at: row.get(21)?,
@@ -346,7 +473,8 @@ fn map_model(conn: &Connection, row: &rusqlite::Row<'_>) -> Result<ManagedModelV
             price_source: row.get(24)?,
             input_microusd_per_1m: row.get(25)?,
             cached_input_microusd_per_1m: row.get(26)?,
-            output_microusd_per_1m: row.get(27)?,
+            cache_write_microusd_per_1m: row.get(27)?,
+            output_microusd_per_1m: row.get(28)?,
         },
         price_tiers: Vec::new(),
         routes: Vec::new(),
@@ -364,13 +492,13 @@ const MODEL_SELECT: &str = "SELECT
     m.max_context_window,m.default_reasoning_effort,m.capabilities_json,
     m.instructions_mode,m.instructions_text,m.builtin_revision,m.user_edited,m.created_at,m.updated_at,
     p.price_status,p.price_source,p.input_microusd_per_1m,p.cached_input_microusd_per_1m,
-    p.output_microusd_per_1m
+    p.cache_write_microusd_per_1m,p.output_microusd_per_1m,m.fast_policy
   FROM models m JOIN model_prices p ON p.model_id=m.id";
 
 fn list_tiers(conn: &Connection, model_id: &str) -> Result<Vec<ModelPriceTierV2>> {
     let mut stmt = conn.prepare(
         "SELECT min_input_tokens,input_microusd_per_1m,cached_input_microusd_per_1m,
-                output_microusd_per_1m
+                cache_write_microusd_per_1m,output_microusd_per_1m
          FROM model_price_tiers WHERE model_id=?1 ORDER BY min_input_tokens ASC",
     )?;
     stmt.query_map([model_id], |row| {
@@ -378,7 +506,8 @@ fn list_tiers(conn: &Connection, model_id: &str) -> Result<Vec<ModelPriceTierV2>
             min_input_tokens: row.get(0)?,
             input_microusd_per_1m: row.get(1)?,
             cached_input_microusd_per_1m: row.get(2)?,
-            output_microusd_per_1m: row.get(3)?,
+            cache_write_microusd_per_1m: row.get(3)?,
+            output_microusd_per_1m: row.get(4)?,
         })
     })?
     .collect()
@@ -469,7 +598,7 @@ fn insert_seed(
         .price_tiers
         .iter()
         .find(|tier| tier.min_input_tokens == 0);
-    conn.execute(
+    let inserted_price = conn.execute(
         "INSERT OR IGNORE INTO model_prices (
            model_id,currency,input_microusd_per_1m,cached_input_microusd_per_1m,
            output_microusd_per_1m,price_status,price_source,created_at,updated_at
@@ -484,8 +613,16 @@ fn insert_seed(
             now
         ],
     )?;
-    for tier in &seed.price_tiers {
+    let has_cache_write_price =
+        connection_has_column(conn, "model_prices", "cache_write_microusd_per_1m")?;
+    if inserted_price > 0 && has_cache_write_price {
         conn.execute(
+            "UPDATE model_prices SET cache_write_microusd_per_1m=?2 WHERE model_id=?1",
+            params![id, base.and_then(|tier| tier.cache_write_microusd_per_1m)],
+        )?;
+    }
+    for tier in &seed.price_tiers {
+        let inserted_tier = conn.execute(
             "INSERT OR IGNORE INTO model_price_tiers (
                model_id,min_input_tokens,input_microusd_per_1m,
                cached_input_microusd_per_1m,output_microusd_per_1m
@@ -498,6 +635,13 @@ fn insert_seed(
                 tier.output_microusd_per_1m
             ],
         )?;
+        if inserted_tier > 0 && has_cache_write_price {
+            conn.execute(
+                "UPDATE model_price_tiers SET cache_write_microusd_per_1m=?3
+                 WHERE model_id=?1 AND min_input_tokens=?2",
+                params![id, tier.min_input_tokens, tier.cache_write_microusd_per_1m],
+            )?;
+        }
     }
     let route = ModelRouteV2 {
         source_kind: "account_pool".to_string(),
@@ -523,16 +667,40 @@ fn seed_missing(conn: &Connection) -> Result<()> {
     for seed in &fixture.models {
         insert_seed(conn, &fixture, seed, now)?;
     }
-    conn.execute(
-        "INSERT INTO model_catalog_v2_meta(key,value) VALUES('builtin_revision',?1)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        [fixture.revision.to_string()],
+    let stored_catalog_revision = conn
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM model_catalog_v2_meta
+             WHERE key='builtin_revision'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let max_unedited_builtin_revision = conn.query_row(
+        "SELECT COALESCE(MAX(builtin_revision),0) FROM models
+         WHERE origin='builtin' AND user_edited=0",
+        [],
+        |row| row.get::<_, i64>(0),
     )?;
-    conn.execute(
-        "INSERT INTO model_catalog_v2_meta(key,value) VALUES('fixture_sha256',?1)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        [fixture.source_sha256],
-    )?;
+    let effective_catalog_revision = stored_catalog_revision.max(max_unedited_builtin_revision);
+    if effective_catalog_revision <= fixture.revision {
+        conn.execute(
+            "INSERT INTO model_catalog_v2_meta(key,value) VALUES('builtin_revision',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [fixture.revision.to_string()],
+        )?;
+        conn.execute(
+            "INSERT INTO model_catalog_v2_meta(key,value) VALUES('fixture_sha256',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [fixture.source_sha256],
+        )?;
+    } else if stored_catalog_revision < effective_catalog_revision {
+        conn.execute(
+            "INSERT INTO model_catalog_v2_meta(key,value) VALUES('builtin_revision',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [effective_catalog_revision.to_string()],
+        )?;
+    }
     Ok(())
 }
 
@@ -819,8 +987,7 @@ fn migrate_legacy_groups(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn migration_smoke(conn: &Connection) -> Result<()> {
-    let fixture = fixture();
+fn migration_smoke_for_fixture(conn: &Connection, fixture: &BuiltinCatalogFixture) -> Result<()> {
     let expected_seed_count = fixture.models.len() as i64;
     let model_count: i64 = conn.query_row("SELECT COUNT(*) FROM models", [], |row| row.get(0))?;
     let mut covered_seed_count = 0_i64;
@@ -856,6 +1023,185 @@ fn migration_smoke(conn: &Connection) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn replace_unedited_builtin_seed(
+    conn: &Connection,
+    revision: i64,
+    seed: &BuiltinModelSeed,
+    now: i64,
+) -> Result<()> {
+    let base = seed
+        .price_tiers
+        .iter()
+        .find(|tier| tier.min_input_tokens == 0)
+        .ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName(
+                "priced built-in seed requires a min_input_tokens=0 tier".to_string(),
+            )
+        })?;
+    let id = conn.query_row(
+        "SELECT id FROM models
+         WHERE slug=?1 COLLATE NOCASE AND origin='builtin' AND user_edited=0
+           AND COALESCE(builtin_revision,0) <= ?2",
+        params![seed.slug.as_str(), revision],
+        |row| row.get::<_, String>(0),
+    )?;
+    conn.execute(
+        "UPDATE models
+         SET display_name=?2,description=?3,provider=NULL,family=NULL,category=NULL,
+             tags_json='[]',enabled=1,supported_in_api=1,visibility=?4,sort_order=?5,
+             context_window=?6,max_context_window=?7,default_reasoning_effort=?8,
+             capabilities_json=?9,instructions_mode='passthrough',instructions_text=NULL,
+             builtin_revision=?10,fast_policy='passthrough',updated_at=?11
+         WHERE id=?1 AND origin='builtin' AND user_edited=0
+           AND COALESCE(builtin_revision,0) <= ?10",
+        params![
+            id,
+            seed.display_name,
+            seed.description,
+            seed.visibility,
+            seed.priority,
+            seed.context_window,
+            seed.max_context_window,
+            seed.default_reasoning_effort,
+            serde_json::to_string(&seed.capabilities)
+                .expect("serialize built-in seed capabilities"),
+            revision,
+            now
+        ],
+    )?;
+    conn.execute(
+        "INSERT INTO model_prices(
+           model_id,currency,input_microusd_per_1m,cached_input_microusd_per_1m,
+           cache_write_microusd_per_1m,output_microusd_per_1m,price_status,price_source,
+           created_at,updated_at
+         ) VALUES(?1,'USD',?2,?3,?4,?5,?6,?7,?8,?8)
+         ON CONFLICT(model_id) DO UPDATE SET
+           currency='USD',input_microusd_per_1m=excluded.input_microusd_per_1m,
+           cached_input_microusd_per_1m=excluded.cached_input_microusd_per_1m,
+           cache_write_microusd_per_1m=excluded.cache_write_microusd_per_1m,
+           output_microusd_per_1m=excluded.output_microusd_per_1m,
+           price_status=excluded.price_status,price_source=excluded.price_source,
+           updated_at=excluded.updated_at",
+        params![
+            id,
+            base.input_microusd_per_1m,
+            base.cached_input_microusd_per_1m,
+            base.cache_write_microusd_per_1m,
+            base.output_microusd_per_1m,
+            seed.price_status,
+            seed.price_source,
+            now
+        ],
+    )?;
+    conn.execute("DELETE FROM model_price_tiers WHERE model_id=?1", [&id])?;
+    for tier in &seed.price_tiers {
+        conn.execute(
+            "INSERT INTO model_price_tiers(
+               model_id,min_input_tokens,input_microusd_per_1m,
+               cached_input_microusd_per_1m,cache_write_microusd_per_1m,
+               output_microusd_per_1m
+             ) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                id,
+                tier.min_input_tokens,
+                tier.input_microusd_per_1m,
+                tier.cached_input_microusd_per_1m,
+                tier.cache_write_microusd_per_1m,
+                tier.output_microusd_per_1m
+            ],
+        )?;
+    }
+    conn.execute("DELETE FROM model_routes WHERE model_id=?1", [&id])?;
+    let route = ModelRouteV2 {
+        source_kind: "account_pool".to_string(),
+        source_id: "default".to_string(),
+        upstream_model: seed.slug.clone(),
+        enabled: true,
+        priority: 0,
+        weight: 1,
+        ..Default::default()
+    };
+    conn.execute(
+        "INSERT INTO model_routes(
+           id,model_id,source_kind,source_id,upstream_model,enabled,priority,weight,
+           created_at,updated_at
+         ) VALUES(?1,?2,?3,?4,?5,1,0,1,?6,?6)",
+        params![
+            route_id(&id, &route),
+            id,
+            route.source_kind,
+            route.source_id,
+            route.upstream_model,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
+fn migration_smoke(conn: &Connection) -> Result<()> {
+    migration_smoke_for_fixture(conn, &fixture())
+}
+
+fn seeded_builtin_matches(model: &ManagedModelV2, revision: i64, seed: &BuiltinModelSeed) -> bool {
+    let Some(base_price) = seed
+        .price_tiers
+        .iter()
+        .find(|tier| tier.min_input_tokens == 0)
+    else {
+        return false;
+    };
+    let expected_price = ModelPriceV2 {
+        price_status: seed.price_status.clone(),
+        price_source: seed.price_source.clone(),
+        input_microusd_per_1m: Some(base_price.input_microusd_per_1m),
+        cached_input_microusd_per_1m: Some(base_price.cached_input_microusd_per_1m),
+        cache_write_microusd_per_1m: base_price.cache_write_microusd_per_1m,
+        output_microusd_per_1m: Some(base_price.output_microusd_per_1m),
+    };
+    let expected_route = ModelRouteV2 {
+        source_kind: "account_pool".to_string(),
+        source_id: "default".to_string(),
+        upstream_model: seed.slug.clone(),
+        enabled: true,
+        priority: 0,
+        weight: 1,
+        ..Default::default()
+    };
+
+    model.slug.eq_ignore_ascii_case(&seed.slug)
+        && model.display_name == seed.display_name
+        && model.description.as_deref() == Some(seed.description.as_str())
+        && model.provider.is_none()
+        && model.family.is_none()
+        && model.category.is_none()
+        && model.tags.is_empty()
+        && model.origin == "builtin"
+        && model.enabled
+        && model.supported_in_api
+        && model.visibility == seed.visibility
+        && model.sort_order == seed.priority
+        && model.context_window == seed.context_window
+        && model.max_context_window == seed.max_context_window
+        && model.default_reasoning_effort == seed.default_reasoning_effort
+        && model.capabilities == seed.capabilities
+        && model.instructions_mode == "passthrough"
+        && model.instructions_text.is_none()
+        && model.fast_policy == ModelFastPolicyV2::Passthrough
+        && model.builtin_revision == Some(revision)
+        && !model.user_edited
+        && model.price == expected_price
+        && model.price_tiers == seed.price_tiers
+        && model.routes.len() == 1
+        && model.routes[0].source_kind == expected_route.source_kind
+        && model.routes[0].source_id == expected_route.source_id
+        && model.routes[0]
+            .upstream_model
+            .eq_ignore_ascii_case(&expected_route.upstream_model)
+        && model.routes[0].enabled == expected_route.enabled
+        && model.routes[0].priority == expected_route.priority
+        && model.routes[0].weight == expected_route.weight
 }
 
 fn write_model(tx: &Transaction<'_>, input: &ManagedModelV2Upsert) -> Result<String> {
@@ -919,8 +1265,8 @@ fn write_model(tx: &Transaction<'_>, input: &ManagedModelV2Upsert) -> Result<Str
         "INSERT INTO models(id,slug,display_name,description,provider,family,category,tags_json,
            origin,enabled,supported_in_api,visibility,sort_order,context_window,max_context_window,
            default_reasoning_effort,capabilities_json,instructions_mode,instructions_text,
-           builtin_revision,user_edited,created_at,updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,1,?21,?22)
+           builtin_revision,user_edited,created_at,updated_at,fast_policy)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,1,?21,?22,?23)
          ON CONFLICT(id) DO UPDATE SET slug=excluded.slug,display_name=excluded.display_name,
            description=excluded.description,provider=excluded.provider,family=excluded.family,
            category=excluded.category,tags_json=excluded.tags_json,enabled=excluded.enabled,
@@ -929,20 +1275,23 @@ fn write_model(tx: &Transaction<'_>, input: &ManagedModelV2Upsert) -> Result<Str
            max_context_window=excluded.max_context_window,
            default_reasoning_effort=excluded.default_reasoning_effort,
            capabilities_json=excluded.capabilities_json,instructions_mode=excluded.instructions_mode,
-           instructions_text=excluded.instructions_text,user_edited=1,updated_at=excluded.updated_at",
+           instructions_text=excluded.instructions_text,fast_policy=excluded.fast_policy,
+           user_edited=1,updated_at=excluded.updated_at",
         params![id,model.slug,model.display_name,model.description,model.provider,model.family,model.category,
             serde_json::to_string(&model.tags)
                 .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?,origin,model.enabled,
             model.supported_in_api,model.visibility,model.sort_order,model.context_window,model.max_context_window,
             model.default_reasoning_effort,model.capabilities.to_string(),model.instructions_mode,model.instructions_text,
-            model.builtin_revision,created_at,now],
+            model.builtin_revision,created_at,now,model.fast_policy.as_str()],
     )?;
     tx.execute(
         "INSERT INTO model_prices(model_id,currency,input_microusd_per_1m,
-           cached_input_microusd_per_1m,output_microusd_per_1m,price_status,price_source,
-           created_at,updated_at) VALUES(?1,'USD',?2,?3,?4,?5,?6,?7,?8)
+           cached_input_microusd_per_1m,cache_write_microusd_per_1m,
+           output_microusd_per_1m,price_status,price_source,created_at,updated_at)
+         VALUES(?1,'USD',?2,?3,?4,?5,?6,?7,?8,?9)
          ON CONFLICT(model_id) DO UPDATE SET input_microusd_per_1m=excluded.input_microusd_per_1m,
            cached_input_microusd_per_1m=excluded.cached_input_microusd_per_1m,
+           cache_write_microusd_per_1m=excluded.cache_write_microusd_per_1m,
            output_microusd_per_1m=excluded.output_microusd_per_1m,
            price_status=excluded.price_status,price_source=excluded.price_source,
            updated_at=excluded.updated_at",
@@ -950,6 +1299,7 @@ fn write_model(tx: &Transaction<'_>, input: &ManagedModelV2Upsert) -> Result<Str
             id,
             model.price.input_microusd_per_1m,
             model.price.cached_input_microusd_per_1m,
+            model.price.cache_write_microusd_per_1m,
             model.price.output_microusd_per_1m,
             model.price.price_status,
             model.price.price_source,
@@ -961,12 +1311,14 @@ fn write_model(tx: &Transaction<'_>, input: &ManagedModelV2Upsert) -> Result<Str
     for tier in &model.price_tiers {
         tx.execute(
             "INSERT INTO model_price_tiers(model_id,min_input_tokens,input_microusd_per_1m,
-            cached_input_microusd_per_1m,output_microusd_per_1m) VALUES(?1,?2,?3,?4,?5)",
+            cached_input_microusd_per_1m,cache_write_microusd_per_1m,
+            output_microusd_per_1m) VALUES(?1,?2,?3,?4,?5,?6)",
             params![
                 id,
                 tier.min_input_tokens,
                 tier.input_microusd_per_1m,
                 tier.cached_input_microusd_per_1m,
+                tier.cache_write_microusd_per_1m,
                 tier.output_microusd_per_1m
             ],
         )?;
@@ -1231,6 +1583,268 @@ impl Storage {
         Ok(())
     }
 
+    pub(super) fn apply_gpt56_current_pricing_migration(&self) -> Result<()> {
+        if self.has_migration(GPT56_CURRENT_PRICING_MIGRATION_VERSION)? {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(include_str!(
+            "../../migrations/126_model_catalog_gpt56_current_prices.sql"
+        ))?;
+        let invalid_rows: i64 = tx.query_row(
+            "SELECT COUNT(*)
+             FROM _gpt56_current_price_candidates candidate
+             JOIN models m ON m.id=candidate.model_id
+             JOIN model_prices p ON p.model_id=m.id
+             WHERE m.origin<>'builtin'
+                OR m.user_edited<>0
+                OR p.price_status<>'official'
+                OR p.price_source<>?1
+                OR p.input_microusd_per_1m<>CASE lower(m.slug)
+                     WHEN 'gpt-5.6-sol' THEN 5000000
+                     WHEN 'gpt-5.6-terra' THEN 2000000
+                     WHEN 'gpt-5.6-luna' THEN 200000
+                   END
+                OR p.cached_input_microusd_per_1m<>CASE lower(m.slug)
+                     WHEN 'gpt-5.6-sol' THEN 500000
+                     WHEN 'gpt-5.6-terra' THEN 200000
+                     WHEN 'gpt-5.6-luna' THEN 20000
+                   END
+                OR p.output_microusd_per_1m<>CASE lower(m.slug)
+                     WHEN 'gpt-5.6-sol' THEN 30000000
+                     WHEN 'gpt-5.6-terra' THEN 12000000
+                     WHEN 'gpt-5.6-luna' THEN 1200000
+                   END
+                OR COALESCE(m.builtin_revision,0)<6
+                OR COALESCE((SELECT value FROM model_catalog_v2_meta
+                             WHERE key='builtin_revision'),'')<>'6'
+                OR (SELECT COUNT(*) FROM model_price_tiers tier
+                    WHERE tier.model_id=m.id)<>2
+                OR NOT EXISTS(
+                     SELECT 1 FROM model_price_tiers base
+                     WHERE base.model_id=m.id AND base.min_input_tokens=0
+                       AND base.input_microusd_per_1m=CASE lower(m.slug)
+                         WHEN 'gpt-5.6-sol' THEN 5000000
+                         WHEN 'gpt-5.6-terra' THEN 2000000
+                         WHEN 'gpt-5.6-luna' THEN 200000
+                       END
+                       AND base.cached_input_microusd_per_1m=CASE lower(m.slug)
+                         WHEN 'gpt-5.6-sol' THEN 500000
+                         WHEN 'gpt-5.6-terra' THEN 200000
+                         WHEN 'gpt-5.6-luna' THEN 20000
+                       END
+                       AND base.output_microusd_per_1m=CASE lower(m.slug)
+                         WHEN 'gpt-5.6-sol' THEN 30000000
+                         WHEN 'gpt-5.6-terra' THEN 12000000
+                         WHEN 'gpt-5.6-luna' THEN 1200000
+                       END
+                   )
+                OR NOT EXISTS(
+                     SELECT 1 FROM model_price_tiers long_tier
+                     WHERE long_tier.model_id=m.id AND long_tier.min_input_tokens=272000
+                       AND long_tier.input_microusd_per_1m=CASE lower(m.slug)
+                         WHEN 'gpt-5.6-sol' THEN 10000000
+                         WHEN 'gpt-5.6-terra' THEN 4000000
+                         WHEN 'gpt-5.6-luna' THEN 400000
+                       END
+                       AND long_tier.cached_input_microusd_per_1m=CASE lower(m.slug)
+                         WHEN 'gpt-5.6-sol' THEN 1000000
+                         WHEN 'gpt-5.6-terra' THEN 400000
+                         WHEN 'gpt-5.6-luna' THEN 40000
+                       END
+                       AND long_tier.output_microusd_per_1m=CASE lower(m.slug)
+                         WHEN 'gpt-5.6-sol' THEN 45000000
+                         WHEN 'gpt-5.6-terra' THEN 18000000
+                         WHEN 'gpt-5.6-luna' THEN 1800000
+                       END
+                   )",
+            [GPT56_OFFICIAL_PRICE_SOURCE],
+            |row| row.get(0),
+        )?;
+        if invalid_rows != 0 {
+            return Err(rusqlite::Error::SqliteFailure(
+                (),
+                Some("GPT-5.6 current pricing migration smoke check failed".to_string()),
+            ));
+        }
+        tx.execute("DROP TABLE _gpt56_current_price_candidates", [])?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version,applied_at) VALUES(?1,?2)",
+            params![GPT56_CURRENT_PRICING_MIGRATION_VERSION, now_ts()],
+        )?;
+        tx.commit()?;
+        if let Some(migrations) = self.applied_migrations.borrow_mut().as_mut() {
+            migrations.insert(GPT56_CURRENT_PRICING_MIGRATION_VERSION.to_string());
+        }
+        Ok(())
+    }
+
+    pub(super) fn apply_model_catalog_gpt6_astra_migration(&self) -> Result<()> {
+        if self.has_migration(GPT6_ASTRA_MIGRATION_VERSION)? {
+            return Ok(());
+        }
+
+        let migration_fixture = gpt6_astra_migration_fixture();
+        let astra = &migration_fixture.astra;
+        let scoped_fixture = BuiltinCatalogFixture {
+            revision: migration_fixture.revision,
+            source_sha256: migration_fixture.source_sha256.clone(),
+            models: vec![astra.clone()],
+        };
+
+        let tx = self.conn.unchecked_transaction()?;
+        let now = now_ts();
+        let stored_catalog_revision = tx
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM model_catalog_v2_meta
+                 WHERE key='builtin_revision'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or_default();
+        let max_unedited_builtin_revision = tx.query_row(
+            "SELECT COALESCE(MAX(builtin_revision),0) FROM models
+             WHERE origin='builtin' AND user_edited=0",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let effective_catalog_revision = stored_catalog_revision.max(max_unedited_builtin_revision);
+        let astra_state = tx
+            .query_row(
+                "SELECT origin,user_edited,builtin_revision
+                 FROM models WHERE slug=?1 COLLATE NOCASE",
+                [GPT6_ASTRA_SLUG],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match astra_state.as_ref() {
+            None if effective_catalog_revision <= migration_fixture.revision => {
+                insert_seed(&self.conn, &scoped_fixture, astra, now)?;
+            }
+            Some((origin, user_edited, revision))
+                if origin == "builtin"
+                    && !user_edited
+                    && revision.unwrap_or_default() <= GPT6_ASTRA_MIGRATION_REVISION =>
+            {
+                replace_unedited_builtin_seed(&self.conn, migration_fixture.revision, astra, now)?;
+            }
+            _ => {}
+        }
+        tx.execute(
+            "UPDATE models
+             SET capabilities_json=?1,builtin_revision=?2,updated_at=?3
+             WHERE origin='builtin' AND user_edited=0
+               AND slug=?4 COLLATE NOCASE
+               AND COALESCE(builtin_revision,0) < ?2",
+            params![
+                serde_json::to_string(&migration_fixture.sol_capabilities)
+                    .expect("serialize GPT-5.6 Sol capabilities"),
+                migration_fixture.revision,
+                now,
+                migration_fixture.sol_slug.as_str()
+            ],
+        )?;
+        if effective_catalog_revision <= migration_fixture.revision {
+            tx.execute(
+                "INSERT INTO model_catalog_v2_meta(key,value) VALUES('builtin_revision',?1)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [migration_fixture.revision.to_string()],
+            )?;
+            tx.execute(
+                "INSERT INTO model_catalog_v2_meta(key,value) VALUES('fixture_sha256',?1)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [migration_fixture.source_sha256.as_str()],
+            )?;
+        } else if stored_catalog_revision < effective_catalog_revision {
+            tx.execute(
+                "INSERT INTO model_catalog_v2_meta(key,value) VALUES('builtin_revision',?1)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [effective_catalog_revision.to_string()],
+            )?;
+        }
+        tx.execute_batch(include_str!(
+            "../../migrations/131_model_catalog_gpt6_astra.sql"
+        ))?;
+
+        let migrated = get_managed_model_v2_with_conn(&self.conn, GPT6_ASTRA_SLUG)?;
+        match migrated.as_ref() {
+            Some(model) if model.origin == "builtin" && !model.user_edited => {
+                let migrated_revision = model.builtin_revision.unwrap_or_default();
+                if migrated_revision < migration_fixture.revision
+                    || (migrated_revision == migration_fixture.revision
+                        && !seeded_builtin_matches(model, migration_fixture.revision, astra))
+                {
+                    return Err(rusqlite::Error::SqliteFailure(
+                        (),
+                        Some("GPT-6 Astra catalog migration smoke check failed".to_string()),
+                    ));
+                }
+            }
+            None if effective_catalog_revision <= migration_fixture.revision => {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            _ => {}
+        }
+        let migrated_sol =
+            get_managed_model_v2_with_conn(&self.conn, migration_fixture.sol_slug.as_str())?;
+        match migrated_sol.as_ref() {
+            Some(model) if model.origin == "builtin" && !model.user_edited => {
+                let migrated_revision = model.builtin_revision.unwrap_or_default();
+                if migrated_revision < migration_fixture.revision
+                    || (migrated_revision == migration_fixture.revision
+                        && !sol_matches_gpt6_astra_migration_or_metadata_fix(
+                            model,
+                            &migration_fixture,
+                        ))
+                {
+                    return Err(rusqlite::Error::SqliteFailure(
+                        (),
+                        Some("GPT-5.6 Sol catalog migration smoke check failed".to_string()),
+                    ));
+                }
+            }
+            Some(model)
+                if model.origin != "builtin"
+                    && effective_catalog_revision <= migration_fixture.revision =>
+            {
+                return Err(rusqlite::Error::SqliteFailure(
+                    (),
+                    Some("GPT-5.6 Sol catalog migration smoke check failed".to_string()),
+                ));
+            }
+            None if effective_catalog_revision <= migration_fixture.revision => {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            _ => {}
+        }
+        if effective_catalog_revision <= migration_fixture.revision {
+            migration_smoke_for_fixture(&self.conn, &scoped_fixture)?;
+        }
+        tx.execute(
+            "INSERT INTO schema_migrations(version,applied_at) VALUES(?1,?2)",
+            params![GPT6_ASTRA_MIGRATION_VERSION, now],
+        )?;
+        tx.commit()?;
+        if let Some(migrations) = self.applied_migrations.borrow_mut().as_mut() {
+            migrations.insert(GPT6_ASTRA_MIGRATION_VERSION.to_string());
+        }
+        Ok(())
+    }
+
+    pub(super) fn apply_model_catalog_gpt56_metadata_fix_migration(&self) -> Result<()> {
+        self.apply_sql_migration(
+            GPT56_METADATA_FIX_MIGRATION_VERSION,
+            include_str!("../../migrations/132_model_catalog_gpt56_metadata_fix.sql"),
+        )
+    }
+
     pub fn smoke_check_model_catalog_v2(&self) -> Result<()> {
         migration_smoke(&self.conn)
     }
@@ -1314,6 +1928,131 @@ impl Storage {
                     .ok_or(rusqlite::Error::QueryReturnedNoRows)
             })
             .collect()
+    }
+
+    pub fn upsert_missing_managed_models_and_ensure_routes_v2(
+        &self,
+        create_candidates: &[ManagedModelV2Upsert],
+        route_inputs: &[ManagedModelRouteEnsureV2],
+    ) -> Result<ManagedModelRouteEnsureResultV2> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut candidate_slugs = HashSet::new();
+        for candidate in create_candidates {
+            let slug = candidate.model.slug.trim();
+            if slug.is_empty()
+                || !candidate_slugs.insert(slug.to_ascii_lowercase())
+                || candidate.previous_slug.is_some()
+                || !candidate.model.id.trim().is_empty()
+                || !candidate.model.routes.is_empty()
+            {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "invalid managed model creation candidate".to_string(),
+                ));
+            }
+        }
+
+        let mut result = ManagedModelRouteEnsureResultV2::default();
+        let mut created_model_ids = HashSet::new();
+        for input in route_inputs {
+            let model_slug = input.model_slug.trim();
+            if model_slug.is_empty() {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "managed model route slug is required".to_string(),
+                ));
+            }
+
+            let mut route = input.route.clone();
+            route.id.clear();
+            route.source_kind = route.source_kind.trim().to_string();
+            route.source_id = route.source_id.trim().to_string();
+            route.upstream_model = route.upstream_model.trim().to_string();
+            validate_route(&route)?;
+
+            let existing = tx
+                .query_row(
+                    "SELECT id,slug FROM models WHERE slug=?1 COLLATE NOCASE",
+                    [model_slug],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            let (model_id, canonical_slug) = match existing {
+                Some(existing) => existing,
+                None => {
+                    let candidate = create_candidates
+                        .iter()
+                        .find(|candidate| {
+                            candidate.model.slug.trim().eq_ignore_ascii_case(model_slug)
+                        })
+                        .ok_or_else(|| {
+                            rusqlite::Error::InvalidParameterName(format!(
+                                "missing managed model creation candidate: {model_slug}"
+                            ))
+                        })?;
+                    let model_id = write_model(&tx, candidate)?;
+                    let canonical_slug =
+                        tx.query_row("SELECT slug FROM models WHERE id=?1", [&model_id], |row| {
+                            row.get::<_, String>(0)
+                        })?;
+                    if created_model_ids.insert(model_id.clone()) {
+                        result.created_models.push(canonical_slug.clone());
+                    }
+                    (model_id, canonical_slug)
+                }
+            };
+
+            let exact_route_exists = |tx: &Transaction<'_>| -> Result<bool> {
+                Ok(tx
+                    .query_row(
+                        "SELECT 1 FROM model_routes
+                         WHERE model_id=?1 AND source_kind=?2 AND source_id=?3
+                           AND upstream_model=?4 COLLATE NOCASE",
+                        params![
+                            &model_id,
+                            &route.source_kind,
+                            &route.source_id,
+                            &route.upstream_model
+                        ],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?
+                    .is_some())
+            };
+            if exact_route_exists(&tx)? {
+                result.unchanged_routes.push(canonical_slug);
+                continue;
+            }
+
+            let now = now_ts();
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO model_routes(
+                    id,model_id,source_kind,source_id,upstream_model,
+                    enabled,priority,weight,created_at,updated_at
+                 ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?9)",
+                params![
+                    route_id(&model_id, &route),
+                    &model_id,
+                    &route.source_kind,
+                    &route.source_id,
+                    &route.upstream_model,
+                    route.enabled,
+                    route.priority,
+                    route.weight,
+                    now
+                ],
+            )?;
+            if inserted > 0 {
+                result.added_routes.push(canonical_slug);
+            } else if exact_route_exists(&tx)? {
+                result.unchanged_routes.push(canonical_slug);
+            } else {
+                return Err(rusqlite::Error::SqliteFailure(
+                    (),
+                    Some("managed model route id collision".to_string()),
+                ));
+            }
+        }
+        tx.commit()?;
+        Ok(result)
     }
 
     pub fn update_managed_model_state_v2(
@@ -1608,12 +2347,58 @@ mod tests {
         storage
     }
 
+    fn custom_creation_candidate(slug: &str) -> ManagedModelV2Upsert {
+        ManagedModelV2Upsert {
+            model: ManagedModelV2 {
+                slug: slug.to_string(),
+                display_name: format!("Discovered {slug}"),
+                provider: Some("OpenAI".to_string()),
+                origin: "custom".to_string(),
+                enabled: true,
+                supported_in_api: true,
+                visibility: "list".to_string(),
+                capabilities: serde_json::json!({
+                    "supports_text_generation": true,
+                    "input_modalities": ["text"],
+                    "output_modalities": ["text"]
+                }),
+                instructions_mode: "passthrough".to_string(),
+                fast_policy: ModelFastPolicyV2::Passthrough,
+                price: ModelPriceV2 {
+                    price_status: "missing".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn account_route_ensure(model_slug: &str, upstream_model: &str) -> ManagedModelRouteEnsureV2 {
+        ManagedModelRouteEnsureV2 {
+            model_slug: model_slug.to_string(),
+            route: ModelRouteV2 {
+                source_kind: "account_pool".to_string(),
+                source_id: "default".to_string(),
+                upstream_model: upstream_model.to_string(),
+                enabled: true,
+                priority: 0,
+                weight: 1,
+                ..Default::default()
+            },
+        }
+    }
+
     #[test]
     fn fixture_contains_no_prompt_fields() {
         let raw = include_str!("../../seeds/model_catalog_v2_2026_07_10.json");
         let value: Value = serde_json::from_str(raw).expect("parse fixture");
-        assert_eq!(value["models"].as_array().map(Vec::len), Some(9));
-        assert_eq!(value["revision"].as_i64(), Some(5));
+        assert_eq!(value["models"].as_array().map(Vec::len), Some(10));
+        assert_eq!(value["revision"].as_i64(), Some(8));
+        assert_eq!(
+            value["source_sha256"].as_str(),
+            Some("ccc924d8388571e3ecfa722589e383b5de8038e0b02a096dd618c140066bced3")
+        );
         assert!(!raw.contains("base_instructions"));
         assert!(!raw.contains("instructions_template"));
         assert!(!raw.contains("instructions_text"));
@@ -1676,41 +2461,57 @@ mod tests {
         let storage = storage();
         let all = storage.list_managed_models_v2(true).expect("list all");
         let visible = storage.list_api_models_v2().expect("list visible");
-        assert_eq!(all.len(), 9);
-        assert_eq!(visible.len(), 8);
+        assert_eq!(all.len(), 10);
+        assert_eq!(visible.len(), 9);
         assert_eq!(
             all.iter()
                 .filter(|model| model.price.price_status == "missing")
                 .count(),
             1
         );
-        for (slug, input, cached, output, long_input, long_cached, long_output) in [
+        for (
+            slug,
+            input,
+            cached,
+            cache_write,
+            output,
+            long_input,
+            long_cached,
+            long_cache_write,
+            long_output,
+        ) in [
             (
                 "gpt-5.6-sol",
                 5_000_000,
                 500_000,
+                6_250_000,
                 30_000_000,
                 10_000_000,
                 1_000_000,
+                12_500_000,
                 45_000_000,
             ),
             (
                 "gpt-5.6-terra",
+                2_000_000,
+                200_000,
                 2_500_000,
-                250_000,
-                15_000_000,
+                12_000_000,
+                4_000_000,
+                400_000,
                 5_000_000,
-                500_000,
-                22_500_000,
+                18_000_000,
             ),
             (
                 "gpt-5.6-luna",
-                1_000_000,
-                100_000,
-                6_000_000,
-                2_000_000,
                 200_000,
-                9_000_000,
+                20_000,
+                250_000,
+                1_200_000,
+                400_000,
+                40_000,
+                500_000,
+                1_800_000,
             ),
         ] {
             let model = all.iter().find(|model| model.slug == slug).unwrap();
@@ -1721,34 +2522,107 @@ mod tests {
             );
             assert_eq!(model.price.input_microusd_per_1m, Some(input));
             assert_eq!(model.price.cached_input_microusd_per_1m, Some(cached));
+            assert_eq!(model.price.cache_write_microusd_per_1m, Some(cache_write));
             assert_eq!(model.price.output_microusd_per_1m, Some(output));
             assert_eq!(model.price_tiers.len(), 2);
-            assert_eq!(model.price_tiers[1].min_input_tokens, 272_000);
+            assert_eq!(model.price_tiers[1].min_input_tokens, 272_001);
             assert_eq!(model.price_tiers[1].input_microusd_per_1m, long_input);
             assert_eq!(
                 model.price_tiers[1].cached_input_microusd_per_1m,
                 long_cached
+            );
+            assert_eq!(
+                model.price_tiers[1].cache_write_microusd_per_1m,
+                Some(long_cache_write)
             );
             assert_eq!(model.price_tiers[1].output_microusd_per_1m, long_output);
         }
         let gpt54 = all.iter().find(|model| model.slug == "gpt-5.4").unwrap();
         assert_eq!(gpt54.price_tiers.len(), 2);
         assert_eq!(gpt54.price_tiers[1].min_input_tokens, 272_000);
+        for slug in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            let model = all.iter().find(|model| model.slug == slug).unwrap();
+            assert_eq!(model.context_window, Some(272_000));
+            assert_eq!(model.max_context_window, Some(872_000));
+            assert_eq!(model.capabilities["shell_type"], "unified_exec");
+        }
         let sol = all
             .iter()
             .find(|model| model.slug == "gpt-5.6-sol")
             .unwrap();
-        assert_eq!(sol.builtin_revision, Some(5));
+        assert_eq!(sol.builtin_revision, Some(8));
         assert_eq!(sol.capabilities["multi_agent_version"], "v2");
         assert_eq!(sol.capabilities["tool_mode"], "code_mode_only");
         assert_eq!(sol.capabilities["use_responses_lite"], true);
         assert_eq!(sol.capabilities["comp_hash"], "3000");
+        assert_eq!(
+            sol.capabilities["service_tiers"],
+            serde_json::json!(["priority", "ultrafast"])
+        );
+        let metadata_fix_applied: i64 = storage
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=?1",
+                [GPT56_METADATA_FIX_MIGRATION_VERSION],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(metadata_fix_applied, 1);
+        let astra = all
+            .iter()
+            .find(|model| model.slug == GPT6_ASTRA_SLUG)
+            .unwrap();
+        assert_eq!(astra.display_name, "GPT-6-Astra");
+        assert_eq!(
+            astra.description.as_deref(),
+            Some("Our most capable model for complex, demanding work.")
+        );
+        assert_eq!(astra.sort_order, 1);
+        assert_eq!(astra.builtin_revision, Some(8));
+        assert_eq!(astra.default_reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(astra.context_window, Some(272_000));
+        assert_eq!(astra.max_context_window, Some(872_000));
+        assert_eq!(
+            astra.capabilities["reasoning_efforts"],
+            serde_json::json!(["low", "medium", "high", "xhigh", "max", "ultra"])
+        );
+        assert_eq!(
+            astra.capabilities["service_tiers"],
+            serde_json::json!(["priority"])
+        );
+        assert_eq!(astra.capabilities["api_context_window"], 1_050_000);
+        assert_eq!(astra.capabilities["max_output_tokens"], 128_000);
+        assert_eq!(
+            astra.capabilities["supported_endpoints"],
+            serde_json::json!(["/v1/responses", "/v1/chat/completions"])
+        );
+        assert_eq!(astra.price.price_status, "official");
+        assert_eq!(
+            astra.price.price_source.as_deref(),
+            Some(GPT6_ASTRA_PRICE_SOURCE)
+        );
+        assert_eq!(astra.price.input_microusd_per_1m, Some(10_000_000));
+        assert_eq!(astra.price.cached_input_microusd_per_1m, Some(1_000_000));
+        assert_eq!(astra.price.cache_write_microusd_per_1m, Some(12_500_000));
+        assert_eq!(astra.price.output_microusd_per_1m, Some(50_000_000));
+        assert_eq!(astra.price_tiers.len(), 2);
+        assert_eq!(astra.price_tiers[1].min_input_tokens, 272_001);
+        assert_eq!(astra.price_tiers[1].input_microusd_per_1m, 20_000_000);
+        assert_eq!(astra.price_tiers[1].cached_input_microusd_per_1m, 2_000_000);
+        assert_eq!(
+            astra.price_tiers[1].cache_write_microusd_per_1m,
+            Some(25_000_000)
+        );
+        assert_eq!(astra.price_tiers[1].output_microusd_per_1m, 75_000_000);
+        assert_eq!(astra.routes.len(), 1);
+        assert_eq!(astra.routes[0].source_kind, "account_pool");
+        assert_eq!(astra.routes[0].upstream_model, GPT6_ASTRA_SLUG);
         let image = all
             .iter()
             .find(|model| model.slug == "gpt-image-2")
             .unwrap();
         assert_eq!(image.display_name, "GPT Image 2");
-        assert_eq!(image.builtin_revision, Some(5));
+        assert_eq!(image.builtin_revision, Some(8));
         assert_eq!(image.context_window, None);
         assert_eq!(image.max_context_window, None);
         assert_eq!(image.default_reasoning_effort, None);
@@ -1772,6 +2646,60 @@ mod tests {
             .iter()
             .all(|model| model.instructions_mode == "passthrough"
                 && model.instructions_text.is_none()));
+        assert!(all
+            .iter()
+            .all(|model| model.fast_policy == ModelFastPolicyV2::Passthrough));
+    }
+
+    #[test]
+    fn model_fast_policy_round_trips() {
+        let storage = storage();
+        let mut model = storage.get_managed_model_v2("gpt-5.4").unwrap().unwrap();
+        model.fast_policy = ModelFastPolicyV2::Filter;
+
+        let saved = storage
+            .upsert_managed_model_v2(&ManagedModelV2Upsert {
+                previous_slug: Some(model.slug.clone()),
+                model,
+            })
+            .unwrap();
+
+        assert_eq!(saved.fast_policy, ModelFastPolicyV2::Filter);
+        assert_eq!(
+            storage
+                .get_managed_model_v2("gpt-5.4")
+                .unwrap()
+                .unwrap()
+                .fast_policy,
+            ModelFastPolicyV2::Filter
+        );
+    }
+
+    #[test]
+    fn fast_policy_migration_defaults_existing_models() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE models(id TEXT PRIMARY KEY);
+             INSERT INTO models(id) VALUES('existing');",
+        )
+        .unwrap();
+        conn.execute_batch(include_str!("../../migrations/129_model_fast_policy.sql"))
+            .unwrap();
+
+        let policy: String = conn
+            .query_row(
+                "SELECT fast_policy FROM models WHERE id='existing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(policy, "passthrough");
+        assert!(conn
+            .execute(
+                "UPDATE models SET fast_policy='invalid' WHERE id='existing'",
+                [],
+            )
+            .is_err());
     }
 
     #[test]
@@ -1785,7 +2713,60 @@ mod tests {
     }
 
     #[test]
-    fn revision_five_seeds_image_model_into_an_existing_revision_four_catalog() {
+    fn cache_write_price_migration_preserves_custom_gpt56_prices() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE models(
+               id TEXT PRIMARY KEY,slug TEXT,origin TEXT,user_edited INTEGER,
+               builtin_revision INTEGER,updated_at INTEGER
+             );
+             CREATE TABLE model_prices(
+               model_id TEXT PRIMARY KEY,price_status TEXT,price_source TEXT,
+               input_microusd_per_1m INTEGER,cached_input_microusd_per_1m INTEGER,
+               output_microusd_per_1m INTEGER,updated_at INTEGER
+             );
+             CREATE TABLE model_price_tiers(
+               model_id TEXT,min_input_tokens INTEGER,input_microusd_per_1m INTEGER,
+               cached_input_microusd_per_1m INTEGER,output_microusd_per_1m INTEGER
+             );
+             CREATE TABLE request_charge_snapshots(input_microusd_per_1m INTEGER);
+             CREATE TABLE model_catalog_v2_meta(key TEXT PRIMARY KEY,value TEXT);
+             INSERT INTO models VALUES('terra','gpt-5.6-terra','builtin',1,6,1);
+             INSERT INTO model_prices VALUES(
+               'terra','custom','local-ui',9000000,8000000,7000000,1
+             );
+             INSERT INTO model_price_tiers VALUES('terra',0,9000000,8000000,7000000);
+             INSERT INTO request_charge_snapshots VALUES(1234567);",
+        )
+        .unwrap();
+
+        conn.execute_batch(include_str!(
+            "../../migrations/127_model_catalog_cache_write_prices.sql"
+        ))
+        .unwrap();
+
+        let (price, revision): (Option<i64>, i64) = conn
+            .query_row(
+                "SELECT p.cache_write_microusd_per_1m,m.builtin_revision
+                 FROM model_prices p JOIN models m ON m.id=p.model_id",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(price, None);
+        assert_eq!(revision, 6);
+        let snapshot_rate: i64 = conn
+            .query_row(
+                "SELECT cache_write_microusd_per_1m FROM request_charge_snapshots",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(snapshot_rate, 1_234_567);
+    }
+
+    #[test]
+    fn latest_revision_seeds_image_model_into_an_existing_revision_four_catalog() {
         let storage = storage();
         storage
             .conn
@@ -1814,7 +2795,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(image.origin, "builtin");
-        assert_eq!(image.builtin_revision, Some(5));
+        assert_eq!(image.builtin_revision, Some(8));
         assert_eq!(image.routes.len(), 1);
         assert_eq!(image.routes[0].upstream_model, "gpt-image-2");
         let sol = storage
@@ -1830,7 +2811,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(revision, "5");
+        assert_eq!(revision, "8");
     }
 
     #[test]
@@ -1889,8 +2870,625 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(restored.origin, "builtin");
-        assert_eq!(restored.builtin_revision, Some(5));
+        assert_eq!(restored.builtin_revision, Some(8));
         assert_eq!(restored.routes[0].upstream_model, "gpt-image-2");
+    }
+
+    #[test]
+    fn astra_migration_upgrades_an_existing_revision_seven_catalog() {
+        let storage = storage();
+        let mut old_sol_capabilities = storage
+            .get_managed_model_v2("gpt-5.6-sol")
+            .unwrap()
+            .unwrap()
+            .capabilities;
+        old_sol_capabilities["service_tiers"] = serde_json::json!(["priority"]);
+        old_sol_capabilities["shell_type"] = serde_json::json!("shell_command");
+
+        storage
+            .conn
+            .execute(
+                "DELETE FROM schema_migrations WHERE version=?1",
+                [GPT6_ASTRA_MIGRATION_VERSION],
+            )
+            .unwrap();
+        storage.applied_migrations.borrow_mut().take();
+        storage
+            .conn
+            .execute("DELETE FROM models WHERE slug=?1", [GPT6_ASTRA_SLUG])
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE models SET builtin_revision=7 WHERE origin='builtin'",
+                [],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE models
+                 SET context_window=372000,max_context_window=372000,capabilities_json=?1
+                 WHERE slug='gpt-5.6-sol'",
+                [old_sol_capabilities.to_string()],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE model_catalog_v2_meta SET value='7' WHERE key='builtin_revision'",
+                [],
+            )
+            .unwrap();
+
+        storage.apply_model_catalog_gpt6_astra_migration().unwrap();
+        storage.seed_missing_builtin_models_v2().unwrap();
+        storage.apply_model_catalog_gpt6_astra_migration().unwrap();
+
+        let astra = storage
+            .get_managed_model_v2(GPT6_ASTRA_SLUG)
+            .unwrap()
+            .unwrap();
+        assert_eq!(astra.origin, "builtin");
+        assert_eq!(astra.builtin_revision, Some(8));
+        assert_eq!(astra.context_window, Some(272_000));
+        assert_eq!(astra.max_context_window, Some(872_000));
+        assert_eq!(astra.capabilities["api_context_window"], 1_050_000);
+        assert_eq!(astra.capabilities["max_output_tokens"], 128_000);
+        assert_eq!(astra.routes.len(), 1);
+        assert_eq!(astra.routes[0].upstream_model, GPT6_ASTRA_SLUG);
+
+        let sol = storage
+            .get_managed_model_v2("gpt-5.6-sol")
+            .unwrap()
+            .unwrap();
+        assert_eq!(sol.builtin_revision, Some(8));
+        assert_eq!(sol.context_window, Some(372_000));
+        assert_eq!(sol.max_context_window, Some(372_000));
+        assert_eq!(sol.capabilities["shell_type"], "shell_command");
+        assert_eq!(
+            sol.capabilities["service_tiers"],
+            serde_json::json!(["priority", "ultrafast"])
+        );
+        let image = storage
+            .get_managed_model_v2("gpt-image-2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(image.builtin_revision, Some(7));
+
+        let revision: String = storage
+            .conn
+            .query_row(
+                "SELECT value FROM model_catalog_v2_meta WHERE key='builtin_revision'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision, "8");
+        let applied: i64 = storage
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=?1",
+                [GPT6_ASTRA_MIGRATION_VERSION],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 1);
+        let migration_revision: String = storage
+            .conn
+            .query_row(
+                "SELECT value FROM model_catalog_v2_meta
+                 WHERE key='gpt6_astra_catalog_revision'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migration_revision, "2026-09-04-official");
+        let price_source: String = storage
+            .conn
+            .query_row(
+                "SELECT value FROM model_catalog_v2_meta
+                 WHERE key='gpt6_astra_price_source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(price_source, GPT6_ASTRA_PRICE_SOURCE);
+    }
+
+    #[test]
+    fn gpt56_metadata_fix_upgrades_a_database_after_131_and_is_replay_idempotent() {
+        let storage = storage();
+        for slug in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            let mut old_capabilities = storage
+                .get_managed_model_v2(slug)
+                .unwrap()
+                .unwrap()
+                .capabilities;
+            old_capabilities["shell_type"] = serde_json::json!("shell_command");
+            storage
+                .conn
+                .execute(
+                    "UPDATE models
+                     SET context_window=372000,max_context_window=372000,
+                         capabilities_json=?1,builtin_revision=8,user_edited=0,updated_at=7
+                     WHERE slug=?2",
+                    params![old_capabilities.to_string(), slug],
+                )
+                .unwrap();
+        }
+        storage
+            .conn
+            .execute(
+                "DELETE FROM schema_migrations WHERE version=?1",
+                [GPT56_METADATA_FIX_MIGRATION_VERSION],
+            )
+            .unwrap();
+        storage.applied_migrations.borrow_mut().take();
+
+        let astra_migration_applied: i64 = storage
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=?1",
+                [GPT6_ASTRA_MIGRATION_VERSION],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(astra_migration_applied, 1);
+
+        storage
+            .apply_model_catalog_gpt56_metadata_fix_migration()
+            .unwrap();
+        for (slug, expected_service_tiers) in [
+            ("gpt-5.6-sol", serde_json::json!(["priority", "ultrafast"])),
+            ("gpt-5.6-terra", serde_json::json!(["priority"])),
+            ("gpt-5.6-luna", serde_json::json!(["priority"])),
+        ] {
+            let migrated = storage.get_managed_model_v2(slug).unwrap().unwrap();
+            assert_eq!(migrated.builtin_revision, Some(8));
+            assert_eq!(migrated.context_window, Some(272_000));
+            assert_eq!(migrated.max_context_window, Some(872_000));
+            assert_eq!(migrated.capabilities["shell_type"], "unified_exec");
+            assert_eq!(
+                migrated.capabilities["service_tiers"],
+                expected_service_tiers
+            );
+        }
+
+        storage
+            .conn
+            .execute(
+                "UPDATE models SET updated_at=123456789
+                 WHERE lower(slug) IN ('gpt-5.6-sol','gpt-5.6-terra','gpt-5.6-luna')",
+                [],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM schema_migrations WHERE version=?1",
+                [GPT56_METADATA_FIX_MIGRATION_VERSION],
+            )
+            .unwrap();
+        storage.applied_migrations.borrow_mut().take();
+        storage
+            .apply_model_catalog_gpt56_metadata_fix_migration()
+            .unwrap();
+
+        for slug in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            let replayed = storage.get_managed_model_v2(slug).unwrap().unwrap();
+            assert_eq!(replayed.updated_at, 123_456_789);
+        }
+        let applied: i64 = storage
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=?1",
+                [GPT56_METADATA_FIX_MIGRATION_VERSION],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 1);
+    }
+
+    #[test]
+    fn gpt56_metadata_fix_preserves_user_edited_metadata() {
+        let storage = storage();
+        let custom_capabilities = serde_json::json!({
+            "shell_type": "custom_shell",
+            "service_tiers": ["private-fast"],
+            "custom": true
+        });
+        storage
+            .conn
+            .execute(
+                "UPDATE models
+                 SET context_window=111111,max_context_window=222222,
+                     capabilities_json=?1,builtin_revision=8,user_edited=1,updated_at=77
+                 WHERE slug='gpt-5.6-terra'",
+                [custom_capabilities.to_string()],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM schema_migrations WHERE version=?1",
+                [GPT56_METADATA_FIX_MIGRATION_VERSION],
+            )
+            .unwrap();
+        storage.applied_migrations.borrow_mut().take();
+
+        storage
+            .apply_model_catalog_gpt56_metadata_fix_migration()
+            .unwrap();
+        storage
+            .apply_model_catalog_gpt56_metadata_fix_migration()
+            .unwrap();
+
+        let preserved = storage
+            .get_managed_model_v2("gpt-5.6-terra")
+            .unwrap()
+            .unwrap();
+        assert!(preserved.user_edited);
+        assert_eq!(preserved.builtin_revision, Some(8));
+        assert_eq!(preserved.context_window, Some(111_111));
+        assert_eq!(preserved.max_context_window, Some(222_222));
+        assert_eq!(preserved.capabilities, custom_capabilities);
+        assert_eq!(preserved.updated_at, 77);
+    }
+
+    #[test]
+    fn gpt56_metadata_fix_preserves_future_builtin_metadata() {
+        let storage = storage();
+        let future_capabilities = serde_json::json!({
+            "shell_type": "future_shell",
+            "service_tiers": ["future-tier"],
+            "future": true
+        });
+        storage
+            .conn
+            .execute(
+                "UPDATE models
+                 SET context_window=999111,max_context_window=999222,
+                     capabilities_json=?1,builtin_revision=9,user_edited=0,updated_at=88
+                 WHERE slug='gpt-5.6-luna'",
+                [future_capabilities.to_string()],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM schema_migrations WHERE version=?1",
+                [GPT56_METADATA_FIX_MIGRATION_VERSION],
+            )
+            .unwrap();
+        storage.applied_migrations.borrow_mut().take();
+
+        storage
+            .apply_model_catalog_gpt56_metadata_fix_migration()
+            .unwrap();
+        storage
+            .apply_model_catalog_gpt56_metadata_fix_migration()
+            .unwrap();
+
+        let preserved = storage
+            .get_managed_model_v2("gpt-5.6-luna")
+            .unwrap()
+            .unwrap();
+        assert!(!preserved.user_edited);
+        assert_eq!(preserved.builtin_revision, Some(9));
+        assert_eq!(preserved.context_window, Some(999_111));
+        assert_eq!(preserved.max_context_window, Some(999_222));
+        assert_eq!(preserved.capabilities, future_capabilities);
+        assert_eq!(preserved.updated_at, 88);
+    }
+
+    #[test]
+    fn astra_migration_preserves_custom_slug_and_user_edited_sol_metadata() {
+        let storage = storage();
+        let mut custom = storage
+            .get_managed_model_v2(GPT6_ASTRA_SLUG)
+            .unwrap()
+            .unwrap();
+        storage
+            .conn
+            .execute("DELETE FROM models WHERE slug=?1", [GPT6_ASTRA_SLUG])
+            .unwrap();
+        custom.id.clear();
+        custom.slug = "GpT-6-AsTrA".to_string();
+        custom.display_name = "My Existing Astra Route".to_string();
+        custom.origin = "custom".to_string();
+        custom.builtin_revision = None;
+        custom.user_edited = true;
+        custom.price.price_status = "custom".to_string();
+        custom.price.price_source = Some("existing-user-config".to_string());
+        custom.routes[0].id.clear();
+        custom.routes[0].upstream_model = "my-astra-upstream".to_string();
+        let saved = storage
+            .upsert_managed_model_v2(&ManagedModelV2Upsert {
+                model: custom,
+                ..Default::default()
+            })
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE models
+                 SET capabilities_json=?1,builtin_revision=7,user_edited=1
+                 WHERE slug='gpt-5.6-sol'",
+                [r#"{"custom":true}"#],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM schema_migrations WHERE version=?1",
+                [GPT6_ASTRA_MIGRATION_VERSION],
+            )
+            .unwrap();
+        storage.applied_migrations.borrow_mut().take();
+
+        storage.apply_model_catalog_gpt6_astra_migration().unwrap();
+        storage.apply_model_catalog_gpt6_astra_migration().unwrap();
+
+        let preserved = storage
+            .get_managed_model_v2(GPT6_ASTRA_SLUG)
+            .unwrap()
+            .unwrap();
+        assert_eq!(preserved.id, saved.id);
+        assert_eq!(preserved.origin, "custom");
+        assert_eq!(preserved.builtin_revision, None);
+        assert_eq!(preserved.display_name, "My Existing Astra Route");
+        assert_eq!(
+            preserved.price.price_source.as_deref(),
+            Some("existing-user-config")
+        );
+        assert_eq!(preserved.routes.len(), 1);
+        assert_eq!(preserved.routes[0].upstream_model, "my-astra-upstream");
+
+        let sol = storage
+            .get_managed_model_v2("gpt-5.6-sol")
+            .unwrap()
+            .unwrap();
+        assert_eq!(sol.builtin_revision, Some(7));
+        assert_eq!(sol.capabilities["custom"], true);
+    }
+
+    #[test]
+    fn astra_migration_repairs_an_unedited_pre_release_builtin() {
+        let storage = storage();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM schema_migrations WHERE version=?1",
+                [GPT6_ASTRA_MIGRATION_VERSION],
+            )
+            .unwrap();
+        storage.applied_migrations.borrow_mut().take();
+        storage
+            .conn
+            .execute(
+                "UPDATE models
+                 SET display_name='Pre-release Astra',capabilities_json='{}',builtin_revision=7
+                 WHERE slug=?1",
+                [GPT6_ASTRA_SLUG],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE model_prices SET cache_write_microusd_per_1m=1
+                 WHERE model_id=(SELECT id FROM models WHERE slug=?1)",
+                [GPT6_ASTRA_SLUG],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM model_price_tiers
+                 WHERE model_id=(SELECT id FROM models WHERE slug=?1)
+                   AND min_input_tokens>0",
+                [GPT6_ASTRA_SLUG],
+            )
+            .unwrap();
+
+        storage.apply_model_catalog_gpt6_astra_migration().unwrap();
+
+        let migrated = storage
+            .get_managed_model_v2(GPT6_ASTRA_SLUG)
+            .unwrap()
+            .unwrap();
+        let fixture = gpt6_astra_migration_fixture();
+        assert!(seeded_builtin_matches(
+            &migrated,
+            fixture.revision,
+            &fixture.astra
+        ));
+    }
+
+    #[test]
+    fn astra_migration_does_not_downgrade_future_catalog_state() {
+        let storage = storage();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM schema_migrations WHERE version=?1",
+                [GPT6_ASTRA_MIGRATION_VERSION],
+            )
+            .unwrap();
+        storage.applied_migrations.borrow_mut().take();
+        storage
+            .conn
+            .execute(
+                "UPDATE models
+                 SET display_name='Future Astra',capabilities_json=?1,builtin_revision=9
+                 WHERE slug=?2",
+                params![r#"{"future":true}"#, GPT6_ASTRA_SLUG],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE model_prices SET cache_write_microusd_per_1m=13000000
+                 WHERE model_id=(SELECT id FROM models WHERE slug=?1)",
+                [GPT6_ASTRA_SLUG],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE model_price_tiers
+                 SET cache_write_microusd_per_1m=CASE min_input_tokens
+                   WHEN 0 THEN 13000000 ELSE 26000000 END
+                 WHERE model_id=(SELECT id FROM models WHERE slug=?1)",
+                [GPT6_ASTRA_SLUG],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE models SET capabilities_json=?1,builtin_revision=9 WHERE slug=?2",
+                params![r#"{"future_sol":true}"#, "gpt-5.6-sol"],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE model_catalog_v2_meta SET value='7' WHERE key='builtin_revision'",
+                [],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE model_catalog_v2_meta SET value='future-fixture-sha256'
+                 WHERE key='fixture_sha256'",
+                [],
+            )
+            .unwrap();
+
+        storage.apply_model_catalog_gpt6_astra_migration().unwrap();
+        storage.seed_missing_builtin_models_v2().unwrap();
+
+        let astra = storage
+            .get_managed_model_v2(GPT6_ASTRA_SLUG)
+            .unwrap()
+            .unwrap();
+        assert_eq!(astra.display_name, "Future Astra");
+        assert_eq!(astra.builtin_revision, Some(9));
+        assert_eq!(astra.capabilities["future"], true);
+        assert_eq!(astra.price.cache_write_microusd_per_1m, Some(13_000_000));
+        assert_eq!(
+            astra.price_tiers[0].cache_write_microusd_per_1m,
+            Some(13_000_000)
+        );
+        assert_eq!(
+            astra.price_tiers[1].cache_write_microusd_per_1m,
+            Some(26_000_000)
+        );
+        let sol = storage
+            .get_managed_model_v2("gpt-5.6-sol")
+            .unwrap()
+            .unwrap();
+        assert_eq!(sol.builtin_revision, Some(9));
+        assert_eq!(sol.capabilities["future_sol"], true);
+        let revision: String = storage
+            .conn
+            .query_row(
+                "SELECT value FROM model_catalog_v2_meta WHERE key='builtin_revision'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision, "9");
+        let source_sha256: String = storage
+            .conn
+            .query_row(
+                "SELECT value FROM model_catalog_v2_meta WHERE key='fixture_sha256'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source_sha256, "future-fixture-sha256");
+    }
+
+    #[test]
+    fn astra_migration_rolls_back_all_writes_when_smoke_check_fails() {
+        let storage = storage();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM schema_migrations WHERE version=?1",
+                [GPT6_ASTRA_MIGRATION_VERSION],
+            )
+            .unwrap();
+        storage.applied_migrations.borrow_mut().take();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM model_catalog_v2_meta
+                 WHERE key IN ('gpt6_astra_catalog_revision','gpt6_astra_price_source')",
+                [],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE model_catalog_v2_meta SET value='7' WHERE key='builtin_revision'",
+                [],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "UPDATE model_catalog_v2_meta SET value='revision-seven-sha256'
+                 WHERE key='fixture_sha256'",
+                [],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM models WHERE slug IN (?1,?2)",
+                params![GPT6_ASTRA_SLUG, "gpt-5.6-sol"],
+            )
+            .unwrap();
+
+        assert!(storage.apply_model_catalog_gpt6_astra_migration().is_err());
+
+        assert!(storage
+            .get_managed_model_v2(GPT6_ASTRA_SLUG)
+            .unwrap()
+            .is_none());
+        let revision: String = storage
+            .conn
+            .query_row(
+                "SELECT value FROM model_catalog_v2_meta WHERE key='builtin_revision'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision, "7");
+        let source_sha256: String = storage
+            .conn
+            .query_row(
+                "SELECT value FROM model_catalog_v2_meta WHERE key='fixture_sha256'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source_sha256, "revision-seven-sha256");
+        let migration_writes: i64 = storage
+            .conn
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM schema_migrations WHERE version=?1)
+                   +(SELECT COUNT(*) FROM model_catalog_v2_meta
+                     WHERE key IN ('gpt6_astra_catalog_revision','gpt6_astra_price_source'))",
+                [GPT6_ASTRA_MIGRATION_VERSION],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(migration_writes, 0);
     }
 
     #[test]
@@ -1945,7 +3543,7 @@ mod tests {
         assert_eq!(sol.price.cached_input_microusd_per_1m, Some(5_000_000));
         assert_eq!(sol.price.output_microusd_per_1m, Some(30_000_000));
         assert_eq!(sol.price_tiers.len(), 1);
-        assert_eq!(sol.builtin_revision, Some(5));
+        assert_eq!(sol.builtin_revision, Some(8));
 
         let terra = storage
             .get_managed_model_v2("gpt-5.6-terra")
@@ -2103,6 +3701,179 @@ mod tests {
     }
 
     #[test]
+    fn gpt56_current_pricing_migration_updates_unedited_official_rows() {
+        let storage = storage();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM schema_migrations WHERE version=?1",
+                [GPT56_CURRENT_PRICING_MIGRATION_VERSION],
+            )
+            .unwrap();
+        storage.applied_migrations.borrow_mut().take();
+        storage
+            .conn
+            .execute_batch(
+                "DELETE FROM model_price_tiers
+                 WHERE model_id IN (
+                   SELECT id FROM models
+                   WHERE lower(slug) IN ('gpt-5.6-sol','gpt-5.6-terra','gpt-5.6-luna')
+                 );
+                 INSERT INTO model_price_tiers(
+                   model_id,min_input_tokens,input_microusd_per_1m,
+                   cached_input_microusd_per_1m,output_microusd_per_1m
+                 )
+                 SELECT id,0,
+                   CASE lower(slug)
+                     WHEN 'gpt-5.6-sol' THEN 5000000
+                     WHEN 'gpt-5.6-terra' THEN 2500000
+                     WHEN 'gpt-5.6-luna' THEN 1000000
+                   END,
+                   CASE lower(slug)
+                     WHEN 'gpt-5.6-sol' THEN 500000
+                     WHEN 'gpt-5.6-terra' THEN 250000
+                     WHEN 'gpt-5.6-luna' THEN 100000
+                   END,
+                   CASE lower(slug)
+                     WHEN 'gpt-5.6-sol' THEN 30000000
+                     WHEN 'gpt-5.6-terra' THEN 15000000
+                     WHEN 'gpt-5.6-luna' THEN 6000000
+                   END
+                 FROM models
+                 WHERE lower(slug) IN ('gpt-5.6-sol','gpt-5.6-terra','gpt-5.6-luna')
+                 UNION ALL
+                 SELECT id,272000,
+                   CASE lower(slug)
+                     WHEN 'gpt-5.6-sol' THEN 10000000
+                     WHEN 'gpt-5.6-terra' THEN 5000000
+                     WHEN 'gpt-5.6-luna' THEN 2000000
+                   END,
+                   CASE lower(slug)
+                     WHEN 'gpt-5.6-sol' THEN 1000000
+                     WHEN 'gpt-5.6-terra' THEN 500000
+                     WHEN 'gpt-5.6-luna' THEN 200000
+                   END,
+                   CASE lower(slug)
+                     WHEN 'gpt-5.6-sol' THEN 45000000
+                     WHEN 'gpt-5.6-terra' THEN 22500000
+                     WHEN 'gpt-5.6-luna' THEN 9000000
+                   END
+                 FROM models
+                 WHERE lower(slug) IN ('gpt-5.6-sol','gpt-5.6-terra','gpt-5.6-luna');
+                 UPDATE model_prices
+                 SET input_microusd_per_1m=CASE lower((SELECT slug FROM models WHERE id=model_prices.model_id))
+                       WHEN 'gpt-5.6-sol' THEN 5000000
+                       WHEN 'gpt-5.6-terra' THEN 2500000
+                       WHEN 'gpt-5.6-luna' THEN 1000000
+                     END,
+                     cached_input_microusd_per_1m=CASE lower((SELECT slug FROM models WHERE id=model_prices.model_id))
+                       WHEN 'gpt-5.6-sol' THEN 500000
+                       WHEN 'gpt-5.6-terra' THEN 250000
+                       WHEN 'gpt-5.6-luna' THEN 100000
+                     END,
+                     output_microusd_per_1m=CASE lower((SELECT slug FROM models WHERE id=model_prices.model_id))
+                       WHEN 'gpt-5.6-sol' THEN 30000000
+                       WHEN 'gpt-5.6-terra' THEN 15000000
+                       WHEN 'gpt-5.6-luna' THEN 6000000
+                     END,
+                     price_status='official',
+                     price_source='https://developers.openai.com/api/docs/models/compare'
+                 WHERE model_id IN (
+                   SELECT id FROM models
+                   WHERE lower(slug) IN ('gpt-5.6-sol','gpt-5.6-terra','gpt-5.6-luna')
+                 );
+                 UPDATE models SET builtin_revision=5,user_edited=0
+                 WHERE lower(slug) IN ('gpt-5.6-sol','gpt-5.6-terra','gpt-5.6-luna');
+                 UPDATE models SET user_edited=1 WHERE slug='gpt-5.6-terra';
+                 UPDATE model_prices
+                 SET cached_input_microusd_per_1m=777000,
+                     price_status='custom',price_source='local-ui'
+                 WHERE model_id=(SELECT id FROM models WHERE slug='gpt-5.6-terra');
+                 UPDATE model_price_tiers
+                 SET cached_input_microusd_per_1m=777000
+                 WHERE model_id=(SELECT id FROM models WHERE slug='gpt-5.6-terra')
+                   AND min_input_tokens=0;",
+            )
+            .unwrap();
+
+        storage.apply_gpt56_current_pricing_migration().unwrap();
+        storage.apply_gpt56_current_pricing_migration().unwrap();
+
+        for (slug, input, cached, output, long_input, long_cached, long_output) in [
+            (
+                "gpt-5.6-sol",
+                5_000_000,
+                500_000,
+                30_000_000,
+                10_000_000,
+                1_000_000,
+                45_000_000,
+            ),
+            (
+                "gpt-5.6-luna",
+                200_000,
+                20_000,
+                1_200_000,
+                400_000,
+                40_000,
+                1_800_000,
+            ),
+        ] {
+            let model = storage.get_managed_model_v2(slug).unwrap().unwrap();
+            assert_eq!(model.price.price_status, "official");
+            assert_eq!(
+                model.price.price_source.as_deref(),
+                Some(GPT56_OFFICIAL_PRICE_SOURCE)
+            );
+            assert_eq!(model.price.input_microusd_per_1m, Some(input));
+            assert_eq!(model.price.cached_input_microusd_per_1m, Some(cached));
+            assert_eq!(model.price.output_microusd_per_1m, Some(output));
+            assert_eq!(model.builtin_revision, Some(6));
+            assert_eq!(model.price_tiers.len(), 2);
+            assert_eq!(model.price_tiers[1].min_input_tokens, 272_000);
+            assert_eq!(model.price_tiers[1].input_microusd_per_1m, long_input);
+            assert_eq!(
+                model.price_tiers[1].cached_input_microusd_per_1m,
+                long_cached
+            );
+            assert_eq!(model.price_tiers[1].output_microusd_per_1m, long_output);
+        }
+
+        let terra = storage
+            .get_managed_model_v2("gpt-5.6-terra")
+            .unwrap()
+            .unwrap();
+        assert!(terra.user_edited);
+        assert_eq!(terra.price.price_status, "custom");
+        assert_eq!(terra.price.price_source.as_deref(), Some("local-ui"));
+        assert_eq!(terra.price.input_microusd_per_1m, Some(2_500_000));
+        assert_eq!(terra.price.cached_input_microusd_per_1m, Some(777_000));
+        assert_eq!(terra.price.output_microusd_per_1m, Some(15_000_000));
+        assert_eq!(terra.builtin_revision, Some(5));
+        assert_eq!(terra.price_tiers.len(), 2);
+        assert_eq!(terra.price_tiers[0].cached_input_microusd_per_1m, 777_000);
+
+        let revision: String = storage
+            .conn
+            .query_row(
+                "SELECT value FROM model_catalog_v2_meta WHERE key='gpt56_pricing_revision'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision, "2026-07-31-official");
+        let applied: i64 = storage
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=?1",
+                [GPT56_CURRENT_PRICING_MIGRATION_VERSION],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 1);
+    }
+
+    #[test]
     fn codex_metadata_migration_updates_only_unedited_builtin_rows() {
         let storage = storage();
         storage
@@ -2141,7 +3912,7 @@ mod tests {
             .get_managed_model_v2("gpt-5.6-sol")
             .unwrap()
             .unwrap();
-        assert_eq!(sol.builtin_revision, Some(5));
+        assert_eq!(sol.builtin_revision, Some(8));
         assert_eq!(sol.capabilities["multi_agent_version"], "v2");
         assert_eq!(sol.capabilities["use_responses_lite"], true);
 
@@ -2400,6 +4171,204 @@ mod tests {
     }
 
     #[test]
+    fn route_ensure_preserves_existing_builtin_data_and_is_idempotent() {
+        let storage = storage();
+        let original = storage.get_managed_model_v2("gpt-5.4").unwrap().unwrap();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM model_routes
+                 WHERE model_id=?1 AND source_kind='account_pool' AND source_id='default'
+                   AND upstream_model='gpt-5.4' COLLATE NOCASE",
+                [&original.id],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "INSERT INTO model_routes(
+                    id,model_id,source_kind,source_id,upstream_model,
+                    enabled,priority,weight,created_at,updated_at
+                 ) VALUES('preserved-route',?1,'aggregate_api','aggregate-test',
+                    'preserved-upstream',0,7,3,11,12)",
+                [&original.id],
+            )
+            .unwrap();
+        let before = storage.get_managed_model_v2("gpt-5.4").unwrap().unwrap();
+        assert!(!before.user_edited);
+
+        let stale_same_slug_candidate = custom_creation_candidate("GPT-5.4");
+        let result = storage
+            .upsert_missing_managed_models_and_ensure_routes_v2(
+                &[stale_same_slug_candidate],
+                &[account_route_ensure("gpt-5.4", "gpt-5.4")],
+            )
+            .unwrap();
+        assert!(result.created_models.is_empty());
+        assert_eq!(result.added_routes, ["gpt-5.4"]);
+        assert!(result.unchanged_routes.is_empty());
+
+        let after = storage.get_managed_model_v2("gpt-5.4").unwrap().unwrap();
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.slug, before.slug);
+        assert_eq!(after.display_name, before.display_name);
+        assert_eq!(after.description, before.description);
+        assert_eq!(after.provider, before.provider);
+        assert_eq!(after.family, before.family);
+        assert_eq!(after.category, before.category);
+        assert_eq!(after.tags, before.tags);
+        assert_eq!(after.origin, before.origin);
+        assert_eq!(after.enabled, before.enabled);
+        assert_eq!(after.supported_in_api, before.supported_in_api);
+        assert_eq!(after.visibility, before.visibility);
+        assert_eq!(after.sort_order, before.sort_order);
+        assert_eq!(after.context_window, before.context_window);
+        assert_eq!(after.max_context_window, before.max_context_window);
+        assert_eq!(
+            after.default_reasoning_effort,
+            before.default_reasoning_effort
+        );
+        assert_eq!(after.capabilities, before.capabilities);
+        assert_eq!(after.instructions_mode, before.instructions_mode);
+        assert_eq!(after.instructions_text, before.instructions_text);
+        assert_eq!(after.fast_policy, before.fast_policy);
+        assert_eq!(after.builtin_revision, before.builtin_revision);
+        assert_eq!(after.user_edited, before.user_edited);
+        assert_eq!(after.price, before.price);
+        assert_eq!(after.price_tiers, before.price_tiers);
+        assert_eq!(after.permission_group_ids, before.permission_group_ids);
+        assert_eq!(after.created_at, before.created_at);
+        assert_eq!(after.updated_at, before.updated_at);
+        assert_eq!(after.routes.len(), before.routes.len() + 1);
+        assert_eq!(
+            after
+                .routes
+                .iter()
+                .find(|route| route.id == "preserved-route"),
+            before
+                .routes
+                .iter()
+                .find(|route| route.id == "preserved-route")
+        );
+
+        let repeated = storage
+            .upsert_missing_managed_models_and_ensure_routes_v2(
+                &[],
+                &[account_route_ensure("GPT-5.4", "GPT-5.4")],
+            )
+            .unwrap();
+        assert!(repeated.created_models.is_empty());
+        assert!(repeated.added_routes.is_empty());
+        assert_eq!(repeated.unchanged_routes, ["gpt-5.4"]);
+        assert_eq!(
+            storage
+                .get_managed_model_v2("gpt-5.4")
+                .unwrap()
+                .unwrap()
+                .routes
+                .len(),
+            after.routes.len()
+        );
+    }
+
+    #[test]
+    fn route_ensure_creates_a_model_and_updates_an_existing_model_in_one_batch() {
+        let storage = storage();
+        let existing = storage
+            .get_managed_model_v2("gpt-5.4-mini")
+            .unwrap()
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM model_routes
+                 WHERE model_id=?1 AND source_kind='account_pool' AND source_id='default'",
+                [&existing.id],
+            )
+            .unwrap();
+
+        let result = storage
+            .upsert_missing_managed_models_and_ensure_routes_v2(
+                &[custom_creation_candidate("account-discovered-new")],
+                &[
+                    account_route_ensure("account-discovered-new", "account-discovered-new"),
+                    account_route_ensure("gpt-5.4-mini", "gpt-5.4-mini"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(result.created_models, ["account-discovered-new"]);
+        assert_eq!(
+            result.added_routes,
+            ["account-discovered-new", "gpt-5.4-mini"]
+        );
+        assert!(result.unchanged_routes.is_empty());
+
+        let created = storage
+            .get_managed_model_v2("account-discovered-new")
+            .unwrap()
+            .unwrap();
+        assert_eq!(created.origin, "custom");
+        assert_eq!(created.routes.len(), 1);
+        assert_eq!(created.routes[0].upstream_model, "account-discovered-new");
+        assert!(storage
+            .get_managed_model_v2("gpt-5.4-mini")
+            .unwrap()
+            .unwrap()
+            .routes
+            .iter()
+            .any(|route| route.upstream_model == "gpt-5.4-mini"));
+    }
+
+    #[test]
+    fn route_ensure_rolls_back_created_models_and_routes_on_a_late_error() {
+        let storage = storage();
+        let existing = storage
+            .get_managed_model_v2("gpt-5.4-mini")
+            .unwrap()
+            .unwrap();
+        storage
+            .conn
+            .execute(
+                "DELETE FROM model_routes
+                 WHERE model_id=?1 AND source_kind='account_pool' AND source_id='default'",
+                [&existing.id],
+            )
+            .unwrap();
+        let mut invalid = account_route_ensure("gpt-5.4", "gpt-5.4");
+        invalid.route.source_kind = "invalid-source".to_string();
+
+        let error = storage
+            .upsert_missing_managed_models_and_ensure_routes_v2(
+                &[custom_creation_candidate("account-discovered-rollback")],
+                &[
+                    account_route_ensure(
+                        "account-discovered-rollback",
+                        "account-discovered-rollback",
+                    ),
+                    account_route_ensure("gpt-5.4-mini", "gpt-5.4-mini"),
+                    invalid,
+                ],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid model route"));
+        assert!(storage
+            .get_managed_model_v2("account-discovered-rollback")
+            .unwrap()
+            .is_none());
+        assert!(!storage
+            .get_managed_model_v2("gpt-5.4-mini")
+            .unwrap()
+            .unwrap()
+            .routes
+            .iter()
+            .any(|route| {
+                route.source_kind == "account_pool"
+                    && route.source_id == "default"
+                    && route.upstream_model.eq_ignore_ascii_case("gpt-5.4-mini")
+            }));
+    }
+
+    #[test]
     fn migration_ignores_incomplete_legacy_route_schema() {
         let storage = Storage::open_in_memory().expect("open storage");
         storage
@@ -2418,13 +4387,23 @@ mod tests {
         storage
             .apply_model_catalog_v2_migration()
             .expect("migrate partial legacy schema");
+        storage
+            .conn
+            .execute_batch(include_str!(
+                "../../migrations/127_model_catalog_cache_write_prices.sql"
+            ))
+            .expect("add cache-write pricing schema");
+        storage
+            .conn
+            .execute_batch(include_str!("../../migrations/129_model_fast_policy.sql"))
+            .expect("add model fast policy schema");
 
         assert_eq!(
             storage
                 .list_managed_models_v2(true)
                 .expect("list migrated models")
                 .len(),
-            9
+            10
         );
     }
 }

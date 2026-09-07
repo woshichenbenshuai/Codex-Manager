@@ -17,11 +17,12 @@ use super::{
     current_gateway_sse_keepalive_enabled, current_gateway_sse_keepalive_interval_ms,
     current_gateway_thread_aware_account_distribution_enabled,
     current_gateway_upstream_proxy_bypass_hosts, current_gateway_upstream_stream_timeout_ms,
-    current_gateway_upstream_total_timeout_ms, current_gateway_user_agent_version,
-    current_saved_service_addr, current_service_bind_mode, default_gateway_originator,
-    default_gateway_user_agent_version, env_override_catalog_value, env_override_reserved_keys,
-    env_override_unsupported_keys, normalize_optional_text, normalize_ui_appearance_preset,
-    normalize_ui_locale, normalize_ui_theme, parse_bool_with_default,
+    current_gateway_upstream_total_timeout_ms, current_gateway_user_agent,
+    current_gateway_user_agent_version, current_saved_service_addr, current_service_bind_mode,
+    default_gateway_originator, default_gateway_user_agent, default_gateway_user_agent_version,
+    env_override_catalog_value, env_override_reserved_keys, env_override_unsupported_keys,
+    normalize_optional_text, normalize_ui_appearance_preset, normalize_ui_locale,
+    normalize_ui_theme, normalize_ui_zoom_factor, parse_bool_with_default,
     residency_requirement_options, save_env_overrides_value, save_persisted_app_setting,
     save_persisted_bool_setting, sync_runtime_settings_from_storage,
     APP_SETTING_AUTHOR_SERVER_RECOMMENDATIONS_KEY, APP_SETTING_AUTHOR_SPONSORS_KEY,
@@ -39,11 +40,11 @@ use super::{
     APP_SETTING_GATEWAY_UPSTREAM_TOTAL_TIMEOUT_MS_KEY, APP_SETTING_GATEWAY_USER_AGENT_VERSION_KEY,
     APP_SETTING_KEEP_WINDOW_UI_MOUNTED_KEY, APP_SETTING_LIGHTWEIGHT_MODE_ON_CLOSE_TO_TRAY_KEY,
     APP_SETTING_PLUGIN_MARKET_MODE_KEY, APP_SETTING_PLUGIN_MARKET_SOURCE_URL_KEY,
-    APP_SETTING_SERVICE_ADDR_KEY, APP_SETTING_UI_APPEARANCE_PRESET_KEY,
-    APP_SETTING_UI_CODEX_CLI_GUIDE_DISMISSED_KEY, APP_SETTING_UI_LOCALE_KEY,
-    APP_SETTING_UI_LOW_TRANSPARENCY_KEY, APP_SETTING_UI_THEME_KEY,
-    APP_SETTING_UPDATE_AUTO_CHECK_KEY, SERVICE_BIND_MODE_ALL_INTERFACES,
-    SERVICE_BIND_MODE_LOOPBACK, SERVICE_BIND_MODE_SETTING_KEY,
+    APP_SETTING_SERVICE_ADDR_KEY, APP_SETTING_SHOW_MAIN_WINDOW_ON_STARTUP_KEY,
+    APP_SETTING_UI_APPEARANCE_PRESET_KEY, APP_SETTING_UI_CODEX_CLI_GUIDE_DISMISSED_KEY,
+    APP_SETTING_UI_LOCALE_KEY, APP_SETTING_UI_LOW_TRANSPARENCY_KEY, APP_SETTING_UI_THEME_KEY,
+    APP_SETTING_UI_ZOOM_FACTOR_KEY, APP_SETTING_UPDATE_AUTO_CHECK_KEY,
+    SERVICE_BIND_MODE_ALL_INTERFACES, SERVICE_BIND_MODE_LOOPBACK, SERVICE_BIND_MODE_SETTING_KEY,
 };
 
 const DEFAULT_FREE_ACCOUNT_MAX_MODEL_OPTIONS: &[&str] = &[
@@ -162,6 +163,8 @@ fn current_app_settings_value_inner(
     let runtime_time_zone = current_runtime_time_zone_value();
     let update_auto_check = setting_bool(&settings, APP_SETTING_UPDATE_AUTO_CHECK_KEY, true);
     let auto_start_enabled = setting_bool(&settings, APP_SETTING_AUTO_START_ENABLED_KEY, false);
+    let show_main_window_on_startup =
+        setting_bool(&settings, APP_SETTING_SHOW_MAIN_WINDOW_ON_STARTUP_KEY, true);
     let persisted_close_to_tray =
         setting_bool(&settings, APP_SETTING_CLOSE_TO_TRAY_ON_CLOSE_KEY, false);
     let close_to_tray = close_to_tray_on_close.unwrap_or(persisted_close_to_tray);
@@ -188,6 +191,12 @@ fn current_app_settings_value_inner(
         false,
     );
     let low_transparency = setting_bool(&settings, APP_SETTING_UI_LOW_TRANSPARENCY_KEY, false);
+    let zoom_factor = normalize_ui_zoom_factor(
+        settings
+            .get(APP_SETTING_UI_ZOOM_FACTOR_KEY)
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(1.0),
+    );
     let theme = normalize_ui_theme(settings.get(APP_SETTING_UI_THEME_KEY).map(String::as_str));
     let appearance_preset = normalize_ui_appearance_preset(
         settings
@@ -212,6 +221,8 @@ fn current_app_settings_value_inner(
         current_gateway_thread_aware_account_distribution_enabled();
     let quota_guard = current_gateway_quota_guard();
     let gateway_originator = current_gateway_originator();
+    let gateway_user_agent = current_gateway_user_agent();
+    let gateway_user_agent_default = default_gateway_user_agent();
     let gateway_user_agent_version = current_gateway_user_agent_version();
     let gateway_originator_default = default_gateway_originator();
     let gateway_user_agent_version_default = default_gateway_user_agent_version();
@@ -270,6 +281,7 @@ fn current_app_settings_value_inner(
             &settings,
             update_auto_check,
             auto_start_enabled,
+            show_main_window_on_startup,
             persisted_close_to_tray,
             keep_window_ui_mounted,
             lightweight_mode_on_close_to_tray,
@@ -379,9 +391,21 @@ fn current_app_settings_value_inner(
         "webAccessPasswordConfigured": web_access_password_configured(),
     });
     if let Some(object) = result.as_object_mut() {
+        object.insert("zoomFactor".to_string(), zoom_factor.into());
+        object.insert("gatewayUserAgent".to_string(), gateway_user_agent.into());
+        object.insert(
+            "gatewayUserAgentDefault".to_string(),
+            gateway_user_agent_default.into(),
+        );
+    }
+    if let Some(object) = result.as_object_mut() {
         object.insert(
             "keepWindowUiMounted".to_string(),
             serde_json::json!(keep_window_ui_mounted),
+        );
+        object.insert(
+            "showMainWindowOnStartup".to_string(),
+            show_main_window_on_startup.into(),
         );
         object.insert("autoStartEnabled".to_string(), auto_start_enabled.into());
         object.insert("autoStartSupported".to_string(), false.into());
@@ -590,6 +614,7 @@ fn persist_current_snapshot(
     settings: &HashMap<String, String>,
     update_auto_check: bool,
     auto_start_enabled: bool,
+    show_main_window_on_startup: bool,
     persisted_close_to_tray: bool,
     keep_window_ui_mounted: bool,
     lightweight_mode_on_close_to_tray: bool,
@@ -625,6 +650,10 @@ fn persist_current_snapshot(
 ) {
     let _ = save_persisted_bool_setting(APP_SETTING_UPDATE_AUTO_CHECK_KEY, update_auto_check);
     let _ = save_persisted_bool_setting(APP_SETTING_AUTO_START_ENABLED_KEY, auto_start_enabled);
+    let _ = save_persisted_bool_setting(
+        APP_SETTING_SHOW_MAIN_WINDOW_ON_STARTUP_KEY,
+        show_main_window_on_startup,
+    );
     let _ = save_persisted_bool_setting(
         APP_SETTING_CLOSE_TO_TRAY_ON_CLOSE_KEY,
         persisted_close_to_tray,

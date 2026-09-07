@@ -53,10 +53,12 @@ export interface AppSettings extends GatewayTransportValues {
   updateAutoCheck: boolean;
   autoStartEnabled: boolean;
   autoStartSupported: boolean;
+  showMainWindowOnStartup: boolean;
   closeToTrayOnClose: boolean;
   closeToTraySupported: boolean;
   keepWindowUiMounted: boolean;
   lowTransparency: boolean;
+  zoomFactor: number;
   lightweightModeOnCloseToTray: boolean;
   codexCliGuideDismissed: boolean;
   webAccessPasswordConfigured: boolean;
@@ -82,6 +84,8 @@ export interface AppSettings extends GatewayTransportValues {
   quotaGuard: QuotaGuardSettings;
   gatewayOriginator: string;
   gatewayOriginatorDefault: string;
+  gatewayUserAgent: string;
+  gatewayUserAgentDefault: string;
   gatewayUserAgentVersion: string;
   gatewayUserAgentVersionDefault: string;
   gatewayResidencyRequirement: string;

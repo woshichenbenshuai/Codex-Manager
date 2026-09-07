@@ -43,14 +43,17 @@ pub(crate) use account::export as account_export;
 pub(crate) use account::group as account_group;
 pub(crate) use account::import as account_import;
 pub(crate) use account::list as account_list;
+pub(crate) use account::models as account_models;
 pub(crate) use account::plan as account_plan;
 pub(crate) use account::proxy as account_proxy;
 pub(crate) use account::proxy_testing::presets::proxy_test_presets;
 pub(crate) use account::status as account_status;
+pub(crate) use account::test as account_test;
 pub(crate) use account::update as account_update;
 pub(crate) use account::warmup as account_warmup;
 pub(crate) use aggregate_api::{
-    create_aggregate_api, delete_aggregate_api, list_aggregate_apis, read_aggregate_api_secret,
+    associate_aggregate_api_models, create_aggregate_api, delete_aggregate_api,
+    fetch_aggregate_api_models, list_aggregate_apis, read_aggregate_api_secret,
     refresh_aggregate_api_balance, test_aggregate_api_connection, update_aggregate_api,
 };
 pub(crate) use apikey::create as apikey_create;
@@ -101,6 +104,7 @@ pub(crate) use usage::scheduler as usage_scheduler;
 pub(crate) use usage::snapshot_store as usage_snapshot_store;
 pub(crate) use usage::token_refresh as usage_token_refresh;
 
+pub use account_test::{set_account_test_event_handler, AccountTestEvent};
 pub use app_settings::{
     app_settings_get, app_settings_get_with_overrides, app_settings_set, author_content_get,
     bind_all_interfaces_enabled, bind_all_interfaces_enabled_for_mode,
@@ -112,13 +116,15 @@ pub use app_settings::{
     current_gateway_sse_keepalive_interval_ms,
     current_gateway_thread_aware_account_distribution_enabled,
     current_gateway_upstream_proxy_bypass_hosts, current_gateway_upstream_stream_timeout_ms,
-    current_gateway_upstream_total_timeout_ms, current_gateway_user_agent_version,
-    current_keep_window_ui_mounted_setting, current_lightweight_mode_on_close_to_tray_setting,
-    current_saved_service_addr, current_service_bind_mode, current_ui_appearance_preset,
-    current_ui_low_transparency_enabled, current_ui_theme, current_update_auto_check_enabled,
-    default_gateway_originator, default_gateway_user_agent_version, default_listener_bind_addr,
-    default_web_listener_addr, fetch_codex_latest_version, listener_bind_addr,
-    listener_bind_addr_for_mode, residency_requirement_options, set_auto_start_enabled_setting,
+    current_gateway_upstream_total_timeout_ms, current_gateway_user_agent,
+    current_gateway_user_agent_version, current_keep_window_ui_mounted_setting,
+    current_lightweight_mode_on_close_to_tray_setting, current_saved_service_addr,
+    current_service_bind_mode, current_show_main_window_on_startup_setting,
+    current_ui_appearance_preset, current_ui_low_transparency_enabled, current_ui_theme,
+    current_update_auto_check_enabled, default_gateway_originator, default_gateway_user_agent,
+    default_gateway_user_agent_version, default_listener_bind_addr, default_web_listener_addr,
+    fetch_codex_latest_version, listener_bind_addr, listener_bind_addr_for_mode,
+    residency_requirement_options, set_auto_start_enabled_setting,
     set_close_to_tray_on_close_setting, set_codex_cli_guide_dismissed,
     set_gateway_account_max_inflight, set_gateway_background_tasks,
     set_gateway_free_account_max_model, set_gateway_model_forward_rules, set_gateway_originator,
@@ -127,25 +133,26 @@ pub use app_settings::{
     set_gateway_sse_keepalive_interval_ms, set_gateway_thread_aware_account_distribution_enabled,
     set_gateway_upstream_proxy_bypass_hosts, set_gateway_upstream_proxy_url,
     set_gateway_upstream_stream_timeout_ms, set_gateway_upstream_total_timeout_ms,
-    set_gateway_user_agent_version, set_keep_window_ui_mounted_setting,
+    set_gateway_user_agent, set_gateway_user_agent_version, set_keep_window_ui_mounted_setting,
     set_lightweight_mode_on_close_to_tray_setting, set_saved_service_addr, set_service_bind_mode,
-    set_ui_appearance_preset, set_ui_low_transparency_enabled, set_ui_theme,
-    set_update_auto_check_enabled, sync_runtime_settings_from_storage, BackgroundTasksInput,
-    APP_SETTING_AUTO_START_ENABLED_KEY, APP_SETTING_CLOSE_TO_TRAY_ON_CLOSE_KEY,
-    APP_SETTING_DISTRIBUTION_ENABLED_KEY, APP_SETTING_ENV_OVERRIDES_KEY,
-    APP_SETTING_GATEWAY_ACCOUNT_MAX_INFLIGHT_KEY, APP_SETTING_GATEWAY_BACKGROUND_TASKS_KEY,
-    APP_SETTING_GATEWAY_FREE_ACCOUNT_MAX_MODEL_KEY, APP_SETTING_GATEWAY_MODEL_FORWARD_RULES_KEY,
-    APP_SETTING_GATEWAY_ORIGINATOR_KEY, APP_SETTING_GATEWAY_QUOTA_GUARD_KEY,
-    APP_SETTING_GATEWAY_REQUEST_COMPRESSION_ENABLED_KEY,
+    set_show_main_window_on_startup_setting, set_ui_appearance_preset,
+    set_ui_low_transparency_enabled, set_ui_theme, set_update_auto_check_enabled,
+    sync_runtime_settings_from_storage, BackgroundTasksInput, APP_SETTING_AUTO_START_ENABLED_KEY,
+    APP_SETTING_CLOSE_TO_TRAY_ON_CLOSE_KEY, APP_SETTING_DISTRIBUTION_ENABLED_KEY,
+    APP_SETTING_ENV_OVERRIDES_KEY, APP_SETTING_GATEWAY_ACCOUNT_MAX_INFLIGHT_KEY,
+    APP_SETTING_GATEWAY_BACKGROUND_TASKS_KEY, APP_SETTING_GATEWAY_FREE_ACCOUNT_MAX_MODEL_KEY,
+    APP_SETTING_GATEWAY_MODEL_FORWARD_RULES_KEY, APP_SETTING_GATEWAY_ORIGINATOR_KEY,
+    APP_SETTING_GATEWAY_QUOTA_GUARD_KEY, APP_SETTING_GATEWAY_REQUEST_COMPRESSION_ENABLED_KEY,
     APP_SETTING_GATEWAY_RESIDENCY_REQUIREMENT_KEY, APP_SETTING_GATEWAY_ROUTE_STRATEGY_KEY,
     APP_SETTING_GATEWAY_SSE_KEEPALIVE_ENABLED_KEY,
     APP_SETTING_GATEWAY_SSE_KEEPALIVE_INTERVAL_MS_KEY,
     APP_SETTING_GATEWAY_THREAD_AWARE_ACCOUNT_DISTRIBUTION_ENABLED_KEY,
     APP_SETTING_GATEWAY_UPSTREAM_PROXY_BYPASS_HOSTS_KEY,
     APP_SETTING_GATEWAY_UPSTREAM_PROXY_URL_KEY, APP_SETTING_GATEWAY_UPSTREAM_STREAM_TIMEOUT_MS_KEY,
-    APP_SETTING_GATEWAY_UPSTREAM_TOTAL_TIMEOUT_MS_KEY, APP_SETTING_GATEWAY_USER_AGENT_VERSION_KEY,
-    APP_SETTING_KEEP_WINDOW_UI_MOUNTED_KEY, APP_SETTING_LIGHTWEIGHT_MODE_ON_CLOSE_TO_TRAY_KEY,
-    APP_SETTING_SERVICE_ADDR_KEY, APP_SETTING_UI_APPEARANCE_PRESET_KEY,
+    APP_SETTING_GATEWAY_UPSTREAM_TOTAL_TIMEOUT_MS_KEY, APP_SETTING_GATEWAY_USER_AGENT_KEY,
+    APP_SETTING_GATEWAY_USER_AGENT_VERSION_KEY, APP_SETTING_KEEP_WINDOW_UI_MOUNTED_KEY,
+    APP_SETTING_LIGHTWEIGHT_MODE_ON_CLOSE_TO_TRAY_KEY, APP_SETTING_SERVICE_ADDR_KEY,
+    APP_SETTING_SHOW_MAIN_WINDOW_ON_STARTUP_KEY, APP_SETTING_UI_APPEARANCE_PRESET_KEY,
     APP_SETTING_UI_CODEX_CLI_GUIDE_DISMISSED_KEY, APP_SETTING_UI_LOW_TRANSPARENCY_KEY,
     APP_SETTING_UI_THEME_KEY, APP_SETTING_UPDATE_AUTO_CHECK_KEY,
     APP_SETTING_WEB_ACCESS_PASSWORD_HASH_KEY, APP_SETTING_WEB_AUTH_MODE_KEY, DEFAULT_ADDR,

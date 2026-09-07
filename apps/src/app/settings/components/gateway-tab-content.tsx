@@ -27,6 +27,8 @@ import {
   RESIDENCY_REQUIREMENT_LABELS,
   ROUTE_STRATEGY_LABELS,
   ensureModelForwardRuleRows,
+  formatFreeAccountMaxModelLabel,
+  resolveFreeAccountMaxModelOptions,
 } from "@/app/settings/settings-page-helpers";
 
 export function GatewayTabContent({
@@ -46,6 +48,10 @@ export function GatewayTabContent({
   gatewayOriginatorDraft,
   setGatewayOriginatorDraft,
   gatewayOriginatorDefault,
+  gatewayUserAgentInput,
+  gatewayUserAgentDraft,
+  setGatewayUserAgentDraft,
+  gatewayUserAgentDefault,
   upstreamProxyInput,
   upstreamProxyDraft,
   setUpstreamProxyDraft,
@@ -89,6 +95,10 @@ export function GatewayTabContent({
   gatewayOriginatorDraft: string | null;
   setGatewayOriginatorDraft: React.Dispatch<React.SetStateAction<string | null>>;
   gatewayOriginatorDefault: string;
+  gatewayUserAgentInput: string;
+  gatewayUserAgentDraft: string | null;
+  setGatewayUserAgentDraft: React.Dispatch<React.SetStateAction<string | null>>;
+  gatewayUserAgentDefault: string;
   upstreamProxyInput: string;
   upstreamProxyDraft: string | null;
   setUpstreamProxyDraft: React.Dispatch<React.SetStateAction<string | null>>;
@@ -167,6 +177,42 @@ export function GatewayTabContent({
               })
             }
           />
+        </div>
+
+        <div className="grid gap-2 border-t pt-6">
+          <Label>{t("Free 账号模型上限")}</Label>
+          <Select
+            value={snapshot.freeAccountMaxModel || "auto"}
+            onValueChange={(value) =>
+              updateSettings.mutate({ freeAccountMaxModel: value || "auto" })
+            }
+          >
+            <SelectTrigger
+              className="w-full md:w-[300px]"
+              aria-label={t("Free 账号模型上限")}
+            >
+              <SelectValue placeholder={t("选择 Free 账号模型上限")}>
+                {(value) => t(formatFreeAccountMaxModelLabel(String(value || "")))}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {resolveFreeAccountMaxModelOptions(
+                  snapshot.freeAccountMaxModel,
+                  snapshot.freeAccountMaxModelOptions,
+                ).map((model) => (
+                  <SelectItem key={model} value={model}>
+                    {t(formatFreeAccountMaxModelLabel(model))}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <p className="text-[10px] text-muted-foreground">
+            {t(
+              "设为“不限制”时，Free 账号可参与所有模型请求；选择具体模型后，目录中排在该模型之上的请求会跳过 Free 账号，但不会改写请求模型。混合模式会继续尝试其他账号，账号候选耗尽后仍按现有策略转聚合 API。",
+            )}
+          </p>
         </div>
 
         <div className="grid gap-4 border-t pt-6">
@@ -273,6 +319,34 @@ export function GatewayTabContent({
         </div>
 
         <div className="grid gap-2 border-t pt-6">
+          <Label htmlFor="gateway-user-agent">{t("全局 User-Agent")}</Label>
+          <Input
+            id="gateway-user-agent"
+            className="h-10 max-w-2xl font-mono"
+            value={gatewayUserAgentInput}
+            maxLength={512}
+            placeholder={gatewayUserAgentDefault}
+            onChange={(event) => setGatewayUserAgentDraft(event.target.value)}
+            onBlur={() => {
+              if (gatewayUserAgentDraft == null) return;
+              const nextUserAgent = gatewayUserAgentInput.trim();
+              if (nextUserAgent === (snapshot.gatewayUserAgent || "")) {
+                setGatewayUserAgentDraft(null);
+                return;
+              }
+              void updateSettings
+                .mutateAsync({ gatewayUserAgent: nextUserAgent })
+                .then(() => setGatewayUserAgentDraft(null))
+                .catch(() => undefined);
+            }}
+          />
+          <p className="text-[10px] text-muted-foreground">
+            {t("留空时使用 Codex 默认 User-Agent：")} <code>{gatewayUserAgentDefault}</code>
+            {t("。所有网关上游请求默认使用此值；聚合 API 单独设置时优先。清空后失焦即可恢复默认值。")}
+          </p>
+        </div>
+
+        <div className="grid gap-2">
           <Label>{t("上游 Originator")}</Label>
           <Input
             className="h-10 max-w-md font-mono"

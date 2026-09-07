@@ -9,8 +9,6 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const STRICT_REQUEST_PARAM_ALLOWLIST_ENV: &str = "CODEXMANAGER_STRICT_REQUEST_PARAM_ALLOWLIST";
-const CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL_ENV: &str =
-    "CODEXMANAGER_CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL";
 const COMPACT_MODEL_ENV: &str = "CODEXMANAGER_COMPACT_MODEL";
 const COMPACT_API_PATH_ENV: &str = "CODEXMANAGER_COMPACT_API_PATH";
 const CODEXMANAGER_DB_PATH_ENV: &str = "CODEXMANAGER_DB_PATH";
@@ -24,16 +22,6 @@ impl RuntimeEnvGuard {
     fn set(name: &'static str, value: &str) -> Self {
         let previous_value = std::env::var(name).ok();
         std::env::set_var(name, value);
-        crate::gateway::reload_runtime_config_from_env();
-        Self {
-            name,
-            previous_value,
-        }
-    }
-
-    fn clear(name: &'static str) -> Self {
-        let previous_value = std::env::var(name).ok();
-        std::env::remove_var(name);
         crate::gateway::reload_runtime_config_from_env();
         Self {
             name,
@@ -424,6 +412,47 @@ fn responses_overrides_model_and_reasoning_effort() {
 }
 
 #[test]
+fn responses_preserves_explicit_reserve_alias_against_platform_model_override() {
+    let body = json!({
+        "model": "gpt-reserve",
+        "reasoning": { "effort": "low" },
+        "input": "hello"
+    });
+    let out = apply_request_overrides_with_service_tier(
+        "/v1/responses",
+        serde_json::to_vec(&body).expect("serialize request body"),
+        Some("gpt-5.6-luna"),
+        Some("high"),
+        Some("flex"),
+        Some("https://chatgpt.com/backend-api/codex"),
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out).expect("parse output body");
+
+    assert_eq!(value["model"], "gpt-reserve");
+    assert_eq!(value["reasoning"]["effort"], "high");
+    assert_eq!(value["service_tier"], "flex");
+}
+
+#[test]
+fn responses_bound_non_luna_model_still_overrides_reserve_alias() {
+    let body = json!({
+        "model": "gpt-reserve",
+        "input": "hello"
+    });
+    let out = apply_request_overrides_with_service_tier(
+        "/v1/responses",
+        serde_json::to_vec(&body).expect("serialize request body"),
+        Some("gpt-5.4"),
+        None,
+        None,
+        Some("https://chatgpt.com/backend-api/codex"),
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out).expect("parse output body");
+
+    assert_eq!(value["model"], "gpt-5.4");
+}
+
+#[test]
 fn responses_maps_client_ultra_to_upstream_max_without_an_api_key_override() {
     let body = json!({
         "model": "gpt-5.6-sol",
@@ -654,37 +683,8 @@ fn responses_default_path_preserves_image_generation_tool() {
 }
 
 #[test]
-fn responses_default_path_auto_injects_image_generation_tool_for_codex_backend() {
+fn responses_default_path_does_not_inject_image_generation_tool() {
     let _guard = crate::test_env_guard();
-    let _inject_guard = RuntimeEnvGuard::set(CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL_ENV, "1");
-    let body = json!({
-        "model": "gpt-5.4",
-        "input": "帮我生成一个现场作业中台 logo",
-        "stream": true
-    });
-    let out = apply_request_overrides(
-        "/v1/responses",
-        serde_json::to_vec(&body).expect("serialize request body"),
-        None,
-        None,
-        Some("https://chatgpt.com/backend-api/codex"),
-    );
-    let value: serde_json::Value = serde_json::from_slice(&out).expect("parse output body");
-
-    let tools = value
-        .get("tools")
-        .and_then(serde_json::Value::as_array)
-        .expect("tools array");
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0]["type"], "image_generation");
-    assert_eq!(tools[0]["output_format"], "png");
-    assert!(tools[0].get("model").is_none());
-}
-
-#[test]
-fn responses_default_path_does_not_auto_inject_image_generation_tool_by_default() {
-    let _guard = crate::test_env_guard();
-    let _inject_guard = RuntimeEnvGuard::clear(CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL_ENV);
     let body = json!({
         "model": "gpt-5.4",
         "input": "帮我生成一个现场作业中台 logo",
@@ -704,39 +704,8 @@ fn responses_default_path_does_not_auto_inject_image_generation_tool_by_default(
 }
 
 #[test]
-fn responses_default_path_auto_inject_appends_without_duplicating_image_generation_tool() {
+fn responses_default_path_preserves_image_gen_function() {
     let _guard = crate::test_env_guard();
-    let _inject_guard = RuntimeEnvGuard::set(CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL_ENV, "1");
-    let body = json!({
-        "model": "gpt-5.4",
-        "input": "hello",
-        "tools": [{
-            "type": "web_search"
-        }]
-    });
-    let out = apply_request_overrides(
-        "/v1/responses",
-        serde_json::to_vec(&body).expect("serialize request body"),
-        None,
-        None,
-        Some("https://chatgpt.com/backend-api/codex"),
-    );
-    let value: serde_json::Value = serde_json::from_slice(&out).expect("parse output body");
-
-    let tools = value
-        .get("tools")
-        .and_then(serde_json::Value::as_array)
-        .expect("tools array");
-    assert_eq!(tools.len(), 2);
-    assert_eq!(tools[0]["type"], "web_search");
-    assert_eq!(tools[1]["type"], "image_generation");
-    assert_eq!(tools[1]["output_format"], "png");
-}
-
-#[test]
-fn responses_default_path_skips_auto_image_generation_when_image_gen_function_exists() {
-    let _guard = crate::test_env_guard();
-    let _inject_guard = RuntimeEnvGuard::set(CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL_ENV, "1");
     let body = json!({
         "model": "gpt-5.5",
         "input": "hello",
@@ -767,9 +736,8 @@ fn responses_default_path_skips_auto_image_generation_when_image_gen_function_ex
 }
 
 #[test]
-fn responses_default_path_skips_auto_image_generation_for_image_gen_function_names() {
+fn responses_default_path_preserves_image_gen_function_names() {
     let _guard = crate::test_env_guard();
-    let _inject_guard = RuntimeEnvGuard::set(CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL_ENV, "1");
 
     for function_name in ["image_gen", "image_gen__imagegen"] {
         let body = json!({
@@ -796,16 +764,15 @@ fn responses_default_path_skips_auto_image_generation_for_image_gen_function_nam
             .and_then(serde_json::Value::as_array)
             .expect("tools array");
 
-        assert_eq!(tools.len(), 1, "unexpected hosted tool for {function_name}");
+        assert_eq!(tools.len(), 1, "unexpected tool for {function_name}");
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["name"], function_name);
     }
 }
 
 #[test]
-fn responses_default_path_skips_auto_image_generation_when_image_gen_namespace_exists() {
+fn responses_default_path_preserves_image_gen_namespace() {
     let _guard = crate::test_env_guard();
-    let _inject_guard = RuntimeEnvGuard::set(CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL_ENV, "1");
     let body = json!({
         "model": "gpt-5.5",
         "input": "hello",
@@ -832,43 +799,6 @@ fn responses_default_path_skips_auto_image_generation_when_image_gen_namespace_e
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0]["type"], "namespace");
     assert_eq!(tools[0]["name"], "image_gen");
-}
-
-#[test]
-fn responses_default_path_skips_auto_image_generation_tool_when_disabled_or_spark_model() {
-    let _guard = crate::test_env_guard();
-    {
-        let _inject_guard = RuntimeEnvGuard::set(CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL_ENV, "0");
-        let body = json!({
-            "model": "gpt-5.4",
-            "input": "hello"
-        });
-        let out = apply_request_overrides(
-            "/v1/responses",
-            serde_json::to_vec(&body).expect("serialize request body"),
-            None,
-            None,
-            Some("https://chatgpt.com/backend-api/codex"),
-        );
-        let value: serde_json::Value = serde_json::from_slice(&out).expect("parse output body");
-        assert!(value.get("tools").is_none());
-    }
-    {
-        let _inject_guard = RuntimeEnvGuard::set(CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL_ENV, "1");
-        let body = json!({
-            "model": "gpt-5.4-spark",
-            "input": "hello"
-        });
-        let out = apply_request_overrides(
-            "/v1/responses",
-            serde_json::to_vec(&body).expect("serialize request body"),
-            None,
-            None,
-            Some("https://chatgpt.com/backend-api/codex"),
-        );
-        let value: serde_json::Value = serde_json::from_slice(&out).expect("parse output body");
-        assert!(value.get("tools").is_none());
-    }
 }
 
 #[test]
@@ -1438,7 +1368,6 @@ fn responses_official_allowlist_drops_stream_passthrough() {
 #[test]
 fn responses_dynamic_tools_are_mapped_to_tools_for_codex_backend() {
     let _guard = crate::test_env_guard();
-    let _inject_guard = RuntimeEnvGuard::set(CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL_ENV, "1");
     let body = json!({
         "model": "gpt-5.3-codex",
         "input": "hello",
@@ -1471,7 +1400,7 @@ fn responses_dynamic_tools_are_mapped_to_tools_for_codex_backend() {
         .get("tools")
         .and_then(serde_json::Value::as_array)
         .expect("tools array");
-    assert_eq!(tools.len(), 3);
+    assert_eq!(tools.len(), 2);
     assert!(value.get("dynamicTools").is_none());
     assert_eq!(
         tools[1].get("name").and_then(serde_json::Value::as_str),
@@ -1492,16 +1421,39 @@ fn responses_dynamic_tools_are_mapped_to_tools_for_codex_backend() {
             .and_then(serde_json::Value::as_str),
         Some("string")
     );
-    assert_eq!(
-        tools[2].get("type").and_then(serde_json::Value::as_str),
-        Some("image_generation")
+}
+
+#[test]
+fn responses_dynamic_tools_are_mapped_for_explicit_non_codex_upstream() {
+    let _guard = crate::test_env_guard();
+    let body = json!({
+        "model": "muse-spark-1.2-contributor",
+        "input": "hello",
+        "dynamicTools": [{
+            "name": "spawn_agent",
+            "description": "start a subagent",
+            "input_schema": {
+                "type": "object",
+                "properties": {"prompt": {"type": "string"}}
+            }
+        }]
+    });
+    let out = apply_request_overrides(
+        "/v1/responses",
+        serde_json::to_vec(&body).expect("serialize request body"),
+        None,
+        None,
+        Some("https://muse.example/v1"),
     );
-    assert_eq!(
-        tools[2]
-            .get("output_format")
-            .and_then(serde_json::Value::as_str),
-        Some("png")
-    );
+    let value: serde_json::Value = serde_json::from_slice(&out).expect("parse output body");
+    let tools = value
+        .get("tools")
+        .and_then(serde_json::Value::as_array)
+        .expect("tools array");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["type"], "function");
+    assert_eq!(tools[0]["name"], "spawn_agent");
+    assert!(value.get("dynamicTools").is_none());
 }
 
 /// 函数 `responses_preserves_priority_service_tier_for_codex_backend`
@@ -1932,6 +1884,74 @@ fn responses_applies_fast_service_tier_override_as_priority_for_codex_backend() 
 }
 
 #[test]
+fn responses_preserves_ultrafast_service_tier_for_codex_backend() {
+    let _guard = crate::test_env_guard();
+    let body = json!({
+        "model": "gpt-5.6-sol",
+        "input": "hello",
+        "service_tier": "UltraFast"
+    });
+    let out = apply_request_overrides(
+        "/v1/responses",
+        serde_json::to_vec(&body).expect("serialize request body"),
+        None,
+        None,
+        Some("https://chatgpt.com/backend-api/codex"),
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out).expect("parse output body");
+    assert_eq!(
+        value
+            .get("service_tier")
+            .and_then(serde_json::Value::as_str),
+        Some("ultrafast")
+    );
+}
+
+#[test]
+fn responses_applies_ultrafast_service_tier_override_without_mapping_to_priority() {
+    let _guard = crate::test_env_guard();
+    let body = json!({
+        "model": "gpt-5.6-sol",
+        "input": "hello"
+    });
+    let out = apply_request_overrides_with_service_tier(
+        "/v1/responses",
+        serde_json::to_vec(&body).expect("serialize request body"),
+        None,
+        None,
+        Some("ultrafast"),
+        Some("https://chatgpt.com/backend-api/codex"),
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out).expect("parse output body");
+    assert_eq!(
+        value
+            .get("service_tier")
+            .and_then(serde_json::Value::as_str),
+        Some("ultrafast")
+    );
+}
+
+#[test]
+fn responses_explicit_standard_override_omits_service_tier_for_codex_backend() {
+    let _guard = crate::test_env_guard();
+    let body = json!({
+        "model": "gpt-5.6-sol",
+        "input": "hello",
+        "service_tier": "ultrafast"
+    });
+    let out = apply_request_overrides_with_service_tier(
+        "/v1/responses",
+        serde_json::to_vec(&body).expect("serialize request body"),
+        None,
+        None,
+        Some("default"),
+        Some("https://chatgpt.com/backend-api/codex"),
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out).expect("parse output body");
+    assert!(value.get("service_tier").is_none());
+}
+
+#[test]
 fn responses_default_path_still_maps_fast_service_tier_to_priority_for_codex_backend() {
     let _guard = crate::test_env_guard();
     let body = json!({
@@ -1956,7 +1976,7 @@ fn responses_default_path_still_maps_fast_service_tier_to_priority_for_codex_bac
 }
 
 #[test]
-fn responses_default_path_maps_auto_service_tier_to_priority_for_codex_backend() {
+fn responses_default_path_omits_auto_service_tier_for_codex_backend() {
     let _guard = crate::test_env_guard();
     let body = json!({
         "model": "gpt-5.4",
@@ -1971,15 +1991,10 @@ fn responses_default_path_maps_auto_service_tier_to_priority_for_codex_backend()
         Some("https://chatgpt.com/backend-api/codex"),
     );
     let value: serde_json::Value = serde_json::from_slice(&out).expect("parse output body");
-    assert_eq!(
-        value
-            .get("service_tier")
-            .and_then(serde_json::Value::as_str),
-        Some("priority")
-    );
+    assert!(value.get("service_tier").is_none());
 }
 
-/// 函数 `responses_ignores_unsupported_flex_service_tier_override_for_codex_backend`
+/// 函数 `responses_preserves_flex_service_tier_override_for_codex_backend`
 ///
 /// 作者: gaohongshun
 ///
@@ -1991,7 +2006,7 @@ fn responses_default_path_maps_auto_service_tier_to_priority_for_codex_backend()
 /// # 返回
 /// 无
 #[test]
-fn responses_ignores_unsupported_flex_service_tier_override_for_codex_backend() {
+fn responses_preserves_flex_service_tier_override_for_codex_backend() {
     let _guard = crate::test_env_guard();
     let body = json!({
         "model": "gpt-5.3-codex",
@@ -2006,7 +2021,12 @@ fn responses_ignores_unsupported_flex_service_tier_override_for_codex_backend() 
         Some("https://chatgpt.com/backend-api/codex"),
     );
     let value: serde_json::Value = serde_json::from_slice(&out).expect("parse output body");
-    assert!(value.get("service_tier").is_none());
+    assert_eq!(
+        value
+            .get("service_tier")
+            .and_then(serde_json::Value::as_str),
+        Some("flex")
+    );
 }
 
 /// 函数 `responses_compact_uses_codex_compat_rewrite`

@@ -1,8 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useAccounts } from "@/hooks/useAccounts";
+import {
+  isAdminRole,
+  resolveSessionRole,
+  useAppSession,
+} from "@/hooks/useAppSession";
 import { useDesktopPageActive } from "@/hooks/useDesktopPageActive";
 import { usePageTransitionReady } from "@/hooks/usePageTransitionReady";
 import { useRuntimeCapabilities } from "@/hooks/useRuntimeCapabilities";
@@ -12,18 +18,26 @@ import {
   type AccountProxySource,
 } from "@/lib/api/account-client";
 import { useI18n } from "@/lib/i18n/provider";
+import { useAppStore } from "@/lib/store/useAppStore";
 import {
+  buildAccountsByMovedOrder,
   buildAccountsBySizeOrder,
   buildAccountOrderUpdates,
   type AccountEditorState,
+  type AccountMoveDirection,
+  type AccountMovePlacement,
   type DeleteDialogState,
+  getAccountStatusActionType,
   normalizeAccountPlanKey,
   normalizeTagsDraft,
   type StatusFilter,
 } from "@/app/accounts/accounts-page-helpers";
 import { AccountsPageView } from "@/app/accounts/accounts-page-view";
+import { AggregateApiModelAssociationModal } from "@/components/modals/aggregate-api-model-association-modal";
 import { isBannedAccount, isLimitedAccount } from "@/lib/utils/usage";
-import type { Account, ProxyProfile } from "@/types";
+import { accountClient } from "@/lib/api/account-client";
+import { getAppErrorMessage } from "@/lib/api/transport";
+import type { Account, AccountFetchedModel, ProxyProfile } from "@/types";
 
 type CleanupStatus =
   | "unavailable"
@@ -49,10 +63,33 @@ function normalizeCleanupStatus(status: string): CleanupStatus | null {
     : null;
 }
 
+function canBulkEnableAccount(account: Account): boolean {
+  return getAccountStatusActionType(account) === "enable";
+}
+
+function canBulkDisableAccount(account: Account): boolean {
+  return getAccountStatusActionType(account) === "disable";
+}
+
+interface AccountsPageContentProps {
+  serviceAddr: string;
+}
+
 export default function AccountsPage() {
+  const serviceAddr = useAppStore((state) => state.serviceStatus.addr);
+  return <AccountsPageContent key={serviceAddr || "default"} serviceAddr={serviceAddr} />;
+}
+
+function AccountsPageContent({ serviceAddr }: AccountsPageContentProps) {
   const { t } = useI18n();
+  const queryClient = useQueryClient();
   const { isDesktopRuntime, canUseBrowserDownloadExport } =
     useRuntimeCapabilities();
+  const { data: session, isLoading: isSessionLoading } = useAppSession();
+  const role = resolveSessionRole(session, isSessionLoading, isDesktopRuntime);
+  const canTestAccounts =
+    isDesktopRuntime || (!isSessionLoading && isAdminRole(role));
+  const canManageAccountModels = canTestAccounts;
   const {
     accounts,
     planTypes,
@@ -63,6 +100,7 @@ export default function AccountsPage() {
     refreshAllAccountRt,
     refreshAllAccounts,
     refreshAccountList,
+    refreshAccountsSilently,
     deleteAccount,
     deleteManyAccounts,
     cleanupAccountsByStatuses,
@@ -93,7 +131,9 @@ export default function AccountsPage() {
     updateAccountProfile,
     isUpdatingProfileAccountId,
     toggleAccountStatus,
+    toggleManyAccountStatuses,
     isUpdatingStatusAccountId,
+    isUpdatingManyStatuses,
   } = useAccounts();
   const isPageActive = useDesktopPageActive("/accounts/");
   usePageTransitionReady("/accounts/", !isServiceReady || !isLoading);
@@ -116,6 +156,7 @@ export default function AccountsPage() {
   const [tagsDraft, setTagsDraft] = useState("");
   const [noteDraft, setNoteDraft] = useState("");
   const [sortDraft, setSortDraft] = useState("");
+  const [forceEnabledDraft, setForceEnabledDraft] = useState(false);
   const [quotaPrimaryDraft, setQuotaPrimaryDraft] = useState("");
   const [quotaSecondaryDraft, setQuotaSecondaryDraft] = useState("");
   const [proxyDialogAccount, setProxyDialogAccount] = useState<Account | null>(null);
@@ -127,6 +168,28 @@ export default function AccountsPage() {
     useState<AccountProxySource>("custom");
   const [proxyProfileIdDraft, setProxyProfileIdDraft] = useState("");
   const [proxyUrlDraft, setProxyUrlDraft] = useState("");
+  const [accountTestAccountId, setAccountTestAccountId] = useState<string | null>(
+    null,
+  );
+  const [accountTestAccountSnapshot, setAccountTestAccountSnapshot] =
+    useState<Account | null>(null);
+  const [modelAssociationAccount, setModelAssociationAccount] =
+    useState<Account | null>(null);
+  const [modelAssociationItems, setModelAssociationItems] = useState<
+    AccountFetchedModel[]
+  >([]);
+  const [fetchingModelsAccountId, setFetchingModelsAccountId] = useState<
+    string | null
+  >(null);
+  const [isAssociatingModels, setIsAssociatingModels] = useState(false);
+  // 从最新账号列表派生弹窗里的账号，测试结束后状态徽章可自动刷新；
+  // 列表短暂重取时回退到快照，避免弹窗闪烁关闭。
+  const accountTestAccount = useMemo(
+    () =>
+      accounts.find((account) => account.id === accountTestAccountId) ??
+      accountTestAccountSnapshot,
+    [accounts, accountTestAccountId, accountTestAccountSnapshot],
+  );
 
   const [accountEditorState, setAccountEditorState] =
     useState<AccountEditorState | null>(null);
@@ -263,6 +326,27 @@ export default function AccountsPage() {
     () => selectedIds.filter((id) => accountIdSet.has(id)),
     [accountIdSet, selectedIds],
   );
+  const selectedAccounts = useMemo(
+    () =>
+      effectiveSelectedIds
+        .map((id) => accounts.find((account) => account.id === id))
+        .filter((account): account is Account => Boolean(account)),
+    [accounts, effectiveSelectedIds],
+  );
+  const selectedEnableTargetIds = useMemo(
+    () =>
+      selectedAccounts
+        .filter((account) => canBulkEnableAccount(account))
+        .map((account) => account.id),
+    [selectedAccounts],
+  );
+  const selectedDisableTargetIds = useMemo(
+    () =>
+      selectedAccounts
+        .filter((account) => canBulkDisableAccount(account))
+        .map((account) => account.id),
+    [selectedAccounts],
+  );
   const exportSelectionCount = effectiveSelectedIds.length;
   const exportTargetCount =
     exportSelectionCount > 0 ? exportSelectionCount : accounts.length;
@@ -342,6 +426,66 @@ export default function AccountsPage() {
     setUsageModalOpen(true);
   };
 
+  const openModelAssociation = async (account: Account) => {
+    setFetchingModelsAccountId(account.id);
+    try {
+      const result = await accountClient.fetchAccountModels(account.id, serviceAddr);
+      setModelAssociationAccount(account);
+      setModelAssociationItems(result.items);
+    } catch (error) {
+      toast.error(`${t("拉取模型失败")}: ${getAppErrorMessage(error)}`);
+    } finally {
+      setFetchingModelsAccountId(null);
+    }
+  };
+
+  const handleModelAssociationOpenChange = (open: boolean) => {
+    if (!open && !isAssociatingModels) {
+      setModelAssociationAccount(null);
+      setModelAssociationItems([]);
+    }
+  };
+
+  const associateAccountModels = async (upstreamModels: string[]) => {
+    if (!modelAssociationAccount) return;
+    setIsAssociatingModels(true);
+    try {
+      const selected = new Set(upstreamModels);
+      const displayNames = Object.fromEntries(
+        modelAssociationItems
+          .filter((item) => selected.has(item.upstreamModel) && item.displayName)
+          .map((item) => [item.upstreamModel, item.displayName as string]),
+      );
+      const result = await accountClient.associateAccountModels(
+        modelAssociationAccount.id,
+        upstreamModels,
+        displayNames,
+        serviceAddr,
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["managed-models-v2"] }),
+        queryClient.invalidateQueries({ queryKey: ["startup-snapshot"] }),
+        queryClient.invalidateQueries({ queryKey: ["apikeys"] }),
+      ]);
+      toast.success(
+        t(
+          "关联完成：新增模型 {created}，追加 route {added}，未变更 {unchanged}",
+          {
+            created: result.createdModels.length,
+            added: result.addedRoutes.length,
+            unchanged: result.unchangedRoutes.length,
+          },
+        ),
+      );
+      setModelAssociationAccount(null);
+      setModelAssociationItems([]);
+    } catch (error) {
+      toast.error(`${t("关联模型失败")}: ${getAppErrorMessage(error)}`);
+    } finally {
+      setIsAssociatingModels(false);
+    }
+  };
+
   const handleUsageModalOpenChange = (open: boolean) => {
     setUsageModalOpen(open);
     if (!open) {
@@ -359,6 +503,32 @@ export default function AccountsPage() {
       ids: [...effectiveSelectedIds],
       count: effectiveSelectedIds.length,
     });
+  };
+
+  const handleToggleSelectedStatus = async (enabled: boolean) => {
+    if (!effectiveSelectedIds.length) {
+      toast.error(t("请先选择账号"));
+      return;
+    }
+    const targetIds = enabled ? selectedEnableTargetIds : selectedDisableTargetIds;
+    if (targetIds.length === 0) {
+      toast.info(
+        enabled
+          ? t("当前选中账号没有可开启项")
+          : t("当前选中账号没有可关闭项"),
+      );
+      return;
+    }
+
+    try {
+      await toggleManyAccountStatuses(
+        targetIds,
+        enabled,
+        effectiveSelectedIds.length,
+      );
+    } catch {
+      // hook 内统一处理 toast，这里保留当前选择
+    }
   };
 
   const openCleanupDialog = () => {
@@ -495,6 +665,23 @@ const toggleCleanupStatus = (rawStatus: string) => {
     setProxyUrlDraft("");
   };
 
+  const openAccountTest = (account: Account) => {
+    if (!canTestAccounts) return;
+    setAccountTestAccountId(account.id);
+    setAccountTestAccountSnapshot(account);
+  };
+
+  const handleAccountTestOpenChange = (open: boolean) => {
+    if (open) return;
+    setAccountTestAccountId(null);
+    setAccountTestAccountSnapshot(null);
+  };
+
+  // 测试结束后静默刷新账号状态（不弹「账号用量已刷新」），让弹窗徽章与列表同步。
+  const handleAccountTestFinished = () => {
+    void refreshAccountsSilently();
+  };
+
   const handleTestProxySettings = async () => {
     if (!proxyDialogAccount) return;
     try {
@@ -583,6 +770,7 @@ const toggleCleanupStatus = (rawStatus: string) => {
       currentTags: account.tags.join(", "),
       currentNote: account.note || "",
       currentSort: account.priority,
+      currentForceEnabled: account.status.trim().toLowerCase() === "force_enabled",
       currentQuotaPrimaryWindowTokens: account.quotaCapacityPrimaryWindowTokens,
       currentQuotaSecondaryWindowTokens: account.quotaCapacitySecondaryWindowTokens,
     });
@@ -591,6 +779,7 @@ const toggleCleanupStatus = (rawStatus: string) => {
     setTagsDraft(account.tags.join(", "));
     setNoteDraft(account.note || "");
     setSortDraft(String(account.priority));
+    setForceEnabledDraft(account.status.trim().toLowerCase() === "force_enabled");
     setQuotaPrimaryDraft(
       account.quotaCapacityPrimaryWindowTokens == null
         ? ""
@@ -603,42 +792,81 @@ const toggleCleanupStatus = (rawStatus: string) => {
     );
   };
 
-  const handleMoveAccount = async (
+  const handleToggleForceEnabled = async (account: Account) => {
+    const normalizedStatus = account.status.trim().toLowerCase();
+    if (["disabled", "inactive", "unavailable", "banned"].includes(normalizedStatus)) {
+      return;
+    }
+    try {
+      await updateAccountProfile(account.id, {
+        status: normalizedStatus === "force_enabled" ? "active" : "force_enabled",
+      });
+    } catch {
+      // mutation 已统一处理 toast，这里保持菜单状态不变
+    }
+  };
+
+  // 顶部/底部按全量列表定位，上移/下移仍按当前筛选结果取相邻账号。
+  const resolveAccountMovePlacement = (
     account: Account,
-    direction: "up" | "down",
-  ) => {
+    direction: AccountMoveDirection,
+  ): AccountMovePlacement | null => {
+    if (direction === "top" || direction === "bottom") {
+      const boundaryAccount =
+        direction === "top" ? accounts[0] : accounts[accounts.length - 1];
+      if (boundaryAccount?.id === account.id) {
+        toast.info(
+          direction === "top"
+            ? t("当前账号已经在最前面")
+            : t("当前账号已经在最后面"),
+        );
+        return null;
+      }
+      return { type: direction };
+    }
+
     const filteredIndex = filteredAccountIndexMap.get(account.id);
     if (filteredIndex == null) {
       toast.error(t("未找到当前账号，请刷新后重试"));
-      return;
+      return null;
     }
 
     const targetFilteredIndex =
       direction === "up" ? filteredIndex - 1 : filteredIndex + 1;
     if (targetFilteredIndex < 0) {
       toast.info(t("当前账号已经在最前面"));
-      return;
+      return null;
     }
     if (targetFilteredIndex >= filteredAccounts.length) {
       toast.info(t("当前账号已经在最后面"));
+      return null;
+    }
+
+    return {
+      type: direction === "up" ? "before" : "after",
+      anchorAccountId: filteredAccounts[targetFilteredIndex].id,
+    };
+  };
+
+  const handleMoveAccount = async (
+    account: Account,
+    direction: AccountMoveDirection,
+  ) => {
+    const placement = resolveAccountMovePlacement(account, direction);
+    if (!placement) {
       return;
     }
 
-    const targetAccount = filteredAccounts[targetFilteredIndex];
-    const reorderedAccounts = accounts.filter((item) => item.id !== account.id);
-    const anchorIndex = reorderedAccounts.findIndex(
-      (item) => item.id === targetAccount.id,
+    const reorderedAccounts = buildAccountsByMovedOrder(
+      accounts,
+      account,
+      placement,
     );
-    if (anchorIndex === -1) {
+    if (!reorderedAccounts) {
       toast.error(t("未找到目标账号，请刷新后重试"));
       return;
     }
 
-    reorderedAccounts.splice(
-      direction === "up" ? anchorIndex : anchorIndex + 1,
-      0,
-      account,
-    );
     const updates = buildAccountOrderUpdates(reorderedAccounts);
     if (!updates.length) {
       toast.info(t("账号顺序未变化"));
@@ -722,6 +950,7 @@ const toggleCleanupStatus = (rawStatus: string) => {
       nextTagsText === accountEditorState.currentTags &&
       nextNote === accountEditorState.currentNote &&
       nextSort === accountEditorState.currentSort &&
+      forceEnabledDraft === accountEditorState.currentForceEnabled &&
       nextPrimaryCapacity === accountEditorState.currentQuotaPrimaryWindowTokens &&
       nextSecondaryCapacity === accountEditorState.currentQuotaSecondaryWindowTokens
     ) {
@@ -736,6 +965,12 @@ const toggleCleanupStatus = (rawStatus: string) => {
         note: nextNote || null,
         tags: nextTags,
         sort: nextSort,
+        status:
+          forceEnabledDraft === accountEditorState.currentForceEnabled
+            ? undefined
+            : forceEnabledDraft
+              ? "force_enabled"
+              : "active",
         quotaCapacityPrimaryWindowTokens: nextPrimaryCapacity ?? 0,
         quotaCapacitySecondaryWindowTokens: nextSecondaryCapacity ?? 0,
       });
@@ -758,6 +993,7 @@ const toggleCleanupStatus = (rawStatus: string) => {
   };
 
   return (
+    <>
     <AccountsPageView
       accounts={accounts}
       planTypes={planTypes}
@@ -774,6 +1010,8 @@ const toggleCleanupStatus = (rawStatus: string) => {
       visibleAccounts={visibleAccounts}
       filteredAccountIndexMap={filteredAccountIndexMap}
       effectiveSelectedIds={effectiveSelectedIds}
+      selectedEnableTargetCount={selectedEnableTargetIds.length}
+      selectedDisableTargetCount={selectedDisableTargetIds.length}
       addAccountModalOpen={addAccountModalOpen}
       usageModalOpen={usageModalOpen}
       exportDialogOpen={exportDialogOpen}
@@ -789,6 +1027,11 @@ const toggleCleanupStatus = (rawStatus: string) => {
       proxyDialogAccount={proxyDialogAccount}
       proxySettings={proxySettings}
       proxyProfiles={proxyProfiles}
+      canTestAccounts={canTestAccounts}
+      canManageAccountModels={canManageAccountModels}
+      fetchingModelsAccountId={fetchingModelsAccountId}
+      openModelAssociation={openModelAssociation}
+      accountTestAccount={accountTestAccount}
       isProxySettingsLoading={isProxySettingsLoading}
       proxyEnabledDraft={proxyEnabledDraft}
       proxySourceDraft={proxySourceDraft}
@@ -800,6 +1043,7 @@ const toggleCleanupStatus = (rawStatus: string) => {
       tagsDraft={tagsDraft}
       noteDraft={noteDraft}
       sortDraft={sortDraft}
+      forceEnabledDraft={forceEnabledDraft}
       quotaPrimaryDraft={quotaPrimaryDraft}
       quotaSecondaryDraft={quotaSecondaryDraft}
       isRefreshingAllAccounts={isRefreshingAllAccounts}
@@ -817,6 +1061,7 @@ const toggleCleanupStatus = (rawStatus: string) => {
       isReorderingAccounts={isReorderingAccounts}
       isUpdatingProfileAccountId={isUpdatingProfileAccountId}
       isUpdatingStatusAccountId={isUpdatingStatusAccountId}
+      isUpdatingManyStatuses={isUpdatingManyStatuses}
       statusFilterOptions={statusFilterOptions}
       importFileActionLabel={importFileActionLabel}
       importDirectoryActionLabel={importDirectoryActionLabel}
@@ -837,6 +1082,7 @@ const toggleCleanupStatus = (rawStatus: string) => {
       setTagsDraft={setTagsDraft}
       setNoteDraft={setNoteDraft}
       setSortDraft={setSortDraft}
+      setForceEnabledDraft={setForceEnabledDraft}
       setQuotaPrimaryDraft={setQuotaPrimaryDraft}
       setQuotaSecondaryDraft={setQuotaSecondaryDraft}
       setPage={setPage}
@@ -849,6 +1095,8 @@ const toggleCleanupStatus = (rawStatus: string) => {
       openUsage={openUsage}
       handleUsageModalOpenChange={handleUsageModalOpenChange}
       handleDeleteSelected={handleDeleteSelected}
+      handleEnableSelected={() => void handleToggleSelectedStatus(true)}
+      handleDisableSelected={() => void handleToggleSelectedStatus(false)}
       openCleanupDialog={openCleanupDialog}
       toggleCleanupStatus={toggleCleanupStatus}
       handleConfirmCleanupStatuses={handleConfirmCleanupStatuses}
@@ -858,6 +1106,9 @@ const toggleCleanupStatus = (rawStatus: string) => {
       handleDeleteSingle={handleDeleteSingle}
       openProxyDialog={openProxyDialog}
       handleProxyDialogOpenChange={handleProxyDialogOpenChange}
+      openAccountTest={openAccountTest}
+      handleAccountTestOpenChange={handleAccountTestOpenChange}
+      onAccountTestFinished={handleAccountTestFinished}
       handleSaveProxySettings={handleSaveProxySettings}
       handleClearProxySettings={handleClearProxySettings}
       handleTestProxySettings={handleTestProxySettings}
@@ -875,7 +1126,17 @@ const toggleCleanupStatus = (rawStatus: string) => {
       refreshAccount={refreshAccount}
       clearPreferredAccount={clearPreferredAccount}
       setPreferredAccount={setPreferredAccount}
+      toggleForceEnabled={handleToggleForceEnabled}
       toggleAccountStatus={toggleAccountStatus}
     />
+      <AggregateApiModelAssociationModal
+        open={isPageActive && Boolean(modelAssociationAccount)}
+        onOpenChange={handleModelAssociationOpenChange}
+        sourceName={modelAssociationAccount?.name || t("账号模型")}
+        items={modelAssociationItems}
+        isSaving={isAssociatingModels}
+        onAssociate={associateAccountModels}
+      />
+    </>
   );
 }

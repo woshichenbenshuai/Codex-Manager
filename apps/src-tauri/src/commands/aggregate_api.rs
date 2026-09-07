@@ -28,6 +28,7 @@ pub async fn service_aggregate_api_list(addr: Option<String>) -> Result<serde_js
 /// - supplier_name: 参数 supplier_name
 /// - sort: 参数 sort
 /// - url: 参数 url
+/// - user_agent: 参数 user_agent
 /// - key: 参数 key
 ///
 /// # 返回
@@ -39,6 +40,7 @@ pub async fn service_aggregate_api_create(
     supplier_name: Option<String>,
     sort: Option<i64>,
     url: Option<String>,
+    user_agent: Option<String>,
     key: Option<String>,
     auth_type: Option<String>,
     auth_custom_enabled: Option<bool>,
@@ -60,6 +62,7 @@ pub async fn service_aggregate_api_create(
         "supplierName": supplier_name,
         "sort": sort,
         "url": url,
+        "userAgent": user_agent,
         "key": key,
         "authType": auth_type,
         "authCustomEnabled": auth_custom_enabled,
@@ -92,6 +95,7 @@ pub async fn service_aggregate_api_create(
 /// - supplier_name: 参数 supplier_name
 /// - sort: 参数 sort
 /// - url: 参数 url
+/// - user_agent: 参数 user_agent
 /// - key: 参数 key
 ///
 /// # 返回
@@ -105,6 +109,7 @@ pub async fn service_aggregate_api_update(
     sort: Option<i64>,
     status: Option<String>,
     url: Option<String>,
+    user_agent: Option<String>,
     key: Option<String>,
     auth_type: Option<String>,
     auth_custom_enabled: Option<bool>,
@@ -128,6 +133,7 @@ pub async fn service_aggregate_api_update(
         "sort": sort,
         "status": status,
         "url": url,
+        "userAgent": user_agent,
         "key": key,
         "authType": auth_type,
         "authCustomEnabled": auth_custom_enabled,
@@ -217,4 +223,24 @@ pub async fn service_aggregate_api_refresh_balance(
 ) -> Result<serde_json::Value, String> {
     let params = serde_json::json!({ "id": id });
     rpc_call_in_background("aggregateApi/refreshBalance", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_aggregate_api_fetch_models(
+    addr: Option<String>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({ "apiId": id });
+    rpc_call_in_background("aggregateApi/fetchModels", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_aggregate_api_associate_models(
+    addr: Option<String>,
+    api_id: String,
+    upstream_models: Vec<String>,
+    display_names: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({ "apiId": api_id, "upstreamModels": upstream_models, "displayNames": display_names });
+    rpc_call_in_background("aggregateApi/associateModels", addr, Some(params)).await
 }

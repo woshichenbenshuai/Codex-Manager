@@ -26,11 +26,7 @@ const runnable = compiled.outputText
     "",
   );
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(runnable).toString("base64")}`;
-const {
-  managedModelV2ToModelInfo,
-  serializeManagedModelV2ForCodexCache,
-  serializeManagedModelsV2ForCodexCache,
-} = await import(moduleUrl);
+const { managedModelV2ToModelInfo } = await import(moduleUrl);
 
 function model(overrides = {}) {
   return {
@@ -52,7 +48,7 @@ function model(overrides = {}) {
     defaultReasoningEffort: "low",
     capabilities: {
       reasoning_efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
-      service_tiers: ["priority"],
+      service_tiers: ["priority", "ultrafast"],
       additional_speed_tiers: ["fast"],
       input_modalities: ["text", "image"],
       output_modalities: ["text"],
@@ -114,32 +110,6 @@ function model(overrides = {}) {
   };
 }
 
-test("Codex cache export preserves GPT-5.6 Ultra runtime metadata without prompts", () => {
-  const exported = serializeManagedModelV2ForCodexCache(model());
-
-  assert.deepEqual(
-    exported.supported_reasoning_levels.map(({ effort }) => effort),
-    ["low", "medium", "high", "xhigh", "max", "ultra"],
-  );
-  assert.equal(exported.multi_agent_version, "v2");
-  assert.equal(exported.tool_mode, "code_mode_only");
-  assert.equal(exported.use_responses_lite, true);
-  assert.equal(exported.max_context_window, 372000);
-  assert.equal(exported.comp_hash, "3000");
-  assert.equal(exported.default_verbosity, "low");
-  assert.equal(exported.apply_patch_tool_type, "freeform");
-  assert.deepEqual(exported.additional_speed_tiers, ["fast"]);
-  assert.deepEqual(exported.output_modalities, ["text"]);
-  assert.deepEqual(exported.supported_endpoints, [
-    "/v1/responses",
-    "/v1/chat/completions",
-  ]);
-  assert.equal(exported.supports_text_generation, true);
-  assert.equal(exported.base_instructions, "");
-  assert.equal(exported.include_skills_usage_instructions, false);
-  assert.equal("model_messages" in exported, false);
-});
-
 test("managed model adapter carries non-prompt Codex runtime metadata", () => {
   const info = managedModelV2ToModelInfo(model());
 
@@ -149,6 +119,18 @@ test("managed model adapter carries non-prompt Codex runtime metadata", () => {
   assert.equal(info.useResponsesLite, true);
   assert.equal(info.compHash, "3000");
   assert.deepEqual(info.additionalSpeedTiers, ["fast"]);
+  assert.deepEqual(info.serviceTiers, [
+    {
+      id: "priority",
+      name: "Fast",
+      description: "1.5x speed, increased usage",
+    },
+    {
+      id: "ultrafast",
+      name: "Ultrafast",
+      description: "The fastest available responses for latency-sensitive work.",
+    },
+  ]);
   assert.deepEqual(info.outputModalities, ["text"]);
   assert.deepEqual(info.supportedEndpoints, [
     "/v1/responses",
@@ -181,34 +163,16 @@ test("managed model adapter accepts camelCase capability names and legacy defaul
   assert.equal(legacyInfo.supportsTextGeneration, true);
 });
 
-test("Codex cache export excludes models without text generation support", () => {
-  const imageModel = model({
-    id: "builtin:gpt-image-2",
-    slug: "gpt-image-2",
-    displayName: "GPT Image 2",
-    sortOrder: 2,
-    capabilities: {
-      output_modalities: ["image"],
-      supported_endpoints: ["/v1/images/generations", "/v1/images/edits"],
-      supports_text_generation: false,
-    },
-  });
-  const legacyModel = model({
-    id: "custom:legacy-text-model",
-    slug: "legacy-text-model",
-    displayName: "Legacy Text Model",
-    sortOrder: 3,
-    capabilities: {},
-  });
-
-  const exported = serializeManagedModelsV2ForCodexCache([
-    imageModel,
-    legacyModel,
-    model(),
-  ]);
-
-  assert.deepEqual(
-    exported.map(({ slug }) => slug),
-    ["gpt-5.6-sol", "legacy-text-model"],
+test("managed model adapter does not invent Fast speed copy for custom models", () => {
+  const info = managedModelV2ToModelInfo(
+    model({
+      slug: "custom-fast-model",
+      origin: "custom",
+      capabilities: { service_tiers: ["priority"] },
+    }),
   );
+
+  assert.deepEqual(info.serviceTiers, [
+    { id: "priority", name: "Fast", description: "" },
+  ]);
 });

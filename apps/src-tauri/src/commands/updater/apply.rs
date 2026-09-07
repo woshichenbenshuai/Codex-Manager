@@ -1,8 +1,7 @@
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -16,7 +15,7 @@ use super::runtime::current_exe_path;
 #[cfg(target_os = "windows")]
 use super::runtime::CREATE_NO_WINDOW;
 use super::state::{
-    clear_pending_update, pending_update_path, read_pending_update, script_dir_from_pending,
+    pending_update_path, read_pending_update, script_dir_from_pending,
 };
 
 /// 函数 `append_apply_log`
@@ -32,23 +31,7 @@ use super::state::{
 /// # 返回
 /// 无
 fn append_apply_log(log_path: &Path, message: &str) {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|value| value.as_secs())
-        .unwrap_or(0);
-    let line = format!("[{timestamp}] {message}\n");
-
-    if let Some(parent) = log_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if let Ok(mut file) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-    {
-        let _ = file.write_all(line.as_bytes());
-        let _ = file.flush();
-    }
+    super::append_update_runtime_log(log_path, message);
 }
 
 /// 函数 `log_path_for_script_dir`
@@ -731,7 +714,6 @@ pub(super) fn launch_installer_impl(app: tauri::AppHandle) -> Result<UpdateActio
         &installer_log_path,
         &format!("安装包已启动：{}", installer_path.display()),
     );
-    clear_pending_update(&app)?;
 
     Ok(UpdateActionResponse {
         ok: true,

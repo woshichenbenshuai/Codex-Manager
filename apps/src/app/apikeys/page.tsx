@@ -83,6 +83,7 @@ const ROTATION_STRATEGY_LABELS: Record<string, string> = {
   account_rotation: "账号轮转",
   aggregate_api_rotation: "聚合API轮转",
   hybrid_rotation: "混合轮转（账号优先）",
+  hybrid_aggregate_first_rotation: "混合轮转（聚合优先）",
 };
 
 function userCanOwnApiKey(user: AppUser): boolean {
@@ -193,20 +194,20 @@ export default function ApiKeysPage() {
   );
   const [browserOrigin, setBrowserOrigin] = useState("");
   const { data: accountManagerStatus } = useQuery({
-    queryKey: ["account-manager", "status"],
-    queryFn: () => appClient.getAccountManagerStatus(),
+    queryKey: ["account-manager", "status", serviceAddr || null],
+    queryFn: () => appClient.getAccountManagerStatus(serviceAddr),
     enabled: isUsageQueryEnabled && isPageActive && showMemberOwnership,
     retry: 1,
   });
   const { data: appUsers = [] } = useQuery<AppUser[]>({
-    queryKey: ["account-manager", "users"],
-    queryFn: () => appClient.listAppUsers(),
+    queryKey: ["account-manager", "users", serviceAddr || null],
+    queryFn: () => appClient.listAppUsers(serviceAddr),
     enabled: isUsageQueryEnabled && isPageActive && showMemberOwnership,
     retry: 1,
   });
   const { data: apiKeyOwners = [] } = useQuery<ApiKeyOwner[]>({
-    queryKey: ["account-manager", "api-key-owners"],
-    queryFn: () => appClient.listApiKeyOwners(),
+    queryKey: ["account-manager", "api-key-owners", serviceAddr || null],
+    queryFn: () => appClient.listApiKeyOwners(serviceAddr),
     enabled: isUsageQueryEnabled && isPageActive && showMemberOwnership,
     retry: 1,
   });
@@ -260,6 +261,15 @@ export default function ApiKeysPage() {
     setCcSwitchImportingId(null);
   }, [isPageActive]);
 
+  useEffect(() => {
+    setRevealedSecrets({});
+    setLoadingSecretId(null);
+    setApiKeyModalOpen(false);
+    setEditingKeyId(null);
+    setDeleteKeyId(null);
+    setCcSwitchImportingId(null);
+  }, [serviceAddr]);
+
   const editingApiKey = useMemo(
     () => apiKeys.find((item) => item.id === editingKeyId) || null,
     [apiKeys, editingKeyId],
@@ -267,10 +277,10 @@ export default function ApiKeysPage() {
   const handleOwnerSaved = async () => {
     await Promise.all([
       queryClient.invalidateQueries({
-        queryKey: ["account-manager", "api-key-owners"],
+        queryKey: ["account-manager", "api-key-owners", serviceAddr || null],
       }),
       queryClient.invalidateQueries({
-        queryKey: ["account-manager", "users"],
+        queryKey: ["account-manager", "users", serviceAddr || null],
       }),
       queryClient.invalidateQueries({ queryKey: ["apikeys"] }),
     ]);
@@ -278,7 +288,7 @@ export default function ApiKeysPage() {
   const { data: usageOverview, isPending: isUsageOverviewLoading } = useQuery({
     queryKey: ["apikey-usage-overview", serviceAddr || null],
     queryFn: async () => {
-      const stats = await accountClient.listApiKeyUsageStats();
+      const stats = await accountClient.listApiKeyUsageStats(serviceAddr);
       const usageByKey = stats.reduce<Record<string, number>>(
         (result, item) => {
           const keyId = String(item.keyId || "").trim();
@@ -687,7 +697,7 @@ export default function ApiKeysPage() {
               ) : apiKeys.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={showMemberOwnership ? 10 : 9} className="h-48 text-center">
-                    <div className="flex flex-col items-center justify-center gap-2 text-muted-foreground">
+                    <div className="flex w-[calc(100dvw-6rem)] flex-col items-center justify-center gap-2 text-muted-foreground sm:w-auto">
                       <Plus className="h-8 w-8 opacity-20" />
                       <p>{t("创建密钥")}</p>
                     </div>
@@ -736,24 +746,28 @@ export default function ApiKeysPage() {
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="h-7 w-7 text-muted-foreground hover:text-primary"
+                            className="h-8 w-8 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary active:scale-95"
                             disabled={!isServiceReady}
                             onClick={() => void toggleSecret(key.id)}
+                            title={revealed ? t("隐藏密钥") : t("显示密钥")}
+                            aria-label={revealed ? t("隐藏密钥") : t("显示密钥")}
                           >
                             {revealed ? (
-                              <EyeOff className="h-3.5 w-3.5" />
+                              <EyeOff className="h-4 w-4" />
                             ) : (
-                              <Eye className="h-3.5 w-3.5" />
+                              <Eye className="h-4 w-4" />
                             )}
                           </Button>
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="h-7 w-7 text-muted-foreground hover:text-primary"
+                            className="h-8 w-8 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary active:scale-95"
                             disabled={!isServiceReady}
                             onClick={() => void copyToClipboard(key.id)}
+                            title={t("复制密钥")}
+                            aria-label={t("复制密钥")}
                           >
-                            <Copy className="h-3.5 w-3.5" />
+                            <Copy className="h-4 w-4" />
                           </Button>
                         </div>
                       </TableCell>
@@ -873,14 +887,13 @@ export default function ApiKeysPage() {
                       <TableCell>
                         <div className="flex items-center gap-2">
                           <Switch
-                            className="scale-75"
                             checked={isEnabled}
                             disabled={!isServiceReady || isToggling}
                             onCheckedChange={(enabled) =>
                               toggleApiKeyStatus({ id: key.id, enabled })
                             }
                           />
-                          <span className="text-[10px] font-medium text-muted-foreground">
+                          <span className="text-[11px] font-medium text-muted-foreground">
                             {isEnabled ? t("启用") : t("禁用")}
                           </span>
                         </div>
@@ -963,6 +976,7 @@ export default function ApiKeysPage() {
       </WorkPanel>
 
       <ApiKeyModal
+        key={serviceAddr || "default"}
         open={apiKeyModalOpen}
         onOpenChange={setApiKeyModalOpen}
         apiKey={editingApiKey}

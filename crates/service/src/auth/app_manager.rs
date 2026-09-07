@@ -795,6 +795,7 @@ pub fn record_request_charge_v2(
     usage_source: &str,
     input_tokens: i64,
     cached_input_tokens: i64,
+    cache_write_tokens: i64,
     output_tokens: i64,
     raw_usage_json: Option<String>,
     charge_wallet: bool,
@@ -803,6 +804,7 @@ pub fn record_request_charge_v2(
     if model.is_empty() {
         return Err("model_slug_required".to_string());
     }
+    let catalog_model = crate::models_v2::policy_catalog_slug(model);
     let now = now_ts();
     let mut wallet_id = None;
     let mut api_key_id = None;
@@ -864,9 +866,11 @@ pub fn record_request_charge_v2(
         .record_charge_snapshot_v2(&codexmanager_core::storage::ChargeSnapshotInputV2 {
             request_log_id,
             model_slug: model.to_string(),
+            pricing_model_slug: (catalog_model != model).then(|| catalog_model.to_string()),
             usage_source: usage_source.to_string(),
             input_tokens,
             cached_input_tokens,
+            cache_write_tokens,
             output_tokens,
             rate_multiplier_millis: multiplier_millis,
             wallet_id,

@@ -54,10 +54,7 @@ fn account_update_payload(
         params.insert("label".to_string(), serde_json::json!(value));
     }
     if let Some(value) = group_name {
-        params.insert(
-            "groupName".to_string(),
-            serde_json::json!(value.trim()),
-        );
+        params.insert("groupName".to_string(), serde_json::json!(value.trim()));
     }
     if let Some(value) = note {
         params.insert("note".to_string(), serde_json::json!(value));
@@ -277,6 +274,89 @@ pub async fn service_account_warmup(
 }
 
 #[tauri::command]
+pub async fn service_account_fetch_models(
+    addr: Option<String>,
+    account_id: String,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({ "accountId": account_id });
+    rpc_call_in_background("account/fetchModels", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_account_associate_models(
+    addr: Option<String>,
+    account_id: String,
+    upstream_models: Vec<String>,
+    display_names: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "accountId": account_id,
+        "upstreamModels": upstream_models,
+        "displayNames": display_names,
+    });
+    rpc_call_in_background("account/associateModels", addr, Some(params)).await
+}
+
+/// 函数 `service_account_test_start`
+///
+/// 作者: gaohongshun
+///
+/// 时间: 2026-08-26
+///
+/// # 参数
+/// - addr: 参数 addr
+/// - account_id: 参数 account_id
+/// - model: 参数 model
+/// - prompt: 参数 prompt
+/// - kind: 参数 kind
+///
+/// # 返回
+/// 返回函数执行结果
+#[tauri::command]
+pub async fn service_account_test_start(
+    addr: Option<String>,
+    account_id: String,
+    model: Option<String>,
+    prompt: Option<String>,
+    kind: Option<String>,
+    test_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "accountId": account_id,
+        "model": model,
+        "prompt": prompt,
+        "kind": kind,
+        "testId": test_id,
+    });
+    rpc_call_in_background("account/test", addr, Some(params)).await
+}
+
+/// 函数 `service_account_test_cancel`
+///
+/// 作者: gaohongshun
+///
+/// 时间: 2026-08-26
+///
+/// # 参数
+/// - addr: 参数 addr
+/// - account_id: 参数 account_id
+///
+/// # 返回
+/// 返回函数执行结果
+#[tauri::command]
+pub async fn service_account_test_cancel(
+    addr: Option<String>,
+    account_id: String,
+    test_id: String,
+) -> Result<serde_json::Value, String> {
+    let params = serde_json::json!({
+        "accountId": account_id,
+        "testId": test_id,
+    });
+    rpc_call_in_background("account/test/cancel", addr, Some(params)).await
+}
+
+#[tauri::command]
 pub async fn service_account_proxy_get(
     addr: Option<String>,
     account_id: String,
@@ -375,7 +455,6 @@ pub async fn service_account_proxy_cloudflare_speed_test(
     rpc_call_in_background("account/proxy/cloudflare-speed-test", addr, Some(params)).await
 }
 
-
 #[tauri::command]
 pub async fn service_account_proxy_test_job(
     addr: Option<String>,
@@ -440,7 +519,6 @@ pub async fn service_account_proxy_diagnostics_history(
     });
     rpc_call_in_background("account/proxy/diagnostics-history", addr, Some(params)).await
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -596,6 +674,9 @@ mod tests {
             None,
         )
         .expect("cleared payload");
-        assert_eq!(cleared.get("groupName").and_then(|value| value.as_str()), Some(""));
+        assert_eq!(
+            cleared.get("groupName").and_then(|value| value.as_str()),
+            Some("")
+        );
     }
 }

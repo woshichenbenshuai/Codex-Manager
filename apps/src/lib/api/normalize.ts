@@ -4,12 +4,17 @@ import { normalizeAccountProxySummaryFields } from "./account-proxy-normalize";
 
 import {
   Account,
+  AccountFetchedModel,
+  AccountFetchModelsResult,
   AccountListResult,
   AccountUsage,
   AggregateApi,
   AggregateApiBalanceRefreshResult,
   AggregateApiBalanceSnapshot,
+  AggregateApiAssociateModelsResult,
   AggregateApiCreateResult,
+  AggregateApiFetchModelsResult,
+  AggregateApiFetchedModel,
   AggregateApiSecretResult,
   AggregateApiTestResult,
   ApiKey,
@@ -42,6 +47,7 @@ import {
 } from "@/types";
 import {
   DEFAULT_CODEX_ORIGINATOR,
+  DEFAULT_CODEX_USER_AGENT,
   DEFAULT_CODEX_USER_AGENT_VERSION,
 } from "@/lib/constants/codex";
 import {
@@ -139,6 +145,19 @@ function asArray<T = unknown>(payload: unknown): T[] {
  */
 function asString(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value.trim() : fallback;
+}
+
+function asJsonString(value: unknown): string | null {
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text || null;
+  }
+  if (!value || typeof value !== "object") return null;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -279,7 +298,7 @@ export function normalizeUsageSnapshot(payload: unknown): AccountUsage | null {
     secondaryResetsAt: toNullableNumber(
       source.secondaryResetsAt ?? source.secondary_resets_at
     ),
-    creditsJson: asString(source.creditsJson ?? source.credits_json) || null,
+    creditsJson: asJsonString(source.creditsJson ?? source.credits_json),
     capturedAt: toNullableNumber(source.capturedAt ?? source.captured_at),
   };
 }
@@ -319,7 +338,19 @@ export function normalizeUsageList(payload: unknown): AccountUsage[] {
  * 返回函数执行结果
  */
 export function buildUsageMap(usages: AccountUsage[]): Map<string, AccountUsage> {
-  return new Map(usages.map((item) => [item.accountId, item]));
+  const result = new Map<string, AccountUsage>();
+  for (const item of usages) {
+    const previous = result.get(item.accountId);
+    if (
+      previous &&
+      previous.capturedAt != null &&
+      (item.capturedAt == null || item.capturedAt < previous.capturedAt)
+    ) {
+      continue;
+    }
+    result.set(item.accountId, item);
+  }
+  return result;
 }
 
 /**
@@ -817,6 +848,7 @@ export function normalizeAggregateApi(item: unknown): AggregateApi | null {
     supplierName: asString(source.supplierName ?? source.supplier_name) || null,
     sort: asInteger(source.sort ?? source.priority, 0, 0),
     url: asString(source.url),
+    userAgent: asString(source.userAgent ?? source.user_agent) || null,
     authType: asString(source.authType ?? source.auth_type) || "apikey",
     authParams:
       source.authParams && typeof source.authParams === "object"
@@ -972,6 +1004,60 @@ export function normalizeAggregateApiBalanceRefreshResult(
     message: asString(source.message) || null,
     queriedAt: asInteger(source.queriedAt ?? source.queried_at, 0, 0),
     latencyMs: asInteger(source.latencyMs ?? source.latency_ms, 0, 0),
+  };
+}
+
+export function normalizeAggregateApiFetchModelsResult(
+  payload: unknown,
+): AggregateApiFetchModelsResult {
+  const source = asObject(payload);
+  const items = asArray(source.items).map((item): AggregateApiFetchedModel => {
+    const value = asObject(item);
+    return {
+      upstreamModel: asString(value.upstreamModel ?? value.upstream_model),
+      displayName: asString(value.displayName ?? value.display_name) || null,
+      existingModelSlug:
+        asString(value.existingModelSlug ?? value.existing_model_slug) || null,
+      alreadyLinked: asBoolean(value.alreadyLinked ?? value.already_linked, false),
+    };
+  });
+  return {
+    apiId: asString(source.apiId ?? source.api_id),
+    providerType: asString(source.providerType ?? source.provider_type),
+    fetchedAt: asInteger(source.fetchedAt ?? source.fetched_at, 0, 0),
+    items,
+  };
+}
+
+export function normalizeAccountFetchModelsResult(
+  payload: unknown,
+): AccountFetchModelsResult {
+  const source = asObject(payload);
+  const items = asArray(source.items).map((item): AccountFetchedModel => {
+    const value = asObject(item);
+    return {
+      upstreamModel: asString(value.upstreamModel ?? value.upstream_model),
+      displayName: asString(value.displayName ?? value.display_name) || null,
+      existingModelSlug:
+        asString(value.existingModelSlug ?? value.existing_model_slug) || null,
+      alreadyLinked: asBoolean(value.alreadyLinked ?? value.already_linked, false),
+    };
+  });
+  return {
+    accountId: asString(source.accountId ?? source.account_id),
+    fetchedAt: asInteger(source.fetchedAt ?? source.fetched_at, 0, 0),
+    items,
+  };
+}
+
+export function normalizeAggregateApiAssociateModelsResult(
+  payload: unknown,
+): AggregateApiAssociateModelsResult {
+  const source = asObject(payload);
+  return {
+    createdModels: asStringArray(source.createdModels ?? source.created_models),
+    addedRoutes: asStringArray(source.addedRoutes ?? source.added_routes),
+    unchangedRoutes: asStringArray(source.unchangedRoutes ?? source.unchanged_routes),
   };
 }
 
@@ -1728,10 +1814,15 @@ export function normalizeAppSettings(payload: unknown): AppSettings {
     updateAutoCheck: asBoolean(source.updateAutoCheck, true),
     autoStartEnabled: asBoolean(source.autoStartEnabled, false),
     autoStartSupported: asBoolean(source.autoStartSupported, false),
+    showMainWindowOnStartup: asBoolean(source.showMainWindowOnStartup, true),
     closeToTrayOnClose: asBoolean(source.closeToTrayOnClose, false),
     closeToTraySupported: asBoolean(source.closeToTraySupported, false),
     keepWindowUiMounted,
     lowTransparency: asBoolean(source.lowTransparency, false),
+    zoomFactor: Math.min(
+      1.25,
+      Math.max(0.75, toNullableNumber(source.zoomFactor) ?? 1),
+    ),
     lightweightModeOnCloseToTray: !keepWindowUiMounted,
     codexCliGuideDismissed: asBoolean(source.codexCliGuideDismissed, false),
     webAccessPasswordConfigured: asBoolean(
@@ -1775,6 +1866,13 @@ export function normalizeAppSettings(payload: unknown): AppSettings {
       asString(source.gatewayOriginator) || DEFAULT_CODEX_ORIGINATOR,
     gatewayOriginatorDefault:
       asString(source.gatewayOriginatorDefault) || DEFAULT_CODEX_ORIGINATOR,
+    gatewayUserAgent: asString(
+      source.gatewayUserAgent ?? source.gateway_user_agent
+    ),
+    gatewayUserAgentDefault:
+      asString(
+        source.gatewayUserAgentDefault ?? source.gateway_user_agent_default
+      ) || DEFAULT_CODEX_USER_AGENT,
     gatewayUserAgentVersion:
       asString(source.gatewayUserAgentVersion) || DEFAULT_CODEX_USER_AGENT_VERSION,
     gatewayUserAgentVersionDefault:

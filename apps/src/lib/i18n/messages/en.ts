@@ -7,6 +7,7 @@ import { EN_ACCOUNTS_MESSAGES } from "./sections/en-accounts";
 import { EN_API_KEYS_MESSAGES } from "./sections/en-api-keys";
 import { EN_AGGREGATE_API_MESSAGES } from "./sections/en-aggregate-api";
 import { EN_DASHBOARD_MESSAGES } from "./sections/en-dashboard";
+import { EN_DESKTOP_DIAGNOSTICS_MESSAGES } from "./sections/en-desktop-diagnostics";
 import { EN_DYNAMIC_UI_MESSAGES } from "./sections/en-dynamic-ui";
 import { EN_MODEL_CATALOG_MESSAGES } from "./sections/en-model-catalog";
 import { EN_MODEL_GROUPS_MESSAGES } from "./sections/en-model-groups";
@@ -19,6 +20,7 @@ import { EN_SKILLS_MESSAGES } from "./sections/en-skills";
 export const EN_MESSAGES: MessageCatalog = {
   ...EN_PROJECTS_MESSAGES,
   ...EN_SKILLS_MESSAGES,
+  ...EN_DESKTOP_DIAGNOSTICS_MESSAGES,
   "延迟测试设置": "Latency test settings",
   "速度测试设置": "Speed test settings",
   "下载预设": "Download preset",
@@ -157,6 +159,10 @@ export const EN_MESSAGES: MessageCatalog = {
   线程感知账号分配: "Thread-aware account distribution",
   "开启后未绑定的新线程会优先选择当前承载线程更少的可用账号，已有线程仍保持账号粘性。":
     "When enabled, unbound new threads prefer available accounts with fewer assigned threads while existing threads stay sticky.",
+  "Free 账号模型上限": "Free account model ceiling",
+  "选择 Free 账号模型上限": "Select the Free account model ceiling",
+  "设为“不限制”时，Free 账号可参与所有模型请求；选择具体模型后，目录中排在该模型之上的请求会跳过 Free 账号，但不会改写请求模型。混合模式会继续尝试其他账号，账号候选耗尽后仍按现有策略转聚合 API。":
+    "With No limit, Free accounts can serve any model request. After selecting a model, requests ranked above it in the model catalog skip Free accounts without rewriting the requested model. Mixed mode continues with other accounts and falls back to aggregate APIs under the existing policy after account candidates are exhausted.",
   "代理 Bypass 域名": "Proxy bypass hosts",
   留空表示不绕过代理: "Leave empty to bypass nothing",
   "一行一个或用逗号分隔；命中的上游域名会绕过全局代理直连。支持精确域名和":
@@ -188,6 +194,9 @@ export const EN_MESSAGES: MessageCatalog = {
   开机自动启动: "Launch at startup",
   系统登录后自动启动桌面端并保持网关可用:
     "Launch the desktop app after system sign-in and keep the gateway available.",
+  启动时显示主界面: "Show main window on startup",
+  "开启时直接显示主界面；关闭此项时保持隐藏，可从托盘菜单打开":
+    "When disabled, the app starts with the main window hidden; open it from the tray menu.",
   关闭时最小化到托盘: "Minimize to tray on close",
   点击关闭按钮不会直接退出程序:
     "Closing the window won't exit the app immediately.",
@@ -279,6 +288,7 @@ export const EN_MESSAGES: MessageCatalog = {
   账号轮转: "Account rotation",
   聚合API轮转: "Aggregate API rotation",
   "混合轮转（账号优先）": "Hybrid rotation (accounts first)",
+  "混合轮转（聚合优先）": "Hybrid rotation (aggregate APIs first)",
   "总使用 Token": "Total token usage",
   最近调用: "Last called",
   从未调用: "Never called",
@@ -426,6 +436,8 @@ export const EN_MESSAGES: MessageCatalog = {
   未提供: "Unavailable",
   上移一位: "Move up",
   下移一位: "Move down",
+  移到顶部: "Move to top",
+  移到底部: "Move to bottom",
   编辑账号信息: "Edit account info",
   用量详情: "Usage details",
   套餐信息: "Subscription info",
@@ -479,6 +491,8 @@ export const EN_MESSAGES: MessageCatalog = {
   保存: "Save",
   清除: "Clear",
   确定: "Confirm",
+  首页: "First page",
+  跳至: "Go to",
   "服务未连接，暂时无法": "Service is disconnected, unable to",
   更新密钥: "update key",
   启用密钥: "enable key",
@@ -493,16 +507,8 @@ export const EN_MESSAGES: MessageCatalog = {
   更新状态失败: "Failed to update status",
   模型列表已刷新: "Model list refreshed",
   刷新模型失败: "Failed to refresh models",
-  "导出到本地 Codex 缓存": "Export to local Codex cache",
-  "已导出到本地 Codex 缓存": "Exported to local Codex cache",
-  "Codex 缓存已下载，请保存到 `~/.codex/models_cache.json`":
-    "Codex cache downloaded. Please save it to `~/.codex/models_cache.json`.",
   当前环境不支持浏览器导出:
     "The current runtime does not support browser export",
-  "当前环境不支持导出 Codex 缓存":
-    "The current runtime does not support exporting the Codex cache",
-  "当前服务未返回可用的 Codex CLI 标识":
-    "The current service did not return a usable Codex CLI identifier",
   模型目录为空: "The model catalog is empty",
   读取密钥失败: "Failed to read key",
   累计Token: "Total Token",
@@ -590,8 +596,8 @@ export const EN_MESSAGES: MessageCatalog = {
     "Service is disconnected. Account authorization and callback parsing are temporarily unavailable until it reconnects.",
   "备注/描述": "Notes / Description",
   "例如：主号 / 测试号": "For example: primary / test",
-  "手动解析回调（当本地 48760 端口占用时）":
-    "Manual callback parsing (when local port 48760 is occupied)",
+  "手动解析回调（仅在自动回调未完成时使用）":
+    "Manual callback parsing (use only when automatic callback does not complete)",
   "粘贴浏览器跳转后的完整回调 URL（包含 state 和 code）":
     "Paste the full callback URL after browser redirect (including state and code)",
   解析: "Parse",
@@ -680,6 +686,12 @@ export const EN_MESSAGES: MessageCatalog = {
   "使用更明显的渐层背景、增强玻璃质感和更强层次感。":
     "Use a stronger gradient background, richer glass effect, and more visual depth.",
   界面主题: "Theme",
+  界面缩放: "Interface scale",
+  调整桌面主窗口的整体显示比例: "Adjust the overall scale of the desktop window.",
+  缩小界面: "Zoom out",
+  放大界面: "Zoom in",
+  界面缩放比例: "Interface scale",
+  恢复默认缩放: "Reset scale",
   "选择您喜爱的配色方案，适配不同工作心情":
     "Choose your preferred color theme for different moods.",
   企业蓝: "Enterprise Blue",
@@ -751,8 +763,8 @@ export const EN_MESSAGES: MessageCatalog = {
     "Configure gateway credentials. You can bind a specific model, reasoning tier, or custom upstream.",
   "密钥名称 (可选)": "Key name (optional)",
   "例如：主机房 / 测试": "e.g. Main room / Test",
-  "账号轮转只走账号池；聚合API轮转只走聚合API；混合轮转先走账号池，账号耗尽后使用聚合API兜底。":
-    "Account rotation uses only the account pool; aggregate API rotation uses only aggregate APIs; hybrid rotation tries accounts first and falls back to aggregate APIs when accounts are exhausted.",
+  "账号轮转只走账号池；聚合API轮转只走聚合API；混合轮转（账号优先）先走账号池，账号耗尽后使用聚合API兜底；混合轮转（聚合优先）先走聚合API，聚合不可用时回落账号池。":
+    "Account rotation uses only the account pool; aggregate API rotation uses only aggregate APIs; hybrid rotation (accounts first) tries accounts first and falls back to aggregate APIs when accounts are exhausted; hybrid rotation (aggregate APIs first) tries aggregate APIs first and falls back to the account pool when they are unavailable.",
   "仅对账号轮转和混合轮转生效，可限制这把平台密钥只从指定账号计划类型中选路由账号。":
     "Applies only to account rotation and hybrid rotation. Limits this API key to routing through accounts with the selected plan type.",
   "默认按路径通配：": "Path matching by default:",
@@ -771,8 +783,12 @@ export const EN_MESSAGES: MessageCatalog = {
     "Overrides the reasoning effort inside the request.",
   "会覆盖请求里的 reasoning effort。Ultra 由 Codex 客户端负责编排，网关覆盖最多设置为 max。":
     "Overrides the request reasoning effort. Ultra is orchestrated by the Codex client; gateway overrides are limited to max.",
-  "Fast 会映射为上游 priority；未设置时跟随请求。":
-    "Fast maps to upstream priority; otherwise it follows the request.",
+  "标准 (Standard)": "Standard",
+  "快速 (Fast)": "Fast",
+  "超快 (Ultrafast)": "Ultrafast",
+  "弹性 (Flex)": "Flex",
+  "Standard 会强制标准速度；Fast 会映射为上游 priority；Ultrafast 与 Flex 会按原值透传，是否可用取决于模型和上游；未设置时跟随请求。":
+    "Standard forces standard speed; Fast maps to upstream priority; Ultrafast and Flex pass through unchanged when the selected model and upstream support them; otherwise the request setting is used.",
   平台密钥已生成: "API key generated",
   完成: "Done",
   "配置一个最小转发上游，保存 URL 和密钥后即可用于平台密钥轮转。":
@@ -1315,10 +1331,6 @@ export const EN_MESSAGES: MessageCatalog = {
     "Read through it once before copying the template. This is much less error-prone than typing the provider name and address by hand.",
   "推荐先完整读一遍，再复制模板；这比自己手写平台 Key、provider 名称和地址更不容易出错。":
     "Read through it once before copying the template. This is much less error-prone than typing the platform key, provider name, and address by hand.",
-  "如果你要把当前模型目录替换到本地 Codex 缓存，可以去模型管理页点击“导出到本地 Codex 缓存”；桌面端会直接写入 `~/.codex/models_cache.json`，浏览器模式会下载同名文件。":
-    "If you want to replace the current model catalog into the local Codex cache, go to the Models page and click “Export to local Codex cache”; desktop mode writes directly to `~/.codex/models_cache.json`, while browser mode downloads a file with the same name.",
-  "如果你在 Web 端部署并访问，可以去模型管理页点击“导出到本地 Codex 缓存”；浏览器会下载同名 `models_cache.json`，你再手动放入本地 `~/.codex/models_cache.json`。":
-    "If you are accessing a web deployment, go to the Models page and click “Export to local Codex cache”; the browser will download a `models_cache.json` file, and you can then place it into the local `~/.codex/models_cache.json` manually.",
   建议按下面的顺序完成接入: "Recommended setup order",
   分步导引: "Step-by-step guide",
   "你当前在第 {current} 步，共 {total} 步。":
@@ -1374,10 +1386,6 @@ export const EN_MESSAGES: MessageCatalog = {
     '`model_provider = "cm"` must exactly match `[model_providers.cm]`.',
   "`base_url` 默认应指向 `http://localhost:48760/v1`。":
     "`base_url` should normally point to `http://localhost:48760/v1`.",
-  "如果你要把当前模型目录替换到本地 Codex 缓存，可以去模型管理页点击“导出到本地 Codex 缓存”；桌面端会直接写入 `~/.codex/models_cache.json`，浏览器模式会下载同名文件供你手动放入 `.codex` 目录。":
-    "If you want to replace the current model catalog into the local Codex cache, go to the Models page and click “Export to local Codex cache”; desktop mode writes directly to `~/.codex/models_cache.json`, while browser mode downloads a file with the same name for you to place into the `.codex` directory manually.",
-  "如果你在 Web 端想手动替换本地 Codex 缓存，优先用模型管理页右上角的导出按钮；它会下载同名 `models_cache.json` 供你手动放入本地 `.codex` 目录。":
-    "If you want to manually replace the local Codex cache on the web, use the export button in the top-right of the Models page first; it downloads a `models_cache.json` file for you to place into the local `.codex` directory manually.",
   "修改 `auth.json` 后请重新启动 Codex CLI，避免旧认证缓存继续生效。":
     "Restart Codex CLI after changing `auth.json` so old auth cache does not keep taking effect.",
   "如果你在设置里换过端口，把这里同步改掉后再重新打开 CLI 测试。":
@@ -1414,6 +1422,21 @@ export const EN_MESSAGES: MessageCatalog = {
   下一步: "Next",
   已经是最后一步: "Already on the last step",
   "Codex 首次接入引导": "Codex first-time setup guide",
+  "无需手动编辑 auth.json 或 config.toml。CodexManager 会通过平台模式安全写入并备份 Codex profile。":
+    "You do not need to edit auth.json or config.toml manually. CodexManager writes and backs up the Codex profile safely through Platform Mode.",
+  "先确认 CodexManager 本地服务可用，再选择 Codex 接入模式。":
+    "Confirm that the CodexManager local service is available, then choose how Codex should connect.",
+  "第二步：准备账号或平台密钥": "Step 2: Prepare an account or platform key",
+  "账号直连需要 active OpenAI 账号；本地网关需要可用的平台密钥。":
+    "Direct mode requires an active OpenAI account; local gateway mode requires an available platform key.",
+  "第三步：在平台模式应用配置": "Step 3: Apply the configuration in Platform Mode",
+  "选择模式与目标后点击应用，页面会调用现有 profile 接口写入配置。":
+    "Choose a mode and target, then apply it. The page uses the existing profile API to write the configuration.",
+  "无需复制配置模板，也不要把账号 token 手动写进 auth.json。":
+    "Do not copy configuration templates or manually write account tokens into auth.json.",
+  "请统一使用平台模式，避免 provider、模型目录和运行时重载配置彼此不一致。":
+    "Use Platform Mode for all changes so the provider, model catalog, and runtime reload settings stay consistent.",
+  "打开平台模式": "Open Platform Mode",
   "只需要准备 `auth.json` 和 `config.toml` 两个文件。没有勾选“不再显示”时，下次进入软件仍会看到它。":
     "Prepare only `auth.json` and `config.toml`. If you do not check “Don't show again”, this guide will appear next time you open the app.",
   "右侧只保留基础配置；复制后按实际端口改 `base_url` 即可。":

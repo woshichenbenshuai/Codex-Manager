@@ -73,6 +73,8 @@ pub(crate) fn update_api_key_model(
         let normalized_account_plan_filter = if normalized_rotation_strategy
             == crate::apikey_profile::ROTATION_ACCOUNT
             || normalized_rotation_strategy == crate::apikey_profile::ROTATION_HYBRID
+            || normalized_rotation_strategy
+                == crate::apikey_profile::ROTATION_HYBRID_AGGREGATE_FIRST
         {
             crate::account_plan::normalize_account_plan_filter(account_plan_filter)?
         } else {
@@ -105,6 +107,7 @@ pub(crate) fn update_api_key_model(
         Some(ROTATION_AGGREGATE_API) => Some(None),
         Some(crate::apikey_profile::ROTATION_ACCOUNT)
         | Some(crate::apikey_profile::ROTATION_HYBRID)
+        | Some(crate::apikey_profile::ROTATION_HYBRID_AGGREGATE_FIRST)
             if update_account_group_filter =>
         {
             Some(crate::account_group::normalize_account_group_filter(
@@ -155,12 +158,13 @@ pub(crate) fn update_api_key_model(
             .map_err(|e| e.to_string())?;
     }
 
+    let has_protocol_type = protocol_type.is_some();
     let has_upstream_base_url = upstream_base_url.is_some();
     let has_static_headers_json = static_headers_json.is_some();
     let normalized_upstream_base_url = normalize_upstream_base_url(upstream_base_url)?;
     let normalized_static_headers_json = normalize_static_headers_json(static_headers_json)?;
 
-    if protocol_type.is_some() || has_upstream_base_url || has_static_headers_json {
+    if has_protocol_type || has_upstream_base_url || has_static_headers_json {
         let current = storage
             .find_api_key_profile_config_by_id(key_id)
             .map_err(|e| e.to_string())?
@@ -191,6 +195,9 @@ pub(crate) fn update_api_key_model(
                     .or(current.service_tier.as_deref()),
             )
             .map_err(|e| e.to_string())?;
+    }
+    if update_routing_config || has_protocol_type || has_upstream_base_url {
+        crate::codex_profile::sync_active_gateway_profile_for_api_key(&storage, key_id)?;
     }
     Ok(())
 }

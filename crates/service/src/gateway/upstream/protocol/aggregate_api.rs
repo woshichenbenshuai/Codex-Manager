@@ -157,6 +157,14 @@ fn rewrite_body_for_candidate_transport(
     upstream_url: &str,
 ) -> Bytes {
     let rewritten = rewrite_body_model_override(body, candidate.model_override.as_deref());
+    if !super::super::config::should_send_chatgpt_account_header(upstream_url) {
+        return Bytes::from(
+            super::super::super::apply_external_dynamic_tools_transport_rules(
+                path,
+                rewritten.to_vec(),
+            ),
+        );
+    }
     if normalize_provider_type_value(candidate.provider_type.as_str())
         == AGGREGATE_API_PROVIDER_CODEX
         && super::super::config::should_send_chatgpt_account_header(upstream_url)
@@ -497,6 +505,7 @@ fn should_skip_forward_header(name: &str) -> bool {
             | "transfer-encoding"
             | "upgrade"
             | "host"
+            | "user-agent"
     )
 }
 
@@ -829,9 +838,10 @@ fn build_aggregate_api_request(
     secret: &str,
     auth_config: &AggregateApiAuthConfig,
     injected_headers: &HashSet<String>,
+    user_agent: &str,
     request_deadline: Option<Instant>,
     is_stream: bool,
-) -> Result<reqwest::blocking::RequestBuilder, String> {
+) -> Result<reqwest::blocking::Request, String> {
     let mut builder = client.request(method.clone(), url);
     if let Some(timeout) =
         super::super::support::deadline::send_timeout(request_deadline, is_stream)
@@ -921,7 +931,15 @@ fn build_aggregate_api_request(
     if !body.is_empty() {
         builder = builder.body(body.clone());
     }
-    Ok(builder)
+    let mut request = builder
+        .build()
+        .map_err(|err| format!("build aggregate api request failed: {err}"))?;
+    request.headers_mut().insert(
+        HeaderName::from_static("user-agent"),
+        HeaderValue::from_str(user_agent)
+            .map_err(|_| "invalid aggregate api user agent".to_string())?,
+    );
+    Ok(request)
 }
 
 fn build_anthropic_bridge_aggregate_api_request(
@@ -933,10 +951,11 @@ fn build_anthropic_bridge_aggregate_api_request(
     secret: &str,
     auth_config: &AggregateApiAuthConfig,
     injected_headers: &HashSet<String>,
+    user_agent: &str,
     request_deadline: Option<Instant>,
     is_stream: bool,
-) -> Result<reqwest::blocking::RequestBuilder, String> {
-    let mut builder = build_aggregate_api_request(
+) -> Result<reqwest::blocking::Request, String> {
+    let mut request = build_aggregate_api_request(
         client,
         request,
         method,
@@ -945,21 +964,22 @@ fn build_anthropic_bridge_aggregate_api_request(
         secret,
         auth_config,
         injected_headers,
+        user_agent,
         request_deadline,
         is_stream,
     )?;
-    builder = builder.header(
+    request.headers_mut().insert(
         HeaderName::from_static("anthropic-version"),
         HeaderValue::from_static("2023-06-01"),
     );
     if matches!(auth_config, AggregateApiAuthConfig::ApiKeyDefaultBearer) {
-        builder = builder.header(
+        request.headers_mut().insert(
             HeaderName::from_static("x-api-key"),
             HeaderValue::from_str(secret.trim())
                 .map_err(|_| "invalid aggregate api secret".to_string())?,
         );
     }
-    Ok(builder)
+    Ok(request)
 }
 
 /// 函数 `resolve_aggregate_api_rotation_candidates`
@@ -1018,6 +1038,24 @@ pub(crate) fn resolve_aggregate_api_rotation_candidates(
 ///
 /// # 返回
 /// 返回函数执行结果
+/// 聚合路径失败时的处理策略。
+pub(in super::super) enum AggregateFailurePolicy {
+    /// 失败时直接向客户端响应错误（默认行为）。
+    RespondError,
+    /// 失败且请求尚未消费时，把请求归还给调用方，
+    /// 由调用方继续后续路由（聚合优先混合轮转回落账号池）。
+    ReleaseRequest,
+}
+
+/// 聚合代理一次调用的最终结果。
+pub(in super::super) enum AggregateAttemptOutcome {
+    /// 请求已经响应完毕（成功桥接或已向客户端返回错误）。
+    Responded,
+    /// 请求未被消费且聚合路径失败（仅 `ReleaseRequest` 策略出现），
+    /// 调用方可继续后续路由。
+    RequestReleased { request: Request, error: String },
+}
+
 pub(in super::super) struct AggregateProxyRequest<'a> {
     pub request: Request,
     pub storage: &'a Storage,
@@ -1045,11 +1083,12 @@ pub(in super::super) struct AggregateProxyRequest<'a> {
     pub aggregate_api_candidates: Vec<AggregateApi>,
     pub request_deadline: Option<Instant>,
     pub started_at: Instant,
+    pub failure_policy: AggregateFailurePolicy,
 }
 
 pub(in super::super) fn proxy_aggregate_request(
     params: AggregateProxyRequest<'_>,
-) -> Result<(), String> {
+) -> Result<AggregateAttemptOutcome, String> {
     let AggregateProxyRequest {
         request,
         storage,
@@ -1077,11 +1116,19 @@ pub(in super::super) fn proxy_aggregate_request(
         aggregate_api_candidates,
         request_deadline,
         started_at,
+        failure_policy,
     } = params;
     let estimated_input_tokens =
         super::super::super::request_log::estimate_input_tokens_from_body(body.as_ref());
     if aggregate_api_candidates.is_empty() {
         let message = "aggregate api not found".to_string();
+        if matches!(failure_policy, AggregateFailurePolicy::ReleaseRequest) {
+            // 聚合优先混合轮转：无聚合候选时归还请求，由调用方回落账号池。
+            return Ok(AggregateAttemptOutcome::RequestReleased {
+                request,
+                error: message,
+            });
+        }
         super::super::super::record_gateway_request_outcome(path, 404, Some("aggregate_api"));
         super::super::super::trace_log::log_request_final(
             trace_id,
@@ -1093,7 +1140,7 @@ pub(in super::super) fn proxy_aggregate_request(
         );
         let request = request;
         respond_error(request, 404, message.as_str(), Some(trace_id));
-        return Ok(());
+        return Ok(AggregateAttemptOutcome::Responded);
     }
 
     let mut request = Some(request);
@@ -1159,6 +1206,17 @@ pub(in super::super) fn proxy_aggregate_request(
                 continue;
             }
         };
+        let candidate_user_agent =
+            match crate::aggregate_api::resolved_aggregate_api_user_agent(&candidate) {
+                Ok(value) => value,
+                Err(err) => {
+                    last_attempt_url = Some(candidate_url.clone());
+                    last_attempt_supplier_name = candidate_supplier_name.clone();
+                    last_attempt_error = Some(err);
+                    last_failure_status = 502;
+                    continue;
+                }
+            };
 
         let base_upstream_url =
             match build_upstream_url(candidate_url.as_str(), effective_path.as_str()) {
@@ -1262,7 +1320,7 @@ pub(in super::super) fn proxy_aggregate_request(
                     Some(started_at.elapsed().as_millis()),
                 );
                 respond_error(request, 504, message.as_str(), Some(trace_id));
-                return Ok(());
+                return Ok(AggregateAttemptOutcome::Responded);
             }
 
             let mut url = base_upstream_url.clone();
@@ -1288,7 +1346,7 @@ pub(in super::super) fn proxy_aggregate_request(
             let request_ref = request.as_ref().ok_or_else(|| {
                 "aggregate api request already consumed before upstream attempt".to_string()
             })?;
-            let builder = if bridge_responses_to_anthropic {
+            let upstream_request = if bridge_responses_to_anthropic {
                 build_anthropic_bridge_aggregate_api_request(
                     &client,
                     request_ref,
@@ -1298,6 +1356,7 @@ pub(in super::super) fn proxy_aggregate_request(
                     secret.as_str(),
                     &auth_config,
                     &injected_headers,
+                    candidate_user_agent.as_str(),
                     request_deadline,
                     is_stream,
                 )?
@@ -1311,13 +1370,14 @@ pub(in super::super) fn proxy_aggregate_request(
                     secret.as_str(),
                     &auth_config,
                     &injected_headers,
+                    candidate_user_agent.as_str(),
                     request_deadline,
                     is_stream,
                 )?
             };
 
             let attempt_started_at = Instant::now();
-            let upstream = match builder.send() {
+            let upstream = match client.execute(upstream_request) {
                 Ok(resp) => {
                     let duration_ms =
                         super::super::super::duration_to_millis(attempt_started_at.elapsed());
@@ -1496,6 +1556,7 @@ pub(in super::super) fn proxy_aggregate_request(
                 RequestLogUsage {
                     input_tokens: usage.input_tokens,
                     cached_input_tokens: usage.cached_input_tokens,
+                    cache_write_tokens: usage.cache_write_tokens,
                     output_tokens: usage.output_tokens,
                     total_tokens: usage.total_tokens,
                     reasoning_output_tokens: usage.reasoning_output_tokens,
@@ -1510,7 +1571,7 @@ pub(in super::super) fn proxy_aggregate_request(
         }
 
         if succeeded {
-            return Ok(());
+            return Ok(AggregateAttemptOutcome::Responded);
         }
 
         if candidate_idx + 1 < total_candidates {
@@ -1521,6 +1582,17 @@ pub(in super::super) fn proxy_aggregate_request(
     let message =
         last_attempt_error.unwrap_or_else(|| "aggregate api upstream response failed".to_string());
     let status_code = last_failure_status;
+    if matches!(failure_policy, AggregateFailurePolicy::ReleaseRequest) {
+        if let Some(released_request) = request.take() {
+            // 聚合优先混合轮转：聚合候选全部失败且请求尚未消费，
+            // 将请求归还调用方，由其回落账号池。这里不能提前记录请求终态，
+            // 否则账号兜底完成后会重复计数并覆盖同一 trace 的最终结果。
+            return Ok(AggregateAttemptOutcome::RequestReleased {
+                request: released_request,
+                error: message,
+            });
+        }
+    }
     let request = request.take().ok_or_else(|| {
         "aggregate api request already consumed before failure response".to_string()
     })?;
@@ -1574,7 +1646,7 @@ pub(in super::super) fn proxy_aggregate_request(
         Some(started_at.elapsed().as_millis()),
     );
     respond_error(request, status_code, message.as_str(), Some(trace_id));
-    Ok(())
+    Ok(AggregateAttemptOutcome::Responded)
 }
 
 fn aggregate_api_secrets_by_candidate_id(
@@ -1617,6 +1689,7 @@ mod bridge_tests {
             auth_params_json: None,
             action: None,
             model_override: None,
+            user_agent: None,
             status: "active".to_string(),
             created_at: sort,
             updated_at: sort,
@@ -1639,7 +1712,7 @@ mod bridge_tests {
     fn candidate_transport_rewrite_isolated_between_codex_and_generic_upstreams() {
         let _guard = crate::test_env_guard();
         let body = Bytes::from_static(
-            br#"{"model":"platform-model","input":"hello","stream":false,"service_tier":"fast"}"#,
+            br#"{"model":"platform-model","input":"hello","stream":false,"service_tier":"fast","dynamicTools":[{"name":"spawn_agent"}]}"#,
         );
         let mut codex = candidate("codex", 0);
         codex.model_override = Some("gpt-5.4".to_string());
@@ -1695,6 +1768,9 @@ mod bridge_tests {
         assert_eq!(generic_value["input"], "hello");
         assert_eq!(generic_value["stream"], false);
         assert_eq!(generic_value["service_tier"], "fast");
+        assert_eq!(generic_value["tools"][0]["type"], "function");
+        assert_eq!(generic_value["tools"][0]["name"], "spawn_agent");
+        assert!(generic_value.get("dynamicTools").is_none());
         assert!(generic_value.get("instructions").is_none());
         assert!(generic_value.get("store").is_none());
         assert!(generic_value.get("tool_choice").is_none());

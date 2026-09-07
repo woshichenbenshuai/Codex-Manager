@@ -1,12 +1,20 @@
 use super::{
-    build_socks5_connect_request, build_upstream_websocket_request, infer_ws_terminal_status,
-    inspect_ws_terminal_event, is_previous_response_not_found_terminal, merge_client_metadata,
-    parse_websocket_target, parse_ws_usage, proxy_basic_auth_header, rewrite_client_frame,
-    should_buffer_ws_upstream_preamble, strip_previous_response_id_from_ws_text, WsRequestContext,
-    WsUpstreamAuthorization,
+    apply_model_fast_policy_with_storage, build_socks5_connect_request,
+    build_upstream_websocket_request, infer_ws_terminal_status, inspect_ws_terminal_event,
+    is_previous_response_not_found_terminal, load_ws_tool_call_registry, merge_client_metadata,
+    missing_ws_tool_call_from_terminal, parse_websocket_target, parse_ws_usage,
+    prepare_missing_ws_tool_call_retry, proxy_basic_auth_header,
+    rebase_ws_request_for_account_change, remember_ws_tool_calls_from_upstream_event,
+    rewrite_client_frame, should_attempt_ws_terminal_retry, should_buffer_ws_upstream_preamble,
+    strip_previous_response_id_from_ws_text, ws_request_has_tool_call_output,
+    ws_route_binding_for_frame, CompletedWsResponseCache, CompletedWsToolCallCache,
+    WsRequestContext, WsToolCallKind, WsUpstreamAuthorization,
 };
 use axum::http::{HeaderMap, HeaderValue};
-use codexmanager_core::storage::{now_ts, Account, ApiKey, Storage, Token};
+use codexmanager_core::storage::{
+    now_ts, Account, ApiKey, ConversationBinding, ManagedModelV2Upsert, ModelFastPolicyV2, Storage,
+    Token,
+};
 use serde_json::{json, Value};
 
 fn sample_api_key() -> ApiKey {
@@ -30,6 +38,456 @@ fn sample_api_key() -> ApiKey {
         aggregate_api_url: None,
         account_plan_filter: None,
     }
+}
+
+#[test]
+fn websocket_frame_applies_model_fast_policy() {
+    let storage = Storage::open_in_memory().expect("open storage");
+    storage.init().expect("init storage");
+    let context = WsRequestContext {
+        api_key: sample_api_key(),
+        incoming_headers: sample_incoming_headers(None, None),
+        prompt_cache_key: None,
+        cache_affinity_key: None,
+        route_conversation_id: None,
+        route_conversation_source: None,
+        effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
+        prefer_raw_errors: false,
+    };
+
+    for (policy, client_tier, expected_upstream_tier, expected_source) in [
+        (
+            ModelFastPolicyV2::Passthrough,
+            Some("fast"),
+            Some("priority"),
+            Some("client_request"),
+        ),
+        (
+            ModelFastPolicyV2::Passthrough,
+            Some("ultrafast"),
+            None,
+            Some("model_policy"),
+        ),
+        (
+            ModelFastPolicyV2::Filter,
+            Some("fast"),
+            None,
+            Some("model_policy"),
+        ),
+        (
+            ModelFastPolicyV2::Force,
+            None,
+            Some("priority"),
+            Some("model_policy"),
+        ),
+        (ModelFastPolicyV2::Block, None, None, Some("unset")),
+    ] {
+        let mut model = storage
+            .get_managed_model_v2("gpt-5.4")
+            .expect("read managed model")
+            .expect("managed model");
+        model.fast_policy = policy;
+        storage
+            .upsert_managed_model_v2(&ManagedModelV2Upsert {
+                previous_slug: Some("gpt-5.4".to_string()),
+                model,
+            })
+            .expect("update model fast policy");
+
+        let mut frame = json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "input": "hello"
+        });
+        if let Some(client_tier) = client_tier {
+            frame["service_tier"] = Value::String(client_tier.to_string());
+        }
+        let prepared = rewrite_client_frame(frame.to_string().as_str(), &context)
+            .expect("rewrite websocket frame");
+        let prepared = apply_model_fast_policy_with_storage(prepared, &storage)
+            .expect("apply websocket model fast policy");
+        let value: Value = serde_json::from_str(&prepared.text).expect("parse rewritten frame");
+
+        assert_eq!(
+            value.get("service_tier").and_then(Value::as_str),
+            expected_upstream_tier,
+            "unexpected upstream service tier for {policy:?}"
+        );
+        assert_eq!(
+            prepared.service_tier_source.as_deref(),
+            expected_source,
+            "unexpected service tier source for {policy:?}"
+        );
+    }
+
+    let mut model = storage
+        .get_managed_model_v2("gpt-5.4")
+        .expect("read managed model")
+        .expect("managed model");
+    model.fast_policy = ModelFastPolicyV2::Block;
+    storage
+        .upsert_managed_model_v2(&ManagedModelV2Upsert {
+            previous_slug: Some("gpt-5.4".to_string()),
+            model,
+        })
+        .expect("update block policy");
+    for tier in ["fast", "priority", "ultrafast"] {
+        let frame = json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "input": "hello",
+            "service_tier": tier
+        });
+        let prepared = rewrite_client_frame(frame.to_string().as_str(), &context)
+            .expect("rewrite blocked frame");
+        assert_eq!(
+            prepared.service_tier_source.as_deref(),
+            Some("client_request"),
+            "tier {tier} must retain its client source before policy evaluation"
+        );
+        let err = match apply_model_fast_policy_with_storage(prepared, &storage) {
+            Ok(_) => panic!("block policy must reject explicit accelerated tier {tier}"),
+            Err(err) => err,
+        };
+        assert_eq!(err.status, 400);
+        assert_eq!(
+            err.code,
+            crate::models_v2::fast_policy::FAST_REQUEST_BLOCKED
+        );
+    }
+
+    for (tier, expected_upstream_tier, expected_log_tier) in
+        [("auto", None, None), ("default", None, Some("standard"))]
+    {
+        let frame = json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "input": "hello",
+            "service_tier": tier
+        });
+        let prepared = rewrite_client_frame(frame.to_string().as_str(), &context)
+            .expect("rewrite non-Fast frame");
+        let prepared = apply_model_fast_policy_with_storage(prepared, &storage)
+            .expect("block policy must allow non-Fast tier");
+        let value: Value = serde_json::from_str(&prepared.text).expect("parse allowed frame");
+        assert_eq!(
+            value.get("service_tier").and_then(Value::as_str),
+            expected_upstream_tier,
+            "unexpected upstream tier for {tier}"
+        );
+        assert_eq!(
+            prepared.effective_service_tier.as_deref(),
+            expected_log_tier
+        );
+        assert_eq!(
+            prepared.service_tier_source.as_deref(),
+            Some("client_request")
+        );
+    }
+
+    let frame = json!({
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "input": "hello",
+        "service_tier": "flex"
+    });
+    let prepared = rewrite_client_frame(frame.to_string().as_str(), &context)
+        .expect("rewrite unsupported Flex frame");
+    let prepared = apply_model_fast_policy_with_storage(prepared, &storage)
+        .expect("unsupported Flex tier must be omitted rather than rejected");
+    let value: Value = serde_json::from_str(&prepared.text).expect("parse filtered frame");
+    assert!(value.get("service_tier").is_none());
+    assert_eq!(prepared.effective_service_tier, None);
+    assert_eq!(
+        prepared.service_tier_source.as_deref(),
+        Some("model_policy")
+    );
+
+    let frame = json!({
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "input": "hello",
+        "service_tier": "ultrafast"
+    });
+    let prepared = rewrite_client_frame(frame.to_string().as_str(), &context)
+        .expect("rewrite Sol Ultrafast frame");
+    let prepared = apply_model_fast_policy_with_storage(prepared, &storage)
+        .expect("Sol must accept its advertised Ultrafast tier");
+    let value: Value = serde_json::from_str(&prepared.text).expect("parse Sol frame");
+    assert_eq!(
+        value.get("service_tier").and_then(Value::as_str),
+        Some("ultrafast")
+    );
+    assert_eq!(
+        prepared.service_tier_source.as_deref(),
+        Some("client_request")
+    );
+
+    let mut api_key_fast_context = context.clone();
+    api_key_fast_context.api_key.service_tier = Some("fast".to_string());
+    let prepared = rewrite_client_frame(
+        r#"{"type":"response.create","model":"gpt-5.4","input":"hello"}"#,
+        &api_key_fast_context,
+    )
+    .expect("rewrite API key fast frame");
+    let prepared = apply_model_fast_policy_with_storage(prepared, &storage)
+        .expect("block policy must allow API key injected fast tier");
+    let value: Value = serde_json::from_str(&prepared.text).expect("parse API key fast frame");
+    assert_eq!(
+        value.get("service_tier").and_then(Value::as_str),
+        Some("priority")
+    );
+
+    let mut api_key_ultrafast_context = context.clone();
+    api_key_ultrafast_context.api_key.service_tier = Some("ultrafast".to_string());
+    let prepared = rewrite_client_frame(
+        r#"{"type":"response.create","model":"gpt-5.4","input":"hello"}"#,
+        &api_key_ultrafast_context,
+    )
+    .expect("rewrite API key ultrafast frame");
+    let prepared = apply_model_fast_policy_with_storage(prepared, &storage)
+        .expect("unsupported API key Ultrafast tier must be omitted");
+    let value: Value = serde_json::from_str(&prepared.text).expect("parse API key ultrafast frame");
+    assert!(value.get("service_tier").is_none());
+    assert_eq!(prepared.effective_service_tier, None);
+    assert_eq!(
+        prepared.service_tier_source.as_deref(),
+        Some("model_policy")
+    );
+
+    let mut api_key_standard_context = context.clone();
+    api_key_standard_context.api_key.service_tier = Some("default".to_string());
+    let prepared = rewrite_client_frame(
+        r#"{"type":"response.create","model":"gpt-5.6-sol","input":"hello","service_tier":"ultrafast"}"#,
+        &api_key_standard_context,
+    )
+    .expect("rewrite API key standard frame");
+    let value: Value = serde_json::from_str(&prepared.text).expect("parse API key standard frame");
+    assert!(value.get("service_tier").is_none());
+    assert_eq!(prepared.service_tier.as_deref(), Some("ultrafast"));
+    assert_eq!(prepared.effective_service_tier.as_deref(), Some("standard"));
+    assert_eq!(
+        prepared.service_tier_source.as_deref(),
+        Some("gateway_override")
+    );
+
+    let mut overridden_model = storage
+        .get_managed_model_v2("gpt-5.4-mini")
+        .expect("read overridden managed model")
+        .expect("overridden managed model");
+    overridden_model.fast_policy = ModelFastPolicyV2::Filter;
+    storage
+        .upsert_managed_model_v2(&ManagedModelV2Upsert {
+            previous_slug: Some("gpt-5.4-mini".to_string()),
+            model: overridden_model,
+        })
+        .expect("update overridden model fast policy");
+    let mut model_override_context = context;
+    model_override_context.api_key.model_slug = Some("gpt-5.4-mini".to_string());
+    let prepared = rewrite_client_frame(
+        r#"{"type":"response.create","model":"gpt-5.4","input":"hello","service_tier":"fast"}"#,
+        &model_override_context,
+    )
+    .expect("rewrite overridden model frame");
+    let prepared = apply_model_fast_policy_with_storage(prepared, &storage)
+        .expect("apply final model fast policy");
+    let value: Value = serde_json::from_str(&prepared.text).expect("parse overridden model frame");
+    assert_eq!(prepared.model.as_deref(), Some("gpt-5.4-mini"));
+    assert!(value.get("service_tier").is_none());
+}
+
+#[test]
+fn websocket_frame_preserves_reserve_alias_and_borrows_luna_policy() {
+    let storage = Storage::open_in_memory().expect("open storage");
+    storage.init().expect("init storage");
+    let mut luna = storage
+        .get_managed_model_v2(codexmanager_core::usage::LUNA_MODEL_SLUG)
+        .expect("read Luna model")
+        .expect("Luna model");
+    luna.fast_policy = ModelFastPolicyV2::Filter;
+    storage
+        .upsert_managed_model_v2(&ManagedModelV2Upsert {
+            previous_slug: Some(codexmanager_core::usage::LUNA_MODEL_SLUG.to_string()),
+            model: luna,
+        })
+        .expect("update Luna policy");
+
+    let mut context = WsRequestContext {
+        api_key: sample_api_key(),
+        incoming_headers: sample_incoming_headers(None, None),
+        prompt_cache_key: None,
+        cache_affinity_key: None,
+        route_conversation_id: None,
+        route_conversation_source: None,
+        effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
+        prefer_raw_errors: false,
+    };
+    context.api_key.model_slug = Some(codexmanager_core::usage::LUNA_MODEL_SLUG.to_string());
+    let prepared = rewrite_client_frame(
+        r#"{"type":"response.create","model":"gpt-reserve","input":"hello","service_tier":"fast"}"#,
+        &context,
+    )
+    .expect("rewrite Reserve websocket frame");
+    let prepared = apply_model_fast_policy_with_storage(prepared, &storage)
+        .expect("apply borrowed Luna policy");
+    let value: Value = serde_json::from_str(&prepared.text).expect("parse rewritten frame");
+
+    assert_eq!(prepared.model.as_deref(), Some("gpt-reserve"));
+    assert_eq!(value["model"], "gpt-reserve");
+    assert!(value.get("service_tier").is_none());
+}
+
+#[test]
+fn websocket_frame_drops_duplicate_tool_outputs_but_keeps_distinct_calls() {
+    let _guard = crate::test_env_guard();
+    let context = WsRequestContext {
+        api_key: sample_api_key(),
+        incoming_headers: sample_incoming_headers(None, None),
+        prompt_cache_key: None,
+        cache_affinity_key: None,
+        route_conversation_id: None,
+        route_conversation_source: None,
+        effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
+        prefer_raw_errors: false,
+    };
+    let frame = json!({
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "input": [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_duplicate",
+                "name": "exec",
+                "input": "{}"
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_duplicate",
+                "output": [{ "type": "input_text", "text": "command result" }]
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_duplicate",
+                "output": "progress notification"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_function",
+                "output": "function result"
+            }
+        ]
+    });
+
+    let prepared = rewrite_client_frame(frame.to_string().as_str(), &context)
+        .expect("rewrite websocket frame");
+    let value: Value = serde_json::from_str(&prepared.text).expect("parse prepared frame");
+    let input = value["input"].as_array().expect("input array");
+
+    assert_eq!(input.len(), 3);
+    assert_eq!(input[0]["type"], "custom_tool_call");
+    assert_eq!(input[1]["type"], "custom_tool_call_output");
+    assert_eq!(input[1]["output"][0]["text"], "command result");
+    assert_eq!(input[2]["type"], "function_call_output");
+    assert_eq!(prepared.input, value["input"]);
+}
+
+#[test]
+fn websocket_terminal_retry_ignores_preamble_but_stops_after_real_output() {
+    assert!(
+        should_attempt_ws_terminal_retry(400, false),
+        "a response preamble has no non-preamble event and must not consume the retry opportunity"
+    );
+    assert!(!should_attempt_ws_terminal_retry(400, true));
+    assert!(!should_attempt_ws_terminal_retry(200, false));
+}
+
+#[test]
+fn websocket_stale_tool_output_after_task_boundary_recovers_from_call_registry() {
+    let _guard = crate::test_env_guard();
+    let session_id = format!("stale-tool-output-{}-{}", std::process::id(), now_ts());
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "session_id",
+        HeaderValue::from_str(session_id.as_str()).expect("session header"),
+    );
+    let context = WsRequestContext {
+        api_key: sample_api_key(),
+        incoming_headers: crate::gateway::IncomingHeaderSnapshot::from_http_headers(&headers),
+        prompt_cache_key: None,
+        cache_affinity_key: Some(session_id),
+        route_conversation_id: None,
+        route_conversation_source: None,
+        effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
+        prefer_raw_errors: false,
+    };
+    let seed = rewrite_client_frame(
+        r#"{"type":"response.create","model":"gpt-5.4","prompt_cache_key":"per-task-cache-key","input":"run cleanup"}"#,
+        &context,
+    )
+    .expect("rewrite seed response.create");
+    remember_ws_tool_calls_from_upstream_event(
+        &context,
+        &seed,
+        &json!({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "custom_tool_call",
+                "id": "ctc_stale_task",
+                "call_id": "call_stale_task",
+                "name": "exec",
+                "input": "{}"
+            }
+        })
+        .to_string(),
+    );
+
+    // This is the exact failure shape: a new task sends the completed tool output,
+    // but no matching custom_tool_call exists in that task's input context.
+    let stale_request = rewrite_client_frame(
+        &json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "input": [{
+                "type": "custom_tool_call_output",
+                "call_id": "call_stale_task",
+                "output": [
+                    {"type": "input_text", "text": "Script completed\nWall time: 0.2 seconds\nOutput:\n"},
+                    {"type": "input_text", "text": "MANIFESTS_REFRESHED=PASS"}
+                ]
+            }]
+        })
+        .to_string()
+        .as_str(),
+        &context,
+    )
+    .expect("rewrite stale task response.create");
+    assert!(stale_request.previous_response_id.is_none());
+    assert!(ws_request_has_tool_call_output(stale_request.text.as_str()));
+
+    let cached = load_ws_tool_call_registry(&context, &stale_request)
+        .expect("tool-call registry must survive the frontend task boundary");
+    let terminal = inspect_ws_terminal_event(
+        r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","code":null,"message":"No tool call found for custom tool call output with call_id call_stale_task.","param":"input"}}"#,
+    )
+    .expect("exact upstream missing-tool terminal");
+    let mut already_retried = false;
+    let recovered = prepare_missing_ws_tool_call_retry(
+        stale_request.text.as_str(),
+        &cached,
+        &terminal,
+        &mut already_retried,
+    )
+    .expect("prepare stale-task recovery")
+    .expect("cached call must make the stale output self-contained");
+    let value: Value = serde_json::from_str(recovered.as_str()).expect("parse recovered request");
+    let input = value["input"].as_array().expect("recovered input array");
+    assert!(already_retried);
+    assert_eq!(input.len(), 2);
+    assert_eq!(input[0]["type"], "custom_tool_call");
+    assert_eq!(input[0]["call_id"], "call_stale_task");
+    assert_eq!(input[1]["type"], "custom_tool_call_output");
+    assert_eq!(input[1]["call_id"], "call_stale_task");
+    assert_eq!(input[1]["output"][1]["text"], "MANIFESTS_REFRESHED=PASS");
 }
 
 fn sample_account() -> Account {
@@ -135,6 +593,148 @@ fn websocket_initial_and_terminal_failover_candidates_stay_in_key_group() {
         .all(|(account, _)| account.group_name.as_deref() == Some("team-a")));
 }
 
+#[test]
+fn websocket_reselection_excludes_disabled_and_runtime_limited_accounts() {
+    let _guard = crate::test_env_guard();
+    let storage = Storage::open_in_memory().expect("open");
+    storage.init().expect("init");
+    let mut api_key = sample_api_key();
+    api_key.id = "gk-ws-reselection".to_string();
+    api_key.key_hash = "hash-ws-reselection".to_string();
+    storage.insert_api_key(&api_key).expect("insert api key");
+    insert_ws_candidate(&storage, "acc-disabled", 0, "team-a");
+    insert_ws_candidate(&storage, "acc-available", 1, "team-a");
+    storage
+        .update_account_status("acc-disabled", "disabled")
+        .expect("disable account");
+    crate::gateway::invalidate_candidate_cache();
+
+    let routed = crate::gateway::gateway_collect_routed_candidates_for_ws(
+        &storage,
+        &api_key.id,
+        Some("gpt-5.4"),
+        Some("conversation-reselection"),
+        Some(crate::gateway::conversation_binding::RouteConversationSource::NativeConversation),
+    )
+    .expect("collect websocket candidates");
+    assert_eq!(
+        routed
+            .candidates
+            .iter()
+            .map(|(account, _)| account.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["acc-available"]
+    );
+    assert!(crate::gateway::gateway_ws_account_requires_switch(
+        &routed,
+        "acc-disabled"
+    ));
+
+    crate::gateway::gateway_mark_account_cooldown_for_status("acc-available", 429);
+    let cooled = crate::gateway::gateway_collect_routed_candidates_for_ws(
+        &storage,
+        &api_key.id,
+        Some("gpt-5.4"),
+        Some("conversation-reselection"),
+        Some(crate::gateway::conversation_binding::RouteConversationSource::NativeConversation),
+    )
+    .expect("collect websocket candidates after cooldown");
+    assert!(cooled.candidates.is_empty());
+    assert!(crate::gateway::gateway_ws_account_requires_switch(
+        &cooled,
+        "acc-available"
+    ));
+    crate::gateway::reload_runtime_config_from_env();
+}
+
+#[test]
+fn websocket_reselection_keeps_thread_binding_but_switches_when_bound_account_is_unavailable() {
+    let _guard = crate::test_env_guard();
+    let storage = Storage::open_in_memory().expect("open");
+    storage.init().expect("init");
+    let mut api_key = sample_api_key();
+    api_key.id = "gk-ws-thread-reselection".to_string();
+    api_key.key_hash = "hash-ws-thread-reselection".to_string();
+    storage.insert_api_key(&api_key).expect("insert api key");
+    insert_ws_candidate(&storage, "acc-bound", 0, "team-a");
+    insert_ws_candidate(&storage, "acc-next", 1, "team-a");
+    let now = now_ts();
+    storage
+        .upsert_conversation_binding(&ConversationBinding {
+            platform_key_hash: api_key.key_hash.clone(),
+            conversation_id: "conversation-thread".to_string(),
+            account_id: "acc-bound".to_string(),
+            thread_epoch: 1,
+            thread_anchor: "conversation-thread".to_string(),
+            status: "active".to_string(),
+            last_model: Some("gpt-5.4".to_string()),
+            last_switch_reason: None,
+            created_at: now,
+            updated_at: now,
+            last_used_at: now,
+        })
+        .expect("insert conversation binding");
+    storage
+        .update_account_status("acc-bound", "disabled")
+        .expect("disable bound account");
+    crate::gateway::invalidate_candidate_cache();
+
+    let routed = crate::gateway::gateway_collect_routed_candidates_for_ws(
+        &storage,
+        &api_key.id,
+        Some("gpt-5.4"),
+        Some("conversation-thread"),
+        Some(crate::gateway::conversation_binding::RouteConversationSource::NativeConversation),
+    )
+    .expect("collect websocket candidates for bound thread");
+    assert_eq!(routed.candidates[0].0.id, "acc-next");
+    assert!(
+        !routed
+            .conversation_routing
+            .as_ref()
+            .expect("conversation routing")
+            .bound_account_selectable
+    );
+    assert!(crate::gateway::gateway_ws_account_requires_switch(
+        &routed,
+        "acc-bound"
+    ));
+}
+
+#[test]
+fn websocket_reselection_honors_manual_preference_without_conversation_binding() {
+    let mut preferred = sample_account();
+    preferred.id = "acc-preferred".to_string();
+    let mut current = sample_account();
+    current.id = "acc-current".to_string();
+    let token = |account_id: &str| Token {
+        account_id: account_id.to_string(),
+        id_token: "header.payload.sig".to_string(),
+        access_token: "header.payload.sig".to_string(),
+        refresh_token: "refresh".to_string(),
+        api_key_access_token: None,
+        last_refresh: now_ts(),
+    };
+    let routed = crate::gateway::GatewayRoutedCandidates {
+        candidates: vec![
+            (preferred, token("acc-preferred")),
+            (current, token("acc-current")),
+        ],
+        route_strategy: "manual_preferred_account",
+        route_source: "manual_preferred_account",
+        conversation_routing: None,
+    };
+
+    assert!(crate::gateway::gateway_ws_account_requires_switch(
+        &routed,
+        "acc-current"
+    ));
+    assert!(!crate::gateway::gateway_ws_account_requires_switch(
+        &routed,
+        "acc-preferred"
+    ));
+}
+
 fn sample_incoming_headers(
     conversation_id: Option<&str>,
     turn_state: Option<&str>,
@@ -230,6 +830,44 @@ fn websocket_connect_error_detects_invalid_agent_identity_task_body() {
 }
 
 #[test]
+fn websocket_connect_error_detects_connection_limit_body() {
+    let mut response = super::WsClientResponse::new(Some(
+        br#"{"type":"error","status":400,"error":{"code":"websocket_connection_limit_reached"}}"#
+            .to_vec(),
+    ));
+    *response.status_mut() = axum::http::StatusCode::BAD_REQUEST;
+    let err = super::WsConnectError::from_tungstenite(tokio_tungstenite::tungstenite::Error::Http(
+        Box::new(response),
+    ));
+
+    assert!(err.is_websocket_connection_limit_reached());
+}
+
+#[test]
+fn websocket_connect_error_detects_compression_negotiation_rejection() {
+    let mut response = super::WsClientResponse::new(Some(
+        br#"unsupported extension: permessage-deflate"#.to_vec(),
+    ));
+    *response.status_mut() = axum::http::StatusCode::BAD_REQUEST;
+    let err = super::WsConnectError::from_tungstenite(tokio_tungstenite::tungstenite::Error::Http(
+        Box::new(response),
+    ));
+
+    assert!(err.is_compression_negotiation_rejection());
+}
+
+#[test]
+fn websocket_connect_error_does_not_treat_unrelated_bad_request_as_compression_rejection() {
+    let mut response = super::WsClientResponse::new(Some(br#"invalid response.create"#.to_vec()));
+    *response.status_mut() = axum::http::StatusCode::BAD_REQUEST;
+    let err = super::WsConnectError::from_tungstenite(tokio_tungstenite::tungstenite::Error::Http(
+        Box::new(response),
+    ));
+
+    assert!(!err.is_compression_negotiation_rejection());
+}
+
+#[test]
 fn inspect_ws_terminal_event_infers_usage_limit_status_without_explicit_status() {
     let event = inspect_ws_terminal_event(
         r#"{"type":"error","error":{"message":"You've hit your usage limit."}}"#,
@@ -268,6 +906,18 @@ fn inspect_ws_terminal_event_recognizes_usage_limit_code_without_message() {
 }
 
 #[test]
+fn inspect_ws_terminal_event_recognizes_websocket_connection_limit() {
+    let event = inspect_ws_terminal_event(
+        r#"{"type":"error","status":400,"error":{"code":"websocket_connection_limit_reached","message":"Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."}}"#,
+    )
+    .expect("terminal event");
+
+    assert_eq!(event.status_code, 400);
+    assert!(event.is_websocket_connection_limit);
+    assert!(!event.is_usage_limit);
+}
+
+#[test]
 fn usage_limit_words_in_normal_output_are_not_treated_as_terminal() {
     assert!(inspect_ws_terminal_event(
         r#"{"type":"response.output_text.delta","delta":"The usage limit has been reached is an English error message."}"#,
@@ -284,6 +934,30 @@ fn websocket_created_event_is_buffered_but_actual_output_is_not() {
     assert!(!should_buffer_ws_upstream_preamble(
         r#"{"type":"response.output_item.added","item":{"type":"message"}}"#,
         1,
+    ));
+}
+
+#[test]
+fn websocket_tool_output_request_keeps_retry_preamble_buffered() {
+    assert!(ws_request_has_tool_call_output(
+        json!({
+            "type": "response.create",
+            "input": [{
+                "type": "custom_tool_call_output",
+                "call_id": "call_buffered",
+                "output": "done"
+            }]
+        })
+        .to_string()
+        .as_str()
+    ));
+    assert!(!ws_request_has_tool_call_output(
+        json!({
+            "type": "response.create",
+            "input": "ordinary prompt"
+        })
+        .to_string()
+        .as_str()
     ));
 }
 
@@ -309,7 +983,10 @@ fn parse_ws_usage_reads_chat_completion_compat_details() {
         "response": {
             "usage": {
                 "prompt_tokens": 100,
-                "prompt_tokens_details": { "cached_tokens": 75 },
+                "prompt_tokens_details": {
+                    "cached_tokens": 75,
+                    "cache_write_tokens": 7
+                },
                 "completion_tokens": 20,
                 "total_tokens": 120,
                 "completion_tokens_details": { "reasoning_tokens": 9 }
@@ -321,6 +998,7 @@ fn parse_ws_usage_reads_chat_completion_compat_details() {
 
     assert_eq!(usage.input_tokens, Some(100));
     assert_eq!(usage.cached_input_tokens, Some(75));
+    assert_eq!(usage.cache_write_tokens, Some(7));
     assert_eq!(usage.output_tokens, Some(20));
     assert_eq!(usage.total_tokens, Some(120));
     assert_eq!(usage.reasoning_output_tokens, Some(9));
@@ -341,12 +1019,23 @@ fn inspect_ws_terminal_event_maps_incomplete_to_terminal_error() {
 }
 
 #[test]
-fn websocket_frame_preserves_prompt_cache_key_when_native_conversation_anchor_exists() {
+fn inspect_ws_terminal_event_requires_response_completed() {
+    assert!(
+        inspect_ws_terminal_event(r#"{"type":"response.done","response":{"id":"resp_done"}}"#,)
+            .is_none()
+    );
+}
+
+#[test]
+fn websocket_frame_preserves_client_prompt_cache_key_with_native_conversation_anchor() {
     let _guard = crate::test_env_guard();
     let context = WsRequestContext {
         api_key: sample_api_key(),
         incoming_headers: sample_incoming_headers(Some("conversation-1"), None),
         prompt_cache_key: Some("sticky-thread".to_string()),
+        cache_affinity_key: None,
+        route_conversation_id: None,
+        route_conversation_source: None,
         effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
         prefer_raw_errors: false,
     };
@@ -364,16 +1053,73 @@ fn websocket_frame_preserves_prompt_cache_key_when_native_conversation_anchor_ex
             .and_then(serde_json::Value::as_str),
         Some("client-thread")
     );
+    assert_eq!(prepared.prompt_cache_key.as_deref(), Some("client-thread"));
 }
 
 #[test]
-fn upstream_websocket_request_forwards_oai_attestation_header() {
+fn websocket_frame_without_client_pck_uses_root_session_upstream_and_session_route() {
+    let _guard = crate::test_env_guard();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "session-id",
+        HeaderValue::from_static("root-websocket-session"),
+    );
+    headers.insert("thread-id", HeaderValue::from_static("child-ws-thread"));
+    let context = WsRequestContext {
+        api_key: sample_api_key(),
+        incoming_headers: crate::gateway::IncomingHeaderSnapshot::from_http_headers(&headers),
+        prompt_cache_key: Some("root-websocket-session".to_string()),
+        cache_affinity_key: Some("root-websocket-session".to_string()),
+        route_conversation_id: None,
+        route_conversation_source: None,
+        effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
+        prefer_raw_errors: false,
+    };
+    let prepared = rewrite_client_frame(
+        r#"{"type":"response.create","model":"gpt-5.4","input":"hello"}"#,
+        &context,
+    )
+    .expect("rewrite websocket frame");
+    let value: serde_json::Value =
+        serde_json::from_str(&prepared.text).expect("parse prepared websocket frame");
+
+    assert_eq!(
+        value
+            .get("prompt_cache_key")
+            .and_then(serde_json::Value::as_str),
+        Some("root-websocket-session")
+    );
+    assert_eq!(
+        prepared.prompt_cache_key, None,
+        "generated session fallback must not masquerade as a client PCK route"
+    );
+    let (route_id, source) = ws_route_binding_for_frame(&context, &prepared);
+    assert!(route_id.is_some_and(|route_id| route_id.starts_with("sid:v2:")));
+    assert_eq!(
+        source,
+        Some(crate::gateway::conversation_binding::RouteConversationSource::SessionAffinity)
+    );
+}
+
+#[test]
+fn upstream_websocket_request_filters_local_image_marker_and_forwards_oai_attestation() {
     let mut headers = HeaderMap::new();
     headers.insert("x-oai-attestation", HeaderValue::from_static("attest-ws"));
+    headers.insert(
+        "x-openai-actor-authorization",
+        HeaderValue::from_static("local-image-extension"),
+    );
+    headers.insert(
+        "x-codex-image-turn-id",
+        HeaderValue::from_static("turn-image-ws"),
+    );
     let context = WsRequestContext {
         api_key: sample_api_key(),
         incoming_headers: crate::gateway::IncomingHeaderSnapshot::from_http_headers(&headers),
         prompt_cache_key: None,
+        cache_affinity_key: None,
+        route_conversation_id: None,
+        route_conversation_source: None,
         effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
         prefer_raw_errors: false,
     };
@@ -385,6 +1131,7 @@ fn upstream_websocket_request_forwards_oai_attestation_header() {
         &account,
         &authorization,
         &context,
+        false,
     )
     .unwrap_or_else(|err| panic!("build upstream websocket request failed: {}", err.message));
 
@@ -394,6 +1141,20 @@ fn upstream_websocket_request_forwards_oai_attestation_header() {
             .get("x-oai-attestation")
             .and_then(|value| value.to_str().ok()),
         Some("attest-ws")
+    );
+    assert_eq!(
+        request
+            .headers()
+            .get("x-openai-actor-authorization")
+            .and_then(|value| value.to_str().ok()),
+        None
+    );
+    assert_eq!(
+        request
+            .headers()
+            .get("x-codex-image-turn-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("turn-image-ws")
     );
     assert_eq!(
         request
@@ -413,11 +1174,52 @@ fn upstream_websocket_request_forwards_oai_attestation_header() {
 }
 
 #[test]
+fn upstream_websocket_request_preserves_real_actor_authorization() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-openai-actor-authorization",
+        HeaderValue::from_static("actor-biscuit"),
+    );
+    let context = WsRequestContext {
+        api_key: sample_api_key(),
+        incoming_headers: crate::gateway::IncomingHeaderSnapshot::from_http_headers(&headers),
+        prompt_cache_key: None,
+        cache_affinity_key: None,
+        route_conversation_id: None,
+        route_conversation_source: None,
+        effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
+        prefer_raw_errors: false,
+    };
+    let account = sample_account();
+    let authorization = websocket_bearer_authorization("bearer-ws");
+
+    let request = build_upstream_websocket_request(
+        "wss://chatgpt.com/backend-api/codex/v1/responses",
+        &account,
+        &authorization,
+        &context,
+        false,
+    )
+    .unwrap_or_else(|err| panic!("build upstream websocket request failed: {}", err.message));
+
+    assert_eq!(
+        request
+            .headers()
+            .get("x-openai-actor-authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("actor-biscuit")
+    );
+}
+
+#[test]
 fn upstream_websocket_request_preserves_agent_assertion_and_fedramp() {
     let context = WsRequestContext {
         api_key: sample_api_key(),
         incoming_headers: crate::gateway::IncomingHeaderSnapshot::default(),
         prompt_cache_key: None,
+        cache_affinity_key: None,
+        route_conversation_id: None,
+        route_conversation_source: None,
         effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
         prefer_raw_errors: false,
     };
@@ -434,6 +1236,7 @@ fn upstream_websocket_request_preserves_agent_assertion_and_fedramp() {
         &sample_account(),
         &authorization,
         &context,
+        false,
     )
     .unwrap_or_else(|err| panic!("build upstream websocket request failed: {}", err.message));
 
@@ -500,6 +1303,9 @@ fn websocket_frame_merges_header_metadata_into_client_metadata() {
         api_key: sample_api_key(),
         incoming_headers: sample_incoming_headers_with_metadata(),
         prompt_cache_key: None,
+        cache_affinity_key: None,
+        route_conversation_id: None,
+        route_conversation_source: None,
         effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
         prefer_raw_errors: false,
     };
@@ -531,6 +1337,9 @@ fn websocket_response_create_keeps_codex_field_snapshot() {
         api_key: sample_api_key(),
         incoming_headers: sample_incoming_headers_with_metadata(),
         prompt_cache_key: None,
+        cache_affinity_key: None,
+        route_conversation_id: None,
+        route_conversation_source: None,
         effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
         prefer_raw_errors: false,
     };
@@ -590,7 +1399,6 @@ fn websocket_response_create_keeps_codex_field_snapshot() {
         "reasoning",
         "service_tier",
         "store",
-        "stream",
         "text",
         "tool_choice",
         "tools",
@@ -604,6 +1412,8 @@ fn websocket_response_create_keeps_codex_field_snapshot() {
     assert_eq!(value["instructions"], "  stay exactly\n");
     assert_eq!(value["previous_response_id"], "resp_previous");
     assert_eq!(value["generate"], false);
+    assert!(object.get("stream").is_none());
+    assert!(object.get("background").is_none());
     assert_eq!(value["reasoning"]["context"], "current_turn");
     assert_eq!(value["reasoning"]["summary"], "auto");
     assert_eq!(value["client_metadata"]["source"], "ws-snapshot");
@@ -635,6 +1445,9 @@ fn websocket_response_create_uses_minimal_fallback_for_missing_or_blank_instruct
         api_key: sample_api_key(),
         incoming_headers: sample_incoming_headers_with_metadata(),
         prompt_cache_key: None,
+        cache_affinity_key: None,
+        route_conversation_id: None,
+        route_conversation_source: None,
         effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
         prefer_raw_errors: false,
     };
@@ -669,6 +1482,9 @@ fn websocket_logs_client_ultra_and_sends_upstream_max() {
         api_key: sample_api_key(),
         incoming_headers: sample_incoming_headers_with_metadata(),
         prompt_cache_key: None,
+        cache_affinity_key: None,
+        route_conversation_id: None,
+        route_conversation_source: None,
         effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
         prefer_raw_errors: false,
     };
@@ -713,6 +1529,404 @@ fn websocket_retry_can_strip_previous_response_id() {
 }
 
 #[test]
+fn websocket_response_history_expands_store_false_text_chain() {
+    let mut cache = CompletedWsResponseCache::default();
+    assert!(cache
+        .observe_completed_response(
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_history_1",
+                    "output": [{
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{ "type": "output_text", "text": "first answer" }]
+                    }]
+                }
+            })
+            .to_string()
+            .as_str(),
+            None,
+            &json!("first question"),
+        )
+        .expect("cache first completed response"));
+    assert!(cache.contains("resp_history_1"));
+    assert!(cache
+        .observe_completed_response(
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_history_2",
+                    "output": [{
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{ "type": "output_text", "text": "second answer" }]
+                    }]
+                }
+            })
+            .to_string()
+            .as_str(),
+            Some("resp_history_1"),
+            &json!([{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "second question" }]
+            }]),
+        )
+        .expect("cache second completed response"));
+
+    let expanded = super::expand_response_create_previous_response(
+        json!({
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "store": false,
+            "previous_response_id": "resp_history_2",
+            "input": "third question"
+        })
+        .to_string()
+        .as_str(),
+        &cache,
+    )
+    .expect("expand cached response history")
+    .expect("request has previous_response_id");
+    let value: Value = serde_json::from_str(&expanded).expect("parse expanded history");
+    let input = value["input"].as_array().expect("expanded input array");
+
+    assert!(value.get("previous_response_id").is_none());
+    assert_eq!(input.len(), 5);
+    assert_eq!(input[0]["role"], "user");
+    assert_eq!(input[0]["content"][0]["text"], "first question");
+    assert_eq!(input[1]["role"], "assistant");
+    assert_eq!(input[1]["content"][0]["text"], "first answer");
+    assert_eq!(input[2]["content"][0]["text"], "second question");
+    assert_eq!(input[3]["content"][0]["text"], "second answer");
+    assert_eq!(input[4]["content"][0]["text"], "third question");
+}
+
+#[test]
+fn websocket_response_history_requires_complete_cached_chain() {
+    let mut cache = CompletedWsResponseCache::default();
+    cache
+        .observe_completed_response(
+            json!({
+                "type": "response.completed",
+                "response": { "id": "resp_history_child", "output": [] }
+            })
+            .to_string()
+            .as_str(),
+            Some("resp_history_missing_parent"),
+            &json!("child question"),
+        )
+        .expect("cache child response");
+
+    let err = super::expand_response_create_previous_response(
+        json!({
+            "type": "response.create",
+            "previous_response_id": "resp_history_child",
+            "input": "continue"
+        })
+        .to_string()
+        .as_str(),
+        &cache,
+    )
+    .expect_err("missing parent must not produce partial context");
+
+    assert!(err.contains("resp_history_missing_parent"));
+    assert!(err.contains("not available"));
+}
+
+#[test]
+fn websocket_account_rebase_prepends_cached_tool_calls_before_outputs() {
+    let mut cache = CompletedWsToolCallCache::default();
+    cache.observe_upstream_event(
+        json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "custom_tool_call",
+                "id": "ctc_item_1",
+                "call_id": "call_custom_1",
+                "name": "apply_patch",
+                "input": "*** Begin Patch"
+            }
+        })
+        .to_string()
+        .as_str(),
+    );
+    cache.observe_upstream_event(
+        json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_tool_calls",
+                "output": [{
+                    "type": "function_call",
+                    "id": "fc_item_1",
+                    "call_id": "call_function_1",
+                    "name": "lookup",
+                    "arguments": "{}"
+                }]
+            }
+        })
+        .to_string()
+        .as_str(),
+    );
+    let request = json!({
+        "type": "response.create",
+        "previous_response_id": "resp_tool_calls",
+        "session_id": "old-session",
+        "x-codex-turn-state": "old-turn-state",
+        "client_metadata": {
+            "x-codex-window-id": "old-window",
+            "source": "unit-test"
+        },
+        "input": [
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_custom_1",
+                "output": "patched"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_function_1",
+                "output": "found"
+            }
+        ]
+    });
+
+    let rebased = rebase_ws_request_for_account_change(request.to_string().as_str(), &cache)
+        .expect("account rebase should restore cached tool calls");
+    let value: Value = serde_json::from_str(rebased.as_str()).expect("parse rebased request");
+    let input = value["input"].as_array().expect("rebased input array");
+
+    assert_eq!(input.len(), 4);
+    assert_eq!(input[0]["type"], "custom_tool_call");
+    assert_eq!(input[0]["call_id"], "call_custom_1");
+    assert_eq!(input[1]["type"], "custom_tool_call_output");
+    assert_eq!(input[2]["type"], "function_call");
+    assert_eq!(input[2]["call_id"], "call_function_1");
+    assert_eq!(input[3]["type"], "function_call_output");
+    assert!(value.get("previous_response_id").is_none());
+    assert!(value.get("session_id").is_none());
+    assert!(value.get("x-codex-turn-state").is_none());
+    assert!(value["client_metadata"].get("x-codex-window-id").is_none());
+    assert_eq!(value["client_metadata"]["source"], "unit-test");
+}
+
+#[test]
+fn websocket_account_rebase_reorders_existing_call_without_duplicate() {
+    let request = json!({
+        "type": "response.create",
+        "previous_response_id": "resp_existing_call",
+        "input": [
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_existing",
+                "output": "done"
+            },
+            {
+                "type": "custom_tool_call",
+                "id": "ctc_existing",
+                "call_id": "call_existing",
+                "name": "apply_patch",
+                "input": "patch"
+            }
+        ]
+    });
+
+    let rebased = rebase_ws_request_for_account_change(
+        request.to_string().as_str(),
+        &CompletedWsToolCallCache::default(),
+    )
+    .expect("current input call should satisfy its output");
+    let value: Value = serde_json::from_str(rebased.as_str()).expect("parse rebased request");
+    let input = value["input"].as_array().expect("rebased input array");
+
+    assert_eq!(input.len(), 2, "matching call must not be duplicated");
+    assert_eq!(input[0]["type"], "custom_tool_call");
+    assert_eq!(input[1]["type"], "custom_tool_call_output");
+}
+
+#[test]
+fn websocket_account_rebase_strips_cross_account_reasoning_and_affinity_metadata() {
+    fn contains_encrypted_content(value: &Value) -> bool {
+        match value {
+            Value::Object(object) => {
+                object.contains_key("encrypted_content")
+                    || object.values().any(contains_encrypted_content)
+            }
+            Value::Array(items) => items.iter().any(contains_encrypted_content),
+            _ => false,
+        }
+    }
+
+    let request = json!({
+        "type": "response.create",
+        "previous_response_id": "resp_old_account",
+        "x-codex-parent-thread-id": "parent-old",
+        "x-codex-turn-metadata": "turn-meta-old",
+        "client_metadata": {
+            "session_id": "session-old",
+            "conversation_id": "conversation-old",
+            "x-client-request-id": "request-old",
+            "x-codex-window-id": "window-old",
+            "x-codex-turn-state": "turn-state-old",
+            "x-codex-parent-thread-id": "parent-old",
+            "x-codex-turn-metadata": "turn-meta-old",
+            "x-openai-subagent": "review",
+            "x-codex-beta-features": "beta-a",
+            "source": "unit-test"
+        },
+        "input": [
+            {
+                "type": "reasoning",
+                "id": "reasoning-old",
+                "summary": [],
+                "encrypted_content": "encrypted-old-account"
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "continue" },
+                    { "type": "encrypted_content", "encrypted_content": "nested-old" }
+                ]
+            }
+        ]
+    });
+
+    let rebased = rebase_ws_request_for_account_change(
+        request.to_string().as_str(),
+        &CompletedWsToolCallCache::default(),
+    )
+    .expect("cross-account rebase should succeed");
+    let value: Value = serde_json::from_str(&rebased).expect("parse rebased request");
+
+    assert!(!contains_encrypted_content(&value));
+    assert!(value.get("previous_response_id").is_none());
+    assert!(value.get("x-codex-parent-thread-id").is_none());
+    assert!(value.get("x-codex-turn-metadata").is_none());
+    for key in [
+        "session_id",
+        "conversation_id",
+        "x-client-request-id",
+        "x-codex-window-id",
+        "x-codex-turn-state",
+        "x-codex-parent-thread-id",
+        "x-codex-turn-metadata",
+    ] {
+        assert!(
+            value["client_metadata"].get(key).is_none(),
+            "cross-account rebase must strip {key}"
+        );
+    }
+    assert_eq!(value["client_metadata"]["x-openai-subagent"], "review");
+    assert_eq!(value["client_metadata"]["x-codex-beta-features"], "beta-a");
+    assert_eq!(value["client_metadata"]["source"], "unit-test");
+    assert_eq!(value["input"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        value["input"][0]["content"],
+        json!([{ "type": "input_text", "text": "continue" }])
+    );
+}
+
+#[test]
+fn websocket_account_rebase_rejects_orphan_tool_output() {
+    let request = json!({
+        "type": "response.create",
+        "previous_response_id": "resp_missing_call",
+        "input": [{
+            "type": "custom_tool_call_output",
+            "call_id": "call_missing",
+            "output": "done"
+        }]
+    });
+
+    let err = rebase_ws_request_for_account_change(
+        request.to_string().as_str(),
+        &CompletedWsToolCallCache::default(),
+    )
+    .expect_err("orphan output must not be sent to a different account");
+
+    assert_eq!(err.code, super::RESPONSES_WS_CONTEXT_REBASE_ERROR_CODE);
+    assert!(err.message.contains("call_missing"));
+    assert!(err.message.contains("custom_tool_call"));
+}
+
+#[test]
+fn upstream_websocket_account_rebase_strips_session_affinity_headers() {
+    let mut headers = HeaderMap::new();
+    headers.insert("session_id", HeaderValue::from_static("session-old"));
+    headers.insert("x-codex-window-id", HeaderValue::from_static("window-old"));
+    headers.insert(
+        "x-client-request-id",
+        HeaderValue::from_static("request-old"),
+    );
+    headers.insert("x-codex-turn-state", HeaderValue::from_static("turn-old"));
+    headers.insert(
+        "x-codex-parent-thread-id",
+        HeaderValue::from_static("parent-old"),
+    );
+    headers.insert(
+        "x-codex-turn-metadata",
+        HeaderValue::from_static("turn-meta-old"),
+    );
+    headers.insert("x-openai-subagent", HeaderValue::from_static("review"));
+    headers.insert("x-codex-beta-features", HeaderValue::from_static("beta-a"));
+    let context = WsRequestContext {
+        api_key: sample_api_key(),
+        incoming_headers: crate::gateway::IncomingHeaderSnapshot::from_http_headers(&headers),
+        prompt_cache_key: None,
+        cache_affinity_key: None,
+        route_conversation_id: None,
+        route_conversation_source: None,
+        effective_upstream_base: "https://chatgpt.com/backend-api/codex".to_string(),
+        prefer_raw_errors: false,
+    };
+    let request = build_upstream_websocket_request(
+        "wss://chatgpt.com/backend-api/codex/responses",
+        &sample_account(),
+        &websocket_bearer_authorization("bearer-ws"),
+        &context,
+        true,
+    )
+    .unwrap_or_else(|err| panic!("build rebased websocket request failed: {}", err.message));
+
+    for header in [
+        "session_id",
+        "x-codex-window-id",
+        "x-client-request-id",
+        "x-codex-turn-state",
+        "x-codex-parent-thread-id",
+        "x-codex-turn-metadata",
+    ] {
+        assert!(
+            request.headers().get(header).is_none(),
+            "rebased websocket must strip {header}"
+        );
+    }
+    assert_eq!(
+        request
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer bearer-ws")
+    );
+    assert_eq!(
+        request
+            .headers()
+            .get("x-openai-subagent")
+            .and_then(|value| value.to_str().ok()),
+        Some("review")
+    );
+    assert_eq!(
+        request
+            .headers()
+            .get("x-codex-beta-features")
+            .and_then(|value| value.to_str().ok()),
+        Some("beta-a")
+    );
+}
+
+#[test]
 fn websocket_detects_previous_response_not_found_terminal() {
     let terminal = inspect_ws_terminal_event(
             r#"{"type":"response.failed","status":400,"error":{"message":"Previous response with id 'resp_123' not found."}}"#,
@@ -720,4 +1934,148 @@ fn websocket_detects_previous_response_not_found_terminal() {
         .expect("terminal event");
 
     assert!(is_previous_response_not_found_terminal(&terminal));
+}
+
+#[test]
+fn websocket_detects_exact_missing_custom_and_function_tool_call_terminals() {
+    for (message, expected_kind, expected_call_id) in [
+        (
+            "No tool call found for custom tool call output with call_id call_custom_1.",
+            WsToolCallKind::Custom,
+            "call_custom_1",
+        ),
+        (
+            "No tool call found for function call output with call_id 'call_function_1'.",
+            WsToolCallKind::Function,
+            "call_function_1",
+        ),
+        (
+            "No tool call found for function tool call output with call_id call_function_2",
+            WsToolCallKind::Function,
+            "call_function_2",
+        ),
+    ] {
+        let terminal = inspect_ws_terminal_event(
+            json!({ "type": "error", "error": { "message": message } })
+                .to_string()
+                .as_str(),
+        )
+        .expect("missing tool call error should be terminal");
+
+        assert_eq!(terminal.status_code, 400);
+        assert_eq!(
+            missing_ws_tool_call_from_terminal(&terminal),
+            Some((expected_kind, expected_call_id.to_string()))
+        );
+    }
+
+    let unrelated = inspect_ws_terminal_event(
+        r#"{"type":"error","status":400,"error":{"message":"No tool call found while processing output"}}"#,
+    )
+    .expect("unrelated error terminal");
+    assert!(missing_ws_tool_call_from_terminal(&unrelated).is_none());
+}
+
+#[test]
+fn websocket_missing_tool_call_recovery_changes_payload_and_retries_only_once() {
+    let mut cache = CompletedWsToolCallCache::default();
+    cache.observe_upstream_event(
+        json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "custom_tool_call",
+                "id": "ctc_retry_once",
+                "call_id": "call_retry_once",
+                "name": "apply_patch",
+                "input": "patch"
+            }
+        })
+        .to_string()
+        .as_str(),
+    );
+    let request = json!({
+        "type": "response.create",
+        "previous_response_id": "resp_old",
+        "input": [{
+            "type": "custom_tool_call_output",
+            "call_id": "call_retry_once",
+            "output": "done"
+        }]
+    })
+    .to_string();
+    let terminal = inspect_ws_terminal_event(
+        r#"{"type":"response.failed","status":400,"error":{"message":"No tool call found for custom tool call output with call_id call_retry_once."}}"#,
+    )
+    .expect("missing tool call terminal");
+    let mut already_retried = false;
+
+    let recovered =
+        prepare_missing_ws_tool_call_retry(&request, &cache, &terminal, &mut already_retried)
+            .expect("prepare recovery")
+            .expect("matching cached call should allow recovery");
+    let value: Value = serde_json::from_str(&recovered).expect("parse recovered request");
+    assert!(already_retried);
+    assert!(value.get("previous_response_id").is_none());
+    assert_eq!(value["input"][0]["type"], "custom_tool_call");
+    assert_eq!(value["input"][1]["type"], "custom_tool_call_output");
+
+    assert!(
+        prepare_missing_ws_tool_call_retry(&request, &cache, &terminal, &mut already_retried,)
+            .expect("second recovery check")
+            .is_none()
+    );
+}
+
+#[test]
+fn websocket_missing_tool_call_recovery_requires_a_matching_call_and_changed_rebase() {
+    let terminal = inspect_ws_terminal_event(
+        r#"{"type":"error","status":400,"error":{"message":"No tool call found for custom tool call output with call_id call_unchanged."}}"#,
+    )
+    .expect("missing tool call terminal");
+    let mut already_retried = false;
+    let orphan = json!({
+        "type": "response.create",
+        "input": [{
+            "type": "custom_tool_call_output",
+            "call_id": "call_unchanged",
+            "output": "done"
+        }]
+    })
+    .to_string();
+    assert!(prepare_missing_ws_tool_call_retry(
+        &orphan,
+        &CompletedWsToolCallCache::default(),
+        &terminal,
+        &mut already_retried,
+    )
+    .expect("orphan recovery check")
+    .is_none());
+    assert!(!already_retried);
+
+    let already_rebased = json!({
+        "type": "response.create",
+        "input": [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_unchanged",
+                "name": "apply_patch",
+                "input": "patch"
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_unchanged",
+                "output": "done"
+            }
+        ]
+    })
+    .to_string();
+    assert!(prepare_missing_ws_tool_call_retry(
+        &already_rebased,
+        &CompletedWsToolCallCache::default(),
+        &terminal,
+        &mut already_retried,
+    )
+    .expect("unchanged recovery check")
+    .is_none());
+    assert!(!already_retried);
 }

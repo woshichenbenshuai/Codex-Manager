@@ -1,16 +1,15 @@
 use super::{
+    append_passthrough_codex_headers, apply_codex_target_accept_header,
     build_codex_compact_upstream_headers, build_codex_upstream_headers,
     resolve_codex_installation_id,
 };
 use crate::gateway::{
-    set_codex_user_agent_version, set_originator, CodexCompactUpstreamHeaderInput,
-    CodexUpstreamHeaderInput,
+    set_codex_user_agent_version, set_gateway_user_agent, set_originator,
+    CodexCompactUpstreamHeaderInput, CodexUpstreamHeaderInput,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CODEXMANAGER_DB_PATH_ENV: &str = "CODEXMANAGER_DB_PATH";
-const CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL_ENV: &str =
-    "CODEXMANAGER_CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL";
 
 struct RuntimeEnvGuard {
     name: &'static str,
@@ -125,6 +124,14 @@ fn build_codex_upstream_headers_keeps_final_affinity_shape() {
             "x-openai-internal-codex-responses-lite".to_string(),
             "true".to_string(),
         ),
+        (
+            "x-openai-actor-authorization".to_string(),
+            "actor-biscuit".to_string(),
+        ),
+        (
+            "x-codex-image-turn-id".to_string(),
+            "turn-image-123".to_string(),
+        ),
     ];
 
     let headers = build_codex_upstream_headers(CodexUpstreamHeaderInput {
@@ -224,47 +231,70 @@ fn build_codex_upstream_headers_keeps_final_affinity_shape() {
         header_value(&headers, "x-openai-internal-codex-responses-lite"),
         Some("true")
     );
+    assert_eq!(
+        header_value(&headers, "x-openai-actor-authorization"),
+        Some("actor-biscuit")
+    );
+    assert_eq!(
+        header_value(&headers, "x-codex-image-turn-id"),
+        Some("turn-image-123")
+    );
 }
 
 #[test]
-fn build_codex_upstream_headers_omits_responses_lite_when_image_tool_is_auto_injected() {
-    let _guard = crate::test_env_guard();
-    let _inject_guard = RuntimeEnvGuard::set(CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL_ENV, "1");
-    let passthrough = vec![(
-        "x-openai-internal-codex-responses-lite".to_string(),
-        "true".to_string(),
-    )];
+fn local_image_extension_actor_marker_is_not_forwarded_upstream() {
+    let passthrough = vec![
+        (
+            "x-openai-actor-authorization".to_string(),
+            crate::gateway::CODEXMANAGER_IMAGE_EXTENSION_ACTOR_AUTHORIZATION.to_string(),
+        ),
+        (
+            "x-codex-image-turn-id".to_string(),
+            "turn-image-local".to_string(),
+        ),
+    ];
+    let mut headers = Vec::new();
 
-    let headers = build_codex_upstream_headers(CodexUpstreamHeaderInput {
-        auth_token: "token-123",
-        is_fedramp: false,
-        chatgpt_account_id: Some("account-123"),
-        incoming_user_agent: None,
-        incoming_originator: None,
-        preserve_client_identity: false,
-        incoming_session_id: None,
-        incoming_window_id: None,
-        incoming_client_request_id: None,
-        incoming_subagent: None,
-        incoming_beta_features: None,
-        incoming_turn_metadata: None,
-        incoming_parent_thread_id: None,
-        incoming_responsesapi_include_timing_metrics: None,
-        incoming_inference_call_id: None,
-        incoming_oai_attestation: None,
-        passthrough_codex_headers: passthrough.as_slice(),
-        fallback_session_id: None,
-        incoming_turn_state: None,
-        include_turn_state: true,
-        strip_session_affinity: false,
-        has_body: true,
-    });
+    append_passthrough_codex_headers(&mut headers, passthrough.as_slice(), true);
 
+    assert_eq!(header_value(&headers, "x-openai-actor-authorization"), None);
     assert_eq!(
-        header_value(&headers, "x-openai-internal-codex-responses-lite"),
-        None
+        header_value(&headers, "x-codex-image-turn-id"),
+        Some("turn-image-local")
     );
-    assert_eq!(header_value(&headers, "x-openai-fedramp"), None);
+}
+
+#[test]
+fn codex_images_targets_request_json_while_responses_keep_sse() {
+    let mut image_headers = vec![("Accept".to_string(), "text/event-stream".to_string())];
+    apply_codex_target_accept_header(
+        &mut image_headers,
+        "https://chatgpt.com/backend-api/codex/images/generations?version=2",
+    );
+    assert_eq!(
+        header_value(&image_headers, "Accept"),
+        Some("application/json")
+    );
+
+    let mut edit_headers = vec![("Accept".to_string(), "text/event-stream".to_string())];
+    apply_codex_target_accept_header(
+        &mut edit_headers,
+        "https://chatgpt.com/backend-api/codex/images/edits/",
+    );
+    assert_eq!(
+        header_value(&edit_headers, "Accept"),
+        Some("application/json")
+    );
+
+    let mut responses_headers = vec![("Accept".to_string(), "text/event-stream".to_string())];
+    apply_codex_target_accept_header(
+        &mut responses_headers,
+        "https://chatgpt.com/backend-api/codex/responses",
+    );
+    assert_eq!(
+        header_value(&responses_headers, "Accept"),
+        Some("text/event-stream")
+    );
 }
 
 /// 函数 `build_codex_upstream_headers_clears_turn_state_when_affinity_diverges`
@@ -463,10 +493,11 @@ fn build_codex_upstream_headers_rebuilds_mismatched_window_id_from_session() {
 }
 
 #[test]
-fn build_codex_upstream_headers_prefers_incoming_codex_identity() {
+fn build_codex_upstream_headers_prefers_global_user_agent_over_incoming_codex_identity() {
     let _guard = crate::test_env_guard();
     let _ = set_originator("codex_cli_rs_tests").expect("set originator");
     let _ = set_codex_user_agent_version("0.999.4").expect("set ua version");
+    let _ = set_gateway_user_agent(Some("global-gateway/1.0")).expect("set gateway user agent");
 
     let headers = build_codex_upstream_headers(CodexUpstreamHeaderInput {
         auth_token: "token-ident",
@@ -496,15 +527,17 @@ fn build_codex_upstream_headers_prefers_incoming_codex_identity() {
     assert_eq!(header_value(&headers, "originator"), Some("codex_sdk_ts"));
     assert_eq!(
         header_value(&headers, "User-Agent"),
-        Some("codex_sdk_ts/1.2.3 (Windows 11; x86_64) node")
+        Some("global-gateway/1.0")
     );
+    let _ = set_gateway_user_agent(None).expect("clear gateway user agent");
 }
 
 #[test]
-fn build_codex_upstream_headers_preserves_non_codex_identity_for_compat_routes() {
+fn build_codex_upstream_headers_uses_codex_default_instead_of_incoming_compat_identity() {
     let _guard = crate::test_env_guard();
     let _ = set_originator("codex_cli_rs_tests").expect("set originator");
     let _ = set_codex_user_agent_version("0.999.5").expect("set ua version");
+    let _ = set_gateway_user_agent(None).expect("clear gateway user agent");
 
     let headers = build_codex_upstream_headers(CodexUpstreamHeaderInput {
         auth_token: "token-compat",
@@ -532,8 +565,9 @@ fn build_codex_upstream_headers_preserves_non_codex_identity_for_compat_routes()
     });
 
     assert_eq!(
-        header_value(&headers, "User-Agent"),
-        Some("gemini-cli/0.1.14 (Windows 11; x86_64)")
+        header_value(&headers, "User-Agent")
+            .map(|value| value.starts_with("codex_cli_rs_tests/0.999.5")),
+        Some(true)
     );
     assert_eq!(header_value(&headers, "originator"), Some("gemini_cli"));
 }

@@ -11,7 +11,10 @@ import type {
 } from "@/lib/api/app-updates";
 import { getAppErrorMessage } from "@/lib/api/transport";
 import { useAppStore } from "@/lib/store/useAppStore";
-import { DEFAULT_CODEX_ORIGINATOR } from "@/lib/constants/codex";
+import {
+  DEFAULT_CODEX_ORIGINATOR,
+  DEFAULT_CODEX_USER_AGENT,
+} from "@/lib/constants/codex";
 import { useDesktopPageActive } from "@/hooks/useDesktopPageActive";
 import { useDeferredDesktopActivation } from "@/hooks/useDeferredDesktopActivation";
 import {
@@ -73,6 +76,7 @@ import {
   ServiceListenCard,
 } from "@/app/settings/components/general-tab-cards";
 import { GeneralBasicsCard } from "@/app/settings/components/general-basics-card";
+import { DesktopDiagnosticsCard } from "@/app/settings/components/desktop-diagnostics-card";
 import { TasksTabContent } from "@/app/settings/components/tasks-tab-content";
 import {
   CUSTOM_WORKER_MODE_VALUE,
@@ -254,6 +258,7 @@ import {
                     "flex h-auto items-center justify-start gap-3 rounded-lg border border-border/60 bg-background/55 p-3 text-left transition-colors hover:border-primary/25 hover:bg-accent/30",
                     isActive ? "border-primary/45 bg-primary/10 ring-1 ring-primary/20" : "",
                   )}
+                  aria-pressed={isActive}
                 >
                   <ThemePreviewSwatch
                     id={item.id}
@@ -308,6 +313,9 @@ function AdminSettingsPage() {
     string | null
   >(null);
   const [gatewayOriginatorDraft, setGatewayOriginatorDraft] = useState<
+    string | null
+  >(null);
+  const [gatewayUserAgentDraft, setGatewayUserAgentDraft] = useState<
     string | null
   >(null);
   const [modelForwardRuleRowsDraft, setModelForwardRuleRowsDraft] = useState<
@@ -738,6 +746,10 @@ function AdminSettingsPage() {
   const gatewayOriginatorInput =
     gatewayOriginatorDraft ??
     (snapshot?.gatewayOriginator || gatewayOriginatorDefault);
+  const gatewayUserAgentDefault =
+    snapshot?.gatewayUserAgentDefault || DEFAULT_CODEX_USER_AGENT;
+  const gatewayUserAgentInput =
+    gatewayUserAgentDraft ?? (snapshot?.gatewayUserAgent || "");
   const updateModelForwardRuleRows = (
     updater: (rows: ReturnType<typeof parseModelForwardRules>) => ReturnType<
       typeof parseModelForwardRules
@@ -944,6 +956,10 @@ function AdminSettingsPage() {
         },
       },
     );
+  };
+
+  const handleZoomFactorChange = (nextZoomFactor: number) => {
+    updateSettings.mutate({ zoomFactor: nextZoomFactor, _silent: true });
   };
 
   /**
@@ -1357,20 +1373,20 @@ function AdminSettingsPage() {
         }}
         className="w-full"
       >
-        <TabsList className="glass-card mission-panel mb-6 flex h-11 w-full justify-start overflow-x-auto rounded-lg p-1 no-scrollbar lg:w-fit">
-          <TabsTrigger value="general" className="gap-2 px-5 shrink-0">
+        <TabsList className="glass-card mission-panel mb-6 grid h-auto w-full grid-cols-3 gap-1 rounded-lg p-1 lg:flex lg:h-11 lg:w-fit lg:gap-0">
+          <TabsTrigger value="general" className="min-w-0 gap-1 px-2 sm:gap-2 sm:px-4 lg:px-5">
             <SettingsIcon className="h-4 w-4" /> {t("通用")}
           </TabsTrigger>
-          <TabsTrigger value="appearance" className="gap-2 px-5 shrink-0">
+          <TabsTrigger value="appearance" className="min-w-0 gap-1 px-2 sm:gap-2 sm:px-4 lg:px-5">
             <Palette className="h-4 w-4" /> {t("外观")}
           </TabsTrigger>
-          <TabsTrigger value="gateway" className="gap-2 px-5 shrink-0">
+          <TabsTrigger value="gateway" className="min-w-0 gap-1 px-2 sm:gap-2 sm:px-4 lg:px-5">
             <Globe className="h-4 w-4" /> {t("网关")}
           </TabsTrigger>
-          <TabsTrigger value="tasks" className="gap-2 px-5 shrink-0">
+          <TabsTrigger value="tasks" className="min-w-0 gap-1 px-2 sm:gap-2 sm:px-4 lg:px-5">
             <Cpu className="h-4 w-4" /> {t("任务")}
           </TabsTrigger>
-          <TabsTrigger value="env" className="gap-2 px-5 shrink-0">
+          <TabsTrigger value="env" className="min-w-0 gap-1 px-2 sm:gap-2 sm:px-4 lg:px-5">
             <Variable className="h-4 w-4" /> {t("环境")}
           </TabsTrigger>
         </TabsList>
@@ -1400,7 +1416,8 @@ function AdminSettingsPage() {
             canCloseToTray={canCloseToTray}
             updateSettings={updateSettings}
           />
-<ServiceListenCard
+          {isDesktopRuntime ? <DesktopDiagnosticsCard t={t} /> : null}
+          <ServiceListenCard
             t={t}
             snapshot={snapshot}
             updateSettings={updateSettings}
@@ -1421,8 +1438,11 @@ function AdminSettingsPage() {
             t={t}
             theme={theme}
             appearancePreset={normalizeAppearancePreset(snapshot.appearancePreset)}
+            isDesktopRuntime={isDesktopRuntime}
+            zoomFactor={snapshot.zoomFactor}
             onThemeChange={handleThemeChange}
             onAppearancePresetChange={handleAppearancePresetChange}
+            onZoomFactorChange={handleZoomFactorChange}
           />
         </TabsContent>
 
@@ -1444,6 +1464,10 @@ function AdminSettingsPage() {
             gatewayOriginatorDraft={gatewayOriginatorDraft}
             setGatewayOriginatorDraft={setGatewayOriginatorDraft}
             gatewayOriginatorDefault={gatewayOriginatorDefault}
+            gatewayUserAgentInput={gatewayUserAgentInput}
+            gatewayUserAgentDraft={gatewayUserAgentDraft}
+            setGatewayUserAgentDraft={setGatewayUserAgentDraft}
+            gatewayUserAgentDefault={gatewayUserAgentDefault}
             upstreamProxyInput={upstreamProxyInput}
             upstreamProxyDraft={upstreamProxyDraft}
             setUpstreamProxyDraft={setUpstreamProxyDraft}

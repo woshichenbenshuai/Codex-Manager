@@ -9,6 +9,8 @@ pub use model::{
     UpdateActionResponse, UpdateCheckResponse, UpdatePrepareResponse, UpdateStatusResponse,
 };
 
+pub(crate) use state::cleanup_completed_update_artifacts;
+
 use crate::commands::shared::open_in_file_manager_blocking;
 use apply::{apply_portable_impl, launch_installer_impl};
 use prepare::{prepare_update_impl, resolve_update_context};
@@ -22,6 +24,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const UPDATE_LOG_MAX_FILE_SIZE: u64 = 512 * 1024;
+
 /// 函数 `append_update_runtime_log`
 ///
 /// 作者: gaohongshun
@@ -34,7 +38,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 ///
 /// # 返回
 /// 无
-fn append_update_runtime_log(log_path: &std::path::Path, message: &str) {
+pub(super) fn append_update_runtime_log(log_path: &std::path::Path, message: &str) {
+    if !crate::desktop_diagnostics::file_logging_enabled() {
+        return;
+    }
+
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs())
@@ -44,11 +52,17 @@ fn append_update_runtime_log(log_path: &std::path::Path, message: &str) {
     if let Some(parent) = log_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(mut file) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-    {
+    let should_truncate = fs::metadata(log_path)
+        .map(|metadata| metadata.len().saturating_add(line.len() as u64) > UPDATE_LOG_MAX_FILE_SIZE)
+        .unwrap_or(false);
+    let mut options = fs::OpenOptions::new();
+    options.create(true).write(true);
+    if should_truncate {
+        options.truncate(true);
+    } else {
+        options.append(true);
+    }
+    if let Ok(mut file) = options.open(log_path) {
         let _ = file.write_all(line.as_bytes());
         let _ = file.flush();
     }
@@ -84,6 +98,9 @@ fn updater_root_logs_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 /// 返回函数执行结果
 #[tauri::command]
 pub async fn app_update_check(app: tauri::AppHandle) -> Result<UpdateCheckResponse, String> {
+    if let Err(err) = cleanup_completed_update_artifacts(&app) {
+        log::warn!("清理已完成更新目录失败：{err}");
+    }
     let check_log_path = updater_root_logs_dir(&app)?.join("check-update.log");
     append_update_runtime_log(&check_log_path, "开始检查更新");
     let task = tauri::async_runtime::spawn_blocking(resolve_update_context);
@@ -192,6 +209,9 @@ pub fn app_update_launch_installer(app: tauri::AppHandle) -> Result<UpdateAction
 /// 返回函数执行结果
 #[tauri::command]
 pub fn app_update_status(app: tauri::AppHandle) -> Result<UpdateStatusResponse, String> {
+    if let Err(err) = cleanup_completed_update_artifacts(&app) {
+        log::warn!("清理已完成更新目录失败：{err}");
+    }
     let repo = resolve_update_repo();
     let (mode, is_portable, exe_path, marker_path) = current_mode_and_marker()?;
     let pending = read_pending_update(&app)?;

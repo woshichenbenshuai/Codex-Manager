@@ -25,6 +25,10 @@ import {
 import { useRuntimeCapabilities } from "@/hooks/useRuntimeCapabilities";
 import { accountClient } from "@/lib/api/account-client";
 import {
+  buildAccountListQueryKey,
+  buildManagedModelSelectorQueryKey,
+} from "@/lib/api/account-query-keys";
+import {
   managedModelsV2Client,
   managedModelV2ToModelInfo,
 } from "@/lib/api/managed-models-v2";
@@ -66,18 +70,26 @@ const REASONING_LABELS: Record<string, string> = {
 
 const SERVICE_TIER_LABELS: Record<string, string> = {
   auto: "跟随请求",
-  fast: "Fast",
+  default: "标准 (Standard)",
+  fast: "快速 (Fast)",
+  ultrafast: "超快 (Ultrafast)",
+  flex: "弹性 (Flex)",
 };
 
 function normalizeEditableServiceTier(value?: string | null): string {
   const normalized = String(value || "").trim().toLowerCase();
-  return normalized === "fast" ? "fast" : "";
+  if (normalized === "standard") return "default";
+  if (normalized === "priority") return "fast";
+  return ["default", "fast", "ultrafast", "flex"].includes(normalized)
+    ? normalized
+    : "";
 }
 
 const ROTATION_STRATEGY_LABELS: Record<string, string> = {
   account_rotation: "账号轮转",
   aggregate_api_rotation: "聚合API轮转",
   hybrid_rotation: "混合轮转（账号优先）",
+  hybrid_aggregate_first_rotation: "混合轮转（聚合优先）",
 };
 
 const ACCOUNT_PLAN_FILTER_LABELS: Record<string, string> = {
@@ -172,7 +184,8 @@ export function ApiKeyModal({
   const memberOwnershipEnabled = isAdminMode && showMemberOwnership;
   const usesAccountPlanFilter =
     rotationStrategy === "account_rotation" ||
-    rotationStrategy === "hybrid_rotation";
+    rotationStrategy === "hybrid_rotation" ||
+    rotationStrategy === "hybrid_aggregate_first_rotation";
   const billableUsers = useMemo(
     () => appUsers.filter((user) => userCanOwnApiKey(user)),
     [appUsers],
@@ -186,17 +199,17 @@ export function ApiKeyModal({
     : t("当前运行环境暂不支持平台密钥管理。");
 
   const { data: models } = useQuery({
-    queryKey: ["managed-models-v2", "selector"],
+    queryKey: buildManagedModelSelectorQueryKey(serviceStatus.addr),
     queryFn: async () => {
-      const result = await managedModelsV2Client.list(false);
+      const result = await managedModelsV2Client.list(false, serviceStatus.addr);
       return { models: result.items.map(managedModelV2ToModelInfo) };
     },
     enabled: open && isServiceReady,
   });
 
   const { data: accountList } = useQuery({
-    queryKey: ["accounts", "list"],
-    queryFn: () => accountClient.list(),
+    queryKey: buildAccountListQueryKey(serviceStatus.addr),
+    queryFn: () => accountClient.list(serviceStatus.addr),
     enabled: open && isAdminMode && isServiceReady,
     retry: 1,
   });
@@ -370,22 +383,28 @@ export function ApiKeyModal({
 
       let savedKeyId = apiKey?.id || "";
       if (apiKey?.id) {
-        await accountClient.updateApiKey(apiKey.id, params);
+        await accountClient.updateApiKey(apiKey.id, params, serviceStatus.addr);
         savedKeyId = apiKey.id;
         toast.success(t("密钥配置已更新"));
       } else {
-        const result = await accountClient.createApiKey(params);
+        const result = await accountClient.createApiKey(
+          params,
+          serviceStatus.addr,
+        );
         savedKeyId = result.id;
         setGeneratedKey(result.key);
         toast.success(t("平台密钥已创建"));
       }
       if (memberOwnershipEnabled && savedKeyId && normalizedOwnerUserId) {
-        await appClient.setApiKeyOwner({
-          keyId: savedKeyId,
-          ownerKind: "user",
-          ownerUserId: normalizedOwnerUserId,
-          projectId: null,
-        });
+        await appClient.setApiKeyOwner(
+          {
+            keyId: savedKeyId,
+            ownerKind: "user",
+            ownerUserId: normalizedOwnerUserId,
+            projectId: null,
+          },
+          serviceStatus.addr,
+        );
         await onOwnerSaved?.();
       }
 
@@ -494,13 +513,16 @@ export function ApiKeyModal({
                   <SelectItem value="hybrid_rotation">
                     {t("混合轮转（账号优先）")}
                   </SelectItem>
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
+                  <SelectItem value="hybrid_aggregate_first_rotation">
+                    {t("混合轮转（聚合优先）")}
+                  </SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
             </div>
             <p className="col-span-2 -mt-1 text-[11px] text-muted-foreground">
               {t(
-                "账号轮转只走账号池；聚合API轮转只走聚合API；混合轮转先走账号池，账号耗尽后使用聚合API兜底。",
+                "账号轮转只走账号池；聚合API轮转只走聚合API；混合轮转（账号优先）先走账号池，账号耗尽后使用聚合API兜底；混合轮转（聚合优先）先走聚合API，聚合不可用时回落账号池。",
               )}
             </p>
             </>
@@ -821,12 +843,15 @@ export function ApiKeyModal({
                 <SelectContent align="start">
                     <SelectGroup>
                   <SelectItem value="auto">{t("跟随请求")}</SelectItem>
-                  <SelectItem value="fast">Fast</SelectItem>
+                  <SelectItem value="default">{t("标准 (Standard)")}</SelectItem>
+                  <SelectItem value="fast">{t("快速 (Fast)")}</SelectItem>
+                  <SelectItem value="ultrafast">{t("超快 (Ultrafast)")}</SelectItem>
+                  <SelectItem value="flex">{t("弹性 (Flex)")}</SelectItem>
                   </SelectGroup>
                 </SelectContent>
               </Select>
               <p className="text-[11px] text-muted-foreground">
-                {t("Fast 会映射为上游 priority；未设置时跟随请求。")}
+                {t("Standard 会强制标准速度；Fast 会映射为上游 priority；Ultrafast 与 Flex 会按原值透传，是否可用取决于模型和上游；未设置时跟随请求。")}
               </p>
             </div>
           </div>

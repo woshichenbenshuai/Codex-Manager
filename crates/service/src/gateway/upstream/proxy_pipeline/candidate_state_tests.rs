@@ -61,6 +61,40 @@ fn body_for_attempt_rewrites_model_override() {
 }
 
 #[test]
+fn body_for_account_attempt_preserves_explicit_reserve_alias() {
+    let mut state = CandidateExecutionState::default();
+    let body = Bytes::from_static(br#"{"model":"gpt-reserve","input":"hello"}"#);
+    let setup = sample_setup();
+
+    let actual = state.body_for_attempt(
+        "/v1/responses",
+        &body,
+        false,
+        &setup,
+        Some("gpt-5.6-luna"),
+        None,
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(actual.as_ref()).expect("parse rewritten body");
+
+    assert_eq!(value["model"], "gpt-reserve");
+}
+
+#[test]
+fn body_for_account_attempt_keeps_non_luna_model_binding_authoritative() {
+    let mut state = CandidateExecutionState::default();
+    let body = Bytes::from_static(br#"{"model":"gpt-reserve","input":"hello"}"#);
+    let setup = sample_setup();
+
+    let actual =
+        state.body_for_attempt("/v1/responses", &body, false, &setup, Some("gpt-5.4"), None);
+    let value: serde_json::Value =
+        serde_json::from_slice(actual.as_ref()).expect("parse rewritten body");
+
+    assert_eq!(value["model"], "gpt-5.4");
+}
+
+#[test]
 fn body_for_attempt_keeps_native_codex_retry_shape() {
     let _guard = crate::test_env_guard();
     let mut state = CandidateExecutionState::default();
@@ -205,7 +239,7 @@ fn compact_body_for_attempt_preserves_existing_prompt_cache_key() {
 }
 
 #[test]
-fn stripped_candidate_removes_encrypted_reasoning_items_without_leaving_invalid_shells() {
+fn stripped_candidate_removes_account_scoped_items_without_leaving_invalid_shells() {
     let mut state = CandidateExecutionState::default();
     let body = Bytes::from_static(
         br#"{
@@ -216,6 +250,11 @@ fn stripped_candidate_removes_encrypted_reasoning_items_without_leaving_invalid_
                     "id":"rs_1",
                     "summary":[],
                     "encrypted_content":"reasoning-secret"
+                },
+                {
+                    "type":"compaction",
+                    "id":"cmp_1",
+                    "encrypted_content":"compaction-secret"
                 },
                 {
                     "type":"agent_message",

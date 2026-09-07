@@ -5,6 +5,116 @@ It follows Keep a Changelog with a lightweight adaptation for this repository.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-05
+
+### Fixed
+
+- Fixed a regression where a newly added subscription User-Agent triggered web protection, interrupted quota refresh, and surfaced a subsequent token authorization error. Subscription requests no longer set User-Agent.
+- Restored the standard Codex User-Agent for quota queries and token refresh, independent of custom gateway overrides, including default and account-specific proxy routes.
+
+### Changed
+
+- Bumped the workspace, frontend, Tauri desktop metadata, and lockfiles to `0.6.0`, retaining existing account and settings storage.
+- `release-all` now builds service and desktop artifacts concurrently across five platform targets while preserving Desktop, Service, Web, and Docker assets. Caches are separated by Cargo workspace; dispatching a pinned release commit from the default branch enables cache reuse across versions.
+
+## [0.5.7] - 2026-09-05
+
+### Added
+
+- Added a **Keep using account after quota exhaustion** switch to the account editor. It persists as `force_enabled`, is off by default, and keeps the account in the gateway candidate pool for manual quota handling.
+- Added `gpt-6-astra` to the default model catalog. Revision 8 seeds fresh and upgraded databases with its official API limits and cache-write-aware pricing, Codex runtime metadata, and the default account-pool route, while preserving same-slug custom models and user-edited builtins.
+- Added a remembered table/card view switch to the accounts page. Administrators can fetch upstream models for one explicitly selected ChatGPT account using that account's credentials, account identifier, and proxy, then selectively associate them with model catalog V2 account-pool routes without account-pool rotation.
+- Added Standard and Ultrafast API-key service tiers across Responses HTTP, WebSocket, and request logs. Standard uses the upstream default speed and is logged as `standard`, Fast maps to `priority`, and Ultrafast passes through unchanged; Flex remains accepted for compatibility, while actual availability still depends on the model and upstream.
+- Added configurable outbound gateway `User-Agent` handling: `gateway.user_agent` applies globally, per-connection `aggregate_apis.user_agent` takes priority for aggregate route forwarding, model discovery, probes, and balance requests, and unset values fall back to the dynamically generated Codex-compatible `User-Agent` (#459).
+
+### Changed
+
+- Bumped the release version to `0.5.7` and synchronized the workspace, frontend package, Tauri desktop metadata, and lockfiles.
+
+### Fixed
+
+- Fixed Responses WebSocket tool-output continuation: duplicate outputs for the same tool call are removed before forwarding, connection preamble events no longer consume terminal-recovery opportunities, and missing tool-call context can be restored within bounded limits across task boundaries (#458).
+- Fixed Luna Reserve usage disappearing from the account page after later refreshes or transient empty-list responses, and normalized both snake_case and camelCase additional-quota payloads.
+- Fixed the Luna Reserve routing boundary: only explicit `gpt-reserve` requests place accounts with usable Reserve quota in the Reserve candidate pool. Ordinary `gpt-5.6-luna` requests continue to use the regular account pool and cannot bypass exhausted standard 5-hour/7-day windows merely because Reserve remains available; hard authorization or deactivation states retain their existing handling.
+
+## [0.5.6] - 2026-09-02
+
+### Added
+
+- Added an administrator-only **Test account** workflow that sends real text or image-model requests upstream and streams progress, results, and cancellation through Tauri events or Web SSE isolated by an unguessable `testId`. Account status is written back with a `status + updated_at` CAS so stale tests cannot overwrite newer state, and `banned`, `disabled`, or `inactive` accounts are never restored automatically (#452).
+- Added **Hybrid rotation (aggregate API first)**. Aggregate APIs are tried first and the request falls back to the account pool only after every candidate fails without consuming the request; aggregate-only models cannot bypass their bound route (#454).
+- Added upstream model discovery and selective association from aggregate APIs into model catalog V2 routes without restoring the legacy source tables or automatic association pipeline.
+
+### Changed
+
+- Bumped the release version to `0.5.6` and synchronized the workspace, frontend package, Tauri desktop metadata, and lockfiles.
+- Improved prompt-cache/cache-affinity routing by partitioning `prompt_cache_key` or root session IDs by platform key, protocol, and model, atomically converging concurrent cold starts, reusing one account across parent/child and streaming requests, and rebinding only after successful failover. The administrator dashboard now also shows cache hit rate.
+
+### Fixed
+
+- Fixed false failures when testing aggregate APIs whose suppliers enforce strict client validation. Probes now emulate the official Codex client identity by default or use a configured custom `User-Agent`, without changing normal route forwarding (#451).
+- Fixed Codex Device Code login lifecycle, cancellation, and browser-callback races, and synchronized managed gateway-profile authentication and WebSocket capability.
+- Fixed detection and routing of native Codex image-generation requests. Extension requests can reach the Codex image endpoint with the required identity headers, while ordinary OpenAI-compatible clients retain the compatibility-adapter path.
+- The desktop updater now removes completed or stale release directories while preserving a pending release and updater logs.
+
+## [0.5.5] - 2026-08-23
+
+### Fixed
+
+- Fixed a brief period where the service was unavailable when restoring the desktop window after startup-with-main-window was disabled.
+- Streamlined startup and restore by coalescing window navigation, waiting for the home page before showing the window, reusing an initialized service first, and removing duplicate warmup requests.
+
+## [0.5.4] - 2026-08-23
+
+### Changed
+
+- Bumped the release version to `0.5.4` and synchronized the workspace, frontend package, Tauri desktop metadata, and lockfiles.
+- Aligned Responses WebSocket behavior with the official semantics: bounded heartbeats and recovery, connection-limit continuation, large image frames, compression-negotiation fallback, safe first-frame/preamble replay, and account reselection while preserving HTTP fallback after the recovery budget is exhausted.
+- Improved CI reliability for Cargo Git dependencies with CLI fetches, network retries, locked dependency prefetching, and caching without retrying real build or test failures.
+- Updated AIXiamo sponsor entry points, tutorial links, and related copy.
+
+### Fixed
+
+- Fixed unreliable desktop main-window initialization, refresh, and automatic service startup when the launch-with-main-window option is disabled.
+- Fixed direct OpenAI account switching when historical conversations still reference the `cm` provider. Direct mode now explicitly uses the built-in `openai` provider and avoids scanning and rewriting the entire Codex history directory during the switch.
+- Added Codex 0.149 compatibility for the managed gateway by ensuring the `cm` provider sends `requires_openai_auth`, avoiding missing-API-key requests.
+- Fixed Responses WebSocket recovery for early disconnects, connection limits, failed first frames, preamble continuation, `store=false` context, and changing account eligibility; requests are never silently duplicated after substantive output has been sent.
+- Fixed account failover for some non-success upstream responses and corrected default model-group routing semantics.
+
+## [0.5.3] - 2026-08-08
+
+### Fixed
+
+- Fixed same-team account logins overwriting an existing account by isolating persisted account identity by login subject.
+- Limited retryable streaming upstream failures to one retry per account before failover, reducing rate-limit amplification.
+
+## [0.5.2] - 2026-07-31
+
+### Changed
+
+- Bumped the release version to `0.5.2` and synchronized the workspace, frontend package, Tauri desktop metadata, and lockfiles.
+- Added cache-write token pricing to the model catalog and request billing, including cache-write usage extraction from Anthropic, Gemini, and OpenAI-style responses.
+- Increased wide-screen sidebar navigation spacing while retaining the compact layout for short viewports to prevent overflow.
+
+### Fixed
+
+- Excluded non-`2xx` failed requests from token and estimated-cost rollups. Client-cancelled `499` requests can still debit the wallet when upstream work may already have incurred a cost, but remain excluded from successful usage totals.
+
+## [0.5.1] - 2026-07-26
+
+### Added
+
+- Restored the **Free account model ceiling** setting with `auto` (no limit) and concrete model-catalog choices.
+
+### Changed
+
+- Bumped the release version to `0.5.1` and synchronized workspace, frontend package, Tauri desktop metadata, and lockfiles.
+- Cleaned up low-risk Rust warnings and suppressed only the `linker_messages` noise produced by normal `link.exe` library output on Windows MSVC targets; other compiler warnings remain visible.
+
+### Fixed
+
+- The Free account model ceiling now filters only Free-account candidates above the selected ceiling without rewriting the requested model. Plus and Pro accounts are unaffected, quota protection still runs after filtering, and account-first mixed mode retains its aggregate API fallback after account candidates are exhausted.
+
 ## [0.5.0] - 2026-07-23
 
 ### Added
@@ -425,7 +535,11 @@ It follows Keep a Changelog with a lightweight adaptation for this repository.
 ### Changed
 - The operation area of ​​the account management page is integrated into a single "Account Operation" drop-down menu, replacing the stack of multiple buttons on the right, making the interface more concise.
 
-[Unreleased]: https://github.com/qxcnm/Codex-Manager/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/qxcnm/Codex-Manager/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/qxcnm/Codex-Manager/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/qxcnm/Codex-Manager/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/qxcnm/Codex-Manager/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/qxcnm/Codex-Manager/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/qxcnm/Codex-Manager/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/qxcnm/Codex-Manager/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/qxcnm/Codex-Manager/compare/v0.4.2...v0.4.3

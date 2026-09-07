@@ -64,7 +64,7 @@ async function hasReusableDesktopDevServer() {
   }
 
   try {
-    const response = await fetch(`http://${desktopDevHost}:${desktopDevPort}/startup.html`, {
+    const response = await fetch(`http://${desktopDevHost}:${desktopDevPort}/`, {
       signal: AbortSignal.timeout(1500),
     });
     return response.ok;
@@ -129,11 +129,11 @@ async function fetchDesktopDevPath(path, timeoutMs, port = desktopDevPort) {
   return response.ok;
 }
 
-async function waitForDesktopStartupPage() {
+async function waitForDesktopAppPage() {
   const deadline = Date.now() + desktopDevWarmupTimeoutMs;
   while (Date.now() <= deadline) {
     try {
-      if (await fetchDesktopDevPath("/startup.html", 1500, desktopNextPort)) {
+      if (await fetchDesktopDevPath("/", 1500, desktopNextPort)) {
         break;
       }
     } catch {
@@ -141,32 +141,18 @@ async function waitForDesktopStartupPage() {
     }
 
     if (Date.now() >= deadline) {
-      console.error(`等待前端开发服务就绪超时: http://${desktopDevHost}:${desktopNextPort}/startup.html`);
+      console.error(`等待前端首页就绪超时: http://${desktopDevHost}:${desktopNextPort}/`);
       process.exit(1);
     }
 
     await sleep(desktopDevWaitIntervalMs);
   }
 
-  console.log(`前端静态启动页已就绪: http://${desktopDevHost}:${desktopNextPort}/startup.html`);
+  console.log(`前端首页已就绪: http://${desktopDevHost}:${desktopNextPort}/`);
 }
 
-function warmupDesktopHomePageInBackground() {
-  setTimeout(() => {
-    fetchDesktopDevPath("/", desktopDevWarmupTimeoutMs, desktopNextPort)
-      .then((warmed) => {
-        if (warmed) {
-          console.log(`前端首页已后台预热完成: http://${desktopDevHost}:${desktopNextPort}/`);
-          return;
-        }
-
-        console.warn(`前端首页后台预热未返回成功状态: http://${desktopDevHost}:${desktopNextPort}/`);
-      })
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        console.warn(`前端首页后台预热失败，将由窗口访问时继续编译: ${message}`);
-      });
-  }, 0);
+function isExpectedDesktopDevProxyDisconnect(error) {
+  return ["ECONNABORTED", "ECONNRESET", "EPIPE", "ERR_STREAM_DESTROYED"].includes(error?.code);
 }
 
 function createDesktopDevProxy() {
@@ -183,17 +169,63 @@ function createDesktopDevProxy() {
         },
       },
       (proxyResponse) => {
+        if (response.destroyed) {
+          proxyResponse.destroy();
+          return;
+        }
         response.writeHead(proxyResponse.statusCode ?? 502, proxyResponse.headers);
+        proxyResponse.on("error", (error) => {
+          response.destroy();
+          if (!isExpectedDesktopDevProxyDisconnect(error)) {
+            console.warn(`Next dev proxy response failed: ${error.message}`);
+          }
+        });
         proxyResponse.pipe(response);
       },
     );
 
     proxyRequest.on("error", (error) => {
+      if (response.destroyed || isExpectedDesktopDevProxyDisconnect(error)) {
+        response.destroy();
+        return;
+      }
+      if (response.headersSent) {
+        console.warn(`Next dev proxy failed after sending headers: ${error.message}`);
+        response.destroy();
+        return;
+      }
       response.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
       response.end(`Next dev proxy error: ${error.message}`);
     });
 
+    request.on("aborted", () => {
+      proxyRequest.destroy();
+    });
+    request.on("error", (error) => {
+      proxyRequest.destroy();
+      if (!isExpectedDesktopDevProxyDisconnect(error)) {
+        console.warn(`Desktop dev proxy request failed: ${error.message}`);
+      }
+    });
+    response.on("error", (error) => {
+      proxyRequest.destroy();
+      if (!isExpectedDesktopDevProxyDisconnect(error)) {
+        console.warn(`Desktop dev proxy client response failed: ${error.message}`);
+      }
+    });
+
     request.pipe(proxyRequest);
+  });
+
+  // Reloading a WebView closes its HTTP/HMR sockets immediately. On Windows
+  // this commonly surfaces as ECONNABORTED on the raw client socket; consume
+  // that expected disconnect so it does not terminate beforeDevCommand.
+  server.on("connection", (socket) => {
+    socket.on("error", (error) => {
+      if (!isExpectedDesktopDevProxyDisconnect(error)) {
+        console.warn(`Desktop dev proxy client socket failed: ${error.message}`);
+      }
+    });
   });
 
   server.on("upgrade", (request, socket, head) => {
@@ -218,6 +250,9 @@ function createDesktopDevProxy() {
 
     upstream.on("error", () => {
       socket.destroy();
+    });
+    socket.on("close", () => {
+      upstream.destroy();
     });
   });
 
@@ -417,9 +452,8 @@ if (task === "dev:desktop") {
     console.error(`前端开发服务启动失败: ${error.message}`);
     process.exit(1);
   });
-  await waitForDesktopStartupPage();
+  await waitForDesktopAppPage();
   createDesktopDevProxy();
-  warmupDesktopHomePageInBackground();
   child.on("exit", (code, signal) => {
     if (signal) {
       process.exit(0);

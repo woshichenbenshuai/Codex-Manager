@@ -2,6 +2,7 @@ use codexmanager_core::auth::DEFAULT_ORIGINATOR;
 use codexmanager_core::auth::{DEFAULT_CLIENT_ID, DEFAULT_ISSUER};
 use codexmanager_core::storage::Storage;
 use reqwest::blocking::Client;
+use reqwest::header::HeaderValue;
 use reqwest::Proxy;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -34,6 +35,8 @@ static TRACE_BODY_PREVIEW_MAX_BYTES: AtomicUsize =
     AtomicUsize::new(DEFAULT_TRACE_BODY_PREVIEW_MAX_BYTES);
 static FRONT_PROXY_MAX_BODY_BYTES: AtomicUsize =
     AtomicUsize::new(DEFAULT_FRONT_PROXY_MAX_BODY_BYTES);
+static FRONT_PROXY_ZSTD_MAX_BODY_BYTES: AtomicUsize =
+    AtomicUsize::new(DEFAULT_FRONT_PROXY_ZSTD_MAX_BODY_BYTES);
 static UPSTREAM_CONNECT_TIMEOUT_SECS: AtomicU64 =
     AtomicU64::new(DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECS);
 static UPSTREAM_TOTAL_TIMEOUT_MS: AtomicU64 = AtomicU64::new(DEFAULT_UPSTREAM_TOTAL_TIMEOUT_MS);
@@ -49,8 +52,6 @@ static ENABLE_REQUEST_COMPRESSION: AtomicBool = AtomicBool::new(DEFAULT_ENABLE_R
 static USE_WEBSOCKET_UPSTREAM: AtomicBool = AtomicBool::new(DEFAULT_USE_WEBSOCKET_UPSTREAM);
 static CODEX_IMAGE_GENERATION_ENABLED: AtomicBool =
     AtomicBool::new(DEFAULT_CODEX_IMAGE_GENERATION_ENABLED);
-static CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL: AtomicBool =
-    AtomicBool::new(DEFAULT_CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL);
 static UPSTREAM_PROXY_URL: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 static UPSTREAM_PROXY_BYPASS_HOSTS: OnceLock<RwLock<Vec<String>>> = OnceLock::new();
 static FREE_ACCOUNT_MAX_MODEL: OnceLock<RwLock<String>> = OnceLock::new();
@@ -62,6 +63,7 @@ static CODEX_IMAGE_MAIN_MODEL: OnceLock<RwLock<String>> = OnceLock::new();
 static CODEX_IMAGE_TOOL_MODEL: OnceLock<RwLock<String>> = OnceLock::new();
 static ORIGINATOR: OnceLock<RwLock<String>> = OnceLock::new();
 static CODEX_USER_AGENT_VERSION: OnceLock<RwLock<String>> = OnceLock::new();
+static GATEWAY_USER_AGENT: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 static RESIDENCY_REQUIREMENT: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 static TOKEN_EXCHANGE_CLIENT_ID: OnceLock<RwLock<String>> = OnceLock::new();
 static TOKEN_EXCHANGE_ISSUER: OnceLock<RwLock<String>> = OnceLock::new();
@@ -78,10 +80,10 @@ const DEFAULT_STRICT_REQUEST_PARAM_ALLOWLIST: bool = false;
 const DEFAULT_ENABLE_REQUEST_COMPRESSION: bool = true;
 const DEFAULT_USE_WEBSOCKET_UPSTREAM: bool = false;
 const DEFAULT_CODEX_IMAGE_GENERATION_ENABLED: bool = true;
-const DEFAULT_CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL: bool = false;
 const DEFAULT_REQUEST_GATE_WAIT_TIMEOUT_MS: u64 = 0;
 const DEFAULT_TRACE_BODY_PREVIEW_MAX_BYTES: usize = 0;
 const DEFAULT_FRONT_PROXY_MAX_BODY_BYTES: usize = 0;
+const DEFAULT_FRONT_PROXY_ZSTD_MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_FREE_ACCOUNT_MAX_MODEL: &str = "auto";
 const DEFAULT_COMPACT_MODEL: &str = "auto";
 const DEFAULT_COMPACT_API_PATH: &str = "/v1/responses/compact";
@@ -89,13 +91,15 @@ const DEFAULT_MODEL_FORWARD_RULES: &str = "";
 const DEFAULT_COMPACT_MODEL_FORWARD_RULES: &str = "";
 const DEFAULT_CODEX_IMAGE_MAIN_MODEL: &str = "gpt-5.4-mini";
 const DEFAULT_CODEX_IMAGE_TOOL_MODEL: &str = "gpt-image-2";
-const DEFAULT_CODEX_USER_AGENT_VERSION: &str = "0.130.0";
+const DEFAULT_CODEX_USER_AGENT_VERSION: &str = "0.153.0";
+const MAX_GATEWAY_USER_AGENT_BYTES: usize = 512;
 const MAX_UPSTREAM_PROXY_POOL_SIZE: usize = 5;
 const MAX_CANDIDATE_CLIENT_CACHE_ENTRIES: usize = 512;
 
 const ENV_REQUEST_GATE_WAIT_TIMEOUT_MS: &str = "CODEXMANAGER_REQUEST_GATE_WAIT_TIMEOUT_MS";
 const ENV_TRACE_BODY_PREVIEW_MAX_BYTES: &str = "CODEXMANAGER_TRACE_BODY_PREVIEW_MAX_BYTES";
 const ENV_FRONT_PROXY_MAX_BODY_BYTES: &str = "CODEXMANAGER_FRONT_PROXY_MAX_BODY_BYTES";
+const ENV_FRONT_PROXY_ZSTD_MAX_BODY_BYTES: &str = "CODEXMANAGER_FRONT_PROXY_ZSTD_MAX_BODY_BYTES";
 const ENV_UPSTREAM_CONNECT_TIMEOUT_SECS: &str = "CODEXMANAGER_UPSTREAM_CONNECT_TIMEOUT_SECS";
 const ENV_UPSTREAM_TOTAL_TIMEOUT_MS: &str = "CODEXMANAGER_UPSTREAM_TOTAL_TIMEOUT_MS";
 const ENV_UPSTREAM_STREAM_TIMEOUT_MS: &str = "CODEXMANAGER_UPSTREAM_STREAM_TIMEOUT_MS";
@@ -106,8 +110,6 @@ const ENV_STRICT_REQUEST_PARAM_ALLOWLIST: &str = "CODEXMANAGER_STRICT_REQUEST_PA
 const ENV_ENABLE_REQUEST_COMPRESSION: &str = "CODEXMANAGER_ENABLE_REQUEST_COMPRESSION";
 const ENV_USE_WEBSOCKET_UPSTREAM: &str = "CODEXMANAGER_USE_WEBSOCKET_UPSTREAM";
 const ENV_CODEX_IMAGE_GENERATION_ENABLED: &str = "CODEXMANAGER_CODEX_IMAGE_GENERATION_ENABLED";
-const ENV_CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL: &str =
-    "CODEXMANAGER_CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL";
 const ENV_CODEX_IMAGE_MAIN_MODEL: &str = "CODEXMANAGER_CODEX_IMAGE_MAIN_MODEL";
 const ENV_CODEX_IMAGE_TOOL_MODEL: &str = "CODEXMANAGER_CODEX_IMAGE_TOOL_MODEL";
 const ENV_TOKEN_EXCHANGE_CLIENT_ID: &str = "CODEXMANAGER_CLIENT_ID";
@@ -369,6 +371,74 @@ pub(crate) fn fresh_async_upstream_client_for_account(
     }
 }
 
+/// 函数 `account_test_proxy_url_for_account`
+///
+/// 作者: gaohongshun
+///
+/// 时间: 2026-08-26
+///
+/// # 参数
+/// - account_id: 参数 account_id
+///
+/// # 返回
+/// 返回账号测试请求应使用的代理地址（显式账号代理 → 代理池 → 全局代理），
+/// 显式代理配置无效时 fail-closed。
+pub(crate) fn account_test_proxy_url_for_account(
+    account_id: &str,
+) -> Result<Option<String>, String> {
+    ensure_runtime_config_loaded();
+    match account_proxy_client_cache_entry(account_id) {
+        AccountProxyClientCacheEntry::Ready { proxy_url, .. } => return Ok(Some(proxy_url)),
+        AccountProxyClientCacheEntry::Invalid {
+            proxy_url: _,
+            error,
+        } => {
+            // 不回显 proxy_url：显式代理地址可能内嵌账号密码（http://user:pass@host）。
+            return Err(format!(
+                "account explicit proxy for {account_id} is invalid and fail-closed. {error}"
+            ));
+        }
+        AccountProxyClientCacheEntry::NotConfigured => {}
+    }
+    let pool = crate::lock_utils::read_recover(upstream_client_pool_lock(), "upstream_client_pool");
+    if let Some(proxy_url) = pool.proxy_for_account(account_id) {
+        return Ok(Some(proxy_url.to_string()));
+    }
+    Ok(current_upstream_proxy_url())
+}
+
+/// 函数 `build_account_test_client_with_timeouts`
+///
+/// 作者: gaohongshun
+///
+/// 时间: 2026-08-26
+///
+/// # 参数
+/// - proxy_url: 参数 proxy_url
+/// - overall_timeout: 参数 overall_timeout
+///
+/// # 返回
+/// 返回带整体超时的阻塞式上游客户端，用于有界生命周期的账号测试请求。
+pub(crate) fn build_account_test_client_with_timeouts(
+    proxy_url: Option<&str>,
+    overall_timeout: Duration,
+) -> Result<Client, String> {
+    let mut builder = Client::builder()
+        .timeout(overall_timeout)
+        .connect_timeout(upstream_connect_timeout_cached())
+        .pool_max_idle_per_host(32)
+        .pool_idle_timeout(Some(Duration::from_secs(90)))
+        .tcp_keepalive(Some(Duration::from_secs(30)));
+    if let Some(proxy_url) = proxy_url.map(str::trim).filter(|value| !value.is_empty()) {
+        let proxy = Proxy::all(proxy_url).map_err(|err| format!("invalid proxy url: {err}"))?;
+        builder = builder.proxy(proxy);
+    }
+    builder
+        .build()
+        .map_err(|err| format!("build account test client failed: {err}"))
+}
+
+#[cfg(test)]
 pub(crate) fn upstream_proxy_url_for_account(account_id: &str) -> Option<String> {
     ensure_runtime_config_loaded();
     match account_proxy_client_cache_entry(account_id) {
@@ -381,6 +451,144 @@ pub(crate) fn upstream_proxy_url_for_account(account_id: &str) -> Option<String>
         return Some(proxy_url.to_string());
     }
     current_upstream_proxy_url()
+}
+
+pub(crate) fn websocket_proxy_url_for_account(
+    account_id: &str,
+    target_url: &str,
+) -> Result<Option<String>, String> {
+    ensure_runtime_config_loaded();
+    match account_proxy_client_cache_entry(account_id) {
+        AccountProxyClientCacheEntry::Ready { proxy_url, .. } => return Ok(Some(proxy_url)),
+        AccountProxyClientCacheEntry::Invalid { proxy_url, error } => {
+            return Err(format!(
+                "account explicit proxy for {account_id} is invalid and fail-closed: {proxy_url}. {error}"
+            ));
+        }
+        AccountProxyClientCacheEntry::NotConfigured => {}
+    }
+
+    let pool = crate::lock_utils::read_recover(upstream_client_pool_lock(), "upstream_client_pool");
+    if let Some(proxy_url) = pool.proxy_for_account(account_id) {
+        return Ok(Some(proxy_url.to_string()));
+    }
+    drop(pool);
+    if let Some(proxy_url) = current_upstream_proxy_url() {
+        return Ok(Some(proxy_url));
+    }
+
+    environment_proxy_url_for_target(target_url)
+}
+
+fn environment_proxy_url_for_target(target_url: &str) -> Result<Option<String>, String> {
+    let target = reqwest::Url::parse(target_url.trim())
+        .map_err(|err| format!("invalid websocket target url {target_url}: {err}"))?;
+    if environment_no_proxy_matches(&target) {
+        return Ok(None);
+    }
+
+    let proxy_url = match target.scheme() {
+        "wss" | "https" => {
+            first_environment_proxy(&["https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"])
+        }
+        "ws" | "http" => {
+            first_environment_proxy(&["http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"])
+        }
+        _ => None,
+    };
+    if proxy_url.is_some() {
+        return normalize_upstream_proxy_url(proxy_url.as_deref())
+            .map_err(|err| format!("invalid websocket environment proxy: {err}"));
+    }
+    system_proxy_url_for_target(target_url)
+}
+
+fn system_proxy_url_for_target(target_url: &str) -> Result<Option<String>, String> {
+    let matcher = hyper_util::client::proxy::matcher::Matcher::from_system();
+    proxy_url_from_matcher_for_target(target_url, &matcher)
+}
+
+fn proxy_url_from_matcher_for_target(
+    target_url: &str,
+    matcher: &hyper_util::client::proxy::matcher::Matcher,
+) -> Result<Option<String>, String> {
+    let mut target = reqwest::Url::parse(target_url.trim())
+        .map_err(|err| format!("invalid websocket target url {target_url}: {err}"))?;
+    let http_scheme = match target.scheme() {
+        "wss" => "https",
+        "ws" => "http",
+        "https" => "https",
+        "http" => "http",
+        scheme => return Err(format!("unsupported websocket target scheme: {scheme}")),
+    };
+    target
+        .set_scheme(http_scheme)
+        .map_err(|_| format!("replace websocket target scheme failed: {target_url}"))?;
+    let target_uri = target
+        .as_str()
+        .parse::<axum::http::Uri>()
+        .map_err(|err| format!("invalid websocket target uri {target_url}: {err}"))?;
+    let Some(intercept) = matcher.intercept(&target_uri) else {
+        return Ok(None);
+    };
+    let proxy_url = intercept.uri().to_string();
+    normalize_upstream_proxy_url(Some(proxy_url.as_str()))
+        .map_err(|err| format!("invalid websocket system proxy: {err}"))
+}
+
+fn first_environment_proxy(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| env_non_empty(key))
+}
+
+fn environment_no_proxy_matches(target: &reqwest::Url) -> bool {
+    let Some(host) = target.host_str().map(|value| value.to_ascii_lowercase()) else {
+        return false;
+    };
+    let target_port = target.port_or_known_default();
+    let Some(raw) = env_non_empty("no_proxy").or_else(|| env_non_empty("NO_PROXY")) else {
+        return false;
+    };
+
+    raw.split(',').any(|entry| {
+        let entry = entry.trim();
+        if entry == "*" {
+            return true;
+        }
+        if entry.is_empty() {
+            return false;
+        }
+
+        let (pattern, port) = split_no_proxy_host_port(entry);
+        if port.is_some() && port != target_port {
+            return false;
+        }
+        let pattern = pattern
+            .trim()
+            .trim_start_matches("*.")
+            .trim_start_matches('.')
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        !pattern.is_empty() && (host == pattern || host.ends_with(format!(".{pattern}").as_str()))
+    })
+}
+
+fn split_no_proxy_host_port(entry: &str) -> (&str, Option<u16>) {
+    if let Some(rest) = entry.strip_prefix('[') {
+        if let Some((host, suffix)) = rest.split_once(']') {
+            let port = suffix
+                .strip_prefix(':')
+                .and_then(|value| value.parse().ok());
+            return (host, port);
+        }
+    }
+    if entry.matches(':').count() == 1 {
+        if let Some((host, port)) = entry.rsplit_once(':') {
+            if let Ok(port) = port.parse::<u16>() {
+                return (host, Some(port));
+            }
+        }
+    }
+    (entry, None)
 }
 
 pub(crate) fn upstream_client_for_aggregate_api_candidate(
@@ -793,12 +1001,6 @@ pub(crate) fn codex_image_generation_enabled() -> bool {
     CODEX_IMAGE_GENERATION_ENABLED.load(Ordering::Relaxed)
 }
 
-#[allow(dead_code)]
-pub(crate) fn codex_image_generation_auto_inject_tool_enabled() -> bool {
-    ensure_runtime_config_loaded();
-    CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL.load(Ordering::Relaxed)
-}
-
 pub(crate) fn current_codex_image_main_model() -> String {
     ensure_runtime_config_loaded();
     crate::lock_utils::read_recover(codex_image_main_model_cell(), "codex_image_main_model").clone()
@@ -839,7 +1041,6 @@ pub(crate) fn account_max_inflight_limit() -> usize {
 pub(crate) fn set_account_max_inflight_limit(limit: usize) -> usize {
     ensure_runtime_config_loaded();
     ACCOUNT_MAX_INFLIGHT.store(limit, Ordering::Relaxed);
-    std::env::set_var(ENV_ACCOUNT_MAX_INFLIGHT, limit.to_string());
     limit
 }
 
@@ -921,6 +1122,11 @@ pub(crate) fn trace_body_preview_max_bytes() -> usize {
 pub(crate) fn front_proxy_max_body_bytes() -> usize {
     ensure_runtime_config_loaded();
     FRONT_PROXY_MAX_BODY_BYTES.load(Ordering::Relaxed)
+}
+
+pub(crate) fn front_proxy_zstd_max_body_bytes() -> usize {
+    ensure_runtime_config_loaded();
+    FRONT_PROXY_ZSTD_MAX_BODY_BYTES.load(Ordering::Relaxed)
 }
 
 /// 函数 `upstream_proxy_url`
@@ -1219,6 +1425,44 @@ pub(crate) fn current_codex_user_agent() -> String {
     )
 }
 
+pub(crate) fn normalize_gateway_user_agent(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > MAX_GATEWAY_USER_AGENT_BYTES {
+        return Err(format!(
+            "gateway user agent must not exceed {MAX_GATEWAY_USER_AGENT_BYTES} bytes"
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err("gateway user agent contains control characters".to_string());
+    }
+    if !value.is_ascii() {
+        return Err("gateway user agent is not a valid HTTP header value".to_string());
+    }
+    HeaderValue::from_str(value)
+        .map_err(|_| "gateway user agent is not a valid HTTP header value".to_string())?;
+    Ok(Some(value.to_string()))
+}
+
+pub(crate) fn set_gateway_user_agent(value: Option<&str>) -> Result<Option<String>, String> {
+    ensure_runtime_config_loaded();
+    let normalized = normalize_gateway_user_agent(value)?;
+    let mut cached =
+        crate::lock_utils::write_recover(gateway_user_agent_cell(), "gateway_user_agent");
+    *cached = normalized.clone();
+    Ok(normalized)
+}
+
+pub(crate) fn current_gateway_user_agent_override() -> Option<String> {
+    ensure_runtime_config_loaded();
+    crate::lock_utils::read_recover(gateway_user_agent_cell(), "gateway_user_agent").clone()
+}
+
+pub(crate) fn current_gateway_user_agent() -> String {
+    current_gateway_user_agent_override().unwrap_or_else(current_codex_user_agent)
+}
+
 /// 函数 `current_residency_requirement`
 ///
 /// 作者: gaohongshun
@@ -1483,6 +1727,18 @@ pub(super) fn reload_from_env() {
         ),
         Ordering::Relaxed,
     );
+    let zstd_max_body_bytes = env_usize_or(
+        ENV_FRONT_PROXY_ZSTD_MAX_BODY_BYTES,
+        DEFAULT_FRONT_PROXY_ZSTD_MAX_BODY_BYTES,
+    );
+    FRONT_PROXY_ZSTD_MAX_BODY_BYTES.store(
+        if zstd_max_body_bytes == 0 {
+            DEFAULT_FRONT_PROXY_ZSTD_MAX_BODY_BYTES
+        } else {
+            zstd_max_body_bytes
+        },
+        Ordering::Relaxed,
+    );
     UPSTREAM_CONNECT_TIMEOUT_SECS.store(
         env_u64_or(
             ENV_UPSTREAM_CONNECT_TIMEOUT_SECS,
@@ -1541,13 +1797,6 @@ pub(super) fn reload_from_env() {
         env_bool_or(
             ENV_CODEX_IMAGE_GENERATION_ENABLED,
             DEFAULT_CODEX_IMAGE_GENERATION_ENABLED,
-        ),
-        Ordering::Relaxed,
-    );
-    CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL.store(
-        env_bool_or(
-            ENV_CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL,
-            DEFAULT_CODEX_IMAGE_GENERATION_AUTO_INJECT_TOOL,
         ),
         Ordering::Relaxed,
     );
@@ -2081,6 +2330,10 @@ fn originator_cell() -> &'static RwLock<String> {
 fn codex_user_agent_version_cell() -> &'static RwLock<String> {
     CODEX_USER_AGENT_VERSION
         .get_or_init(|| RwLock::new(DEFAULT_CODEX_USER_AGENT_VERSION.to_string()))
+}
+
+fn gateway_user_agent_cell() -> &'static RwLock<Option<String>> {
+    GATEWAY_USER_AGENT.get_or_init(|| RwLock::new(None))
 }
 
 /// 函数 `residency_requirement_cell`

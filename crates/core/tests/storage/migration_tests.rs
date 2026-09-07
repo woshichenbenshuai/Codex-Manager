@@ -671,6 +671,9 @@ fn init_tracks_schema_migrations_and_is_idempotent() {
         .has_column("api_key_profiles", "service_tier")
         .expect("check api_key_profiles.service_tier"));
     assert!(storage
+        .has_column("models", "fast_policy")
+        .expect("check models.fast_policy"));
+    assert!(storage
         .has_table("api_key_quota_limits")
         .expect("check api_key_quota_limits table"));
     assert!(storage
@@ -685,6 +688,18 @@ fn init_tracks_schema_migrations_and_is_idempotent() {
     assert!(storage
         .has_column("aggregate_apis", "last_balance_json")
         .expect("check aggregate_apis.last_balance_json"));
+    assert!(storage
+        .has_column("aggregate_apis", "user_agent")
+        .expect("check aggregate_apis.user_agent"));
+    let applied_133: i64 = storage
+        .conn
+        .query_row(
+            "SELECT COUNT(1) FROM schema_migrations WHERE version = '133_aggregate_api_user_agent'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count 133 migration");
+    assert_eq!(applied_133, 1);
     assert!(storage
         .has_table("aggregate_api_balance_secrets")
         .expect("check aggregate_api_balance_secrets table"));
@@ -875,6 +890,50 @@ fn sql_migration_can_fallback_to_compat_when_schema_already_exists() {
 }
 
 #[test]
+fn account_subject_identity_migration_backfills_legacy_account_ids() {
+    let storage = Storage::open_in_memory().expect("open in memory");
+    storage
+        .conn
+        .execute_batch(
+            "CREATE TABLE accounts (
+                id TEXT PRIMARY KEY,
+                updated_at INTEGER NOT NULL
+            );
+            INSERT INTO accounts (id, updated_at) VALUES
+                ('user-a::cgpt=team|ws=team', 1),
+                ('legacy-user', 2);",
+        )
+        .expect("create legacy accounts");
+
+    storage
+        .conn
+        .execute_batch(include_str!(
+            "../../migrations/130_accounts_subject_identity.sql"
+        ))
+        .expect("apply subject identity migration");
+
+    let compound: String = storage
+        .conn
+        .query_row(
+            "SELECT subject_account_id FROM accounts WHERE id = 'user-a::cgpt=team|ws=team'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read compound subject");
+    let plain: String = storage
+        .conn
+        .query_row(
+            "SELECT subject_account_id FROM accounts WHERE id = 'legacy-user'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read plain subject");
+
+    assert_eq!(compound, "user-a");
+    assert_eq!(plain, "legacy-user");
+}
+
+#[test]
 fn init_repairs_legacy_aggregate_api_balance_columns_before_indexes() {
     let storage = Storage::open_in_memory().expect("open in memory");
     storage
@@ -914,6 +973,9 @@ fn init_repairs_legacy_aggregate_api_balance_columns_before_indexes() {
     assert!(storage
         .has_column("aggregate_apis", "last_balance_json")
         .expect("check balance result column"));
+    assert!(storage
+        .has_column("aggregate_apis", "user_agent")
+        .expect("check aggregate API user agent column"));
     assert!(storage
         .has_table("aggregate_api_balance_secrets")
         .expect("check balance secrets table"));

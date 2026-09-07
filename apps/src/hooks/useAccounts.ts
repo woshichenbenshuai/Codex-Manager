@@ -4,6 +4,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { accountClient, type AccountUsageRefreshResult } from "@/lib/api/account-client";
+import {
+  buildAccountListQueryKey,
+  buildAccountUsageListQueryKey,
+} from "@/lib/api/account-query-keys";
 import { CODEX_PROFILE_CANDIDATES_QUERY_KEY } from "@/lib/api/codex-profile-client";
 import { attachUsagesToAccounts } from "@/lib/api/normalize";
 import { serviceClient } from "@/lib/api/service-client";
@@ -44,6 +48,17 @@ type DeleteAccountsByStatusesResult = Awaited<
   ReturnType<typeof accountClient.deleteByStatuses>
 >;
 type AccountSortUpdate = { accountId: string; sort: number };
+type ToggleManyAccountStatusInput = {
+  accountIds: string[];
+  enabled: boolean;
+  selectedCount?: number;
+};
+
+type ToggleManyAccountStatusResult = {
+  requested: number;
+  succeeded: number;
+  failed: Array<{ accountId: string; reason: string }>;
+};
 
 /**
  * 函数 `isAccountRefreshBlocked`
@@ -216,11 +231,27 @@ export function useAccounts() {
     areAccountQueriesEnabled && backgroundTasks.usagePollingEnabled,
     backgroundTasks.usagePollIntervalSecs,
   );
+  const accountListQueryKey = useMemo(
+    () => buildAccountListQueryKey(serviceStatus.addr),
+    [serviceStatus.addr],
+  );
+  const usageListQueryKey = useMemo(
+    () => buildAccountUsageListQueryKey(serviceStatus.addr),
+    [serviceStatus.addr],
+  );
   const usageListFingerprintRef = useRef<string | null>(null);
   const importedUsageRefreshIdsRef = useRef<Set<string>>(new Set());
   const importedUsageRefreshInFlightRef = useRef<Set<string>>(new Set());
   const [importedUsageRefreshVersion, setImportedUsageRefreshVersion] = useState(0);
   const allowEmptyAccountListRef = useRef(false);
+
+  useEffect(() => {
+    usageListFingerprintRef.current = null;
+    importedUsageRefreshIdsRef.current.clear();
+    importedUsageRefreshInFlightRef.current.clear();
+    allowEmptyAccountListRef.current = false;
+  }, [serviceStatus.addr]);
+
   const startupSnapshotQueryKey = buildStartupSnapshotQueryKey(
     serviceStatus.addr,
     STARTUP_SNAPSHOT_REQUEST_LOG_LIMIT,
@@ -290,11 +321,11 @@ export function useAccounts() {
       setImportedUsageRefreshVersion((version) => version + 1);
     }
   };
-  // 账号实体列表只在显式账号操作/手动刷新时更新；用量轮询通过 usage/list 合并展示，避免临时空读覆盖账号池。
+  // 账号实体列表只在显式账号操作/手动刷新时更新；用量轮询只更新当前服务的用量快照。
   const accountsQuery = useQuery({
-    queryKey: ["accounts", "list"],
+    queryKey: accountListQueryKey,
     queryFn: async () => {
-      const data = await accountClient.list();
+      const data = await accountClient.list(serviceStatus.addr);
       if (data.items.length > 0) {
         allowEmptyAccountListRef.current = false;
         return data;
@@ -324,21 +355,20 @@ export function useAccounts() {
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     initialData: () =>
-      queryClient.getQueryData<AccountListResult>(["accounts", "list"]) ||
+      queryClient.getQueryData<AccountListResult>(accountListQueryKey) ||
       startupAccountList,
-    placeholderData: (previousData): AccountListResult | undefined =>
-      previousData || startupAccountList,
+    placeholderData: (): AccountListResult | undefined => startupAccountList,
   });
 
   const usagesQuery = useQuery({
-    queryKey: ["usage", "list"],
-    queryFn: () => accountClient.listUsage(),
+    queryKey: usageListQueryKey,
+    queryFn: () => accountClient.listUsage(serviceStatus.addr),
     enabled: areAccountQueriesEnabled,
     retry: 1,
     refetchInterval: usageListRefreshIntervalMs,
     refetchIntervalInBackground: false,
-    placeholderData: (previousData) =>
-      previousData || (startupUsages.length > 0 ? startupUsages : undefined),
+    placeholderData: () =>
+      startupUsages.length > 0 ? startupUsages : undefined,
   });
 
   const usageListFingerprint = useMemo(
@@ -405,7 +435,7 @@ export function useAccounts() {
         })
       );
       if (!disposed) {
-        await queryClient.refetchQueries({ queryKey: ["usage", "list"], type: "active" });
+        await queryClient.refetchQueries({ queryKey: usageListQueryKey, type: "active" });
       }
     };
 
@@ -419,7 +449,12 @@ export function useAccounts() {
       disposed = true;
       window.clearInterval(intervalId);
     };
-  }, [areAccountQueriesEnabled, importedUsageRefreshVersion, queryClient]);
+  }, [
+    areAccountQueriesEnabled,
+    importedUsageRefreshVersion,
+    queryClient,
+    usageListQueryKey,
+  ]);
 
   useEffect(() => {
     if (!areAccountQueriesEnabled) {
@@ -430,7 +465,7 @@ export function useAccounts() {
     let unlisten: (() => void) | null = null;
     const refreshVisibleUsageData = () => {
       void Promise.all([
-        queryClient.refetchQueries({ queryKey: ["usage", "list"], type: "active" }),
+        queryClient.refetchQueries({ queryKey: usageListQueryKey, type: "active" }),
         queryClient.invalidateQueries({ queryKey: ["usage-aggregate"] }),
         queryClient.invalidateQueries({ queryKey: ["today-summary"] }),
         queryClient.invalidateQueries({ queryKey: ["startup-snapshot"] }),
@@ -452,7 +487,7 @@ export function useAccounts() {
       disposed = true;
       unlisten?.();
     };
-  }, [areAccountQueriesEnabled, queryClient]);
+  }, [areAccountQueriesEnabled, queryClient, usageListQueryKey]);
 
   useEffect(() => {
     if (!areAccountQueriesEnabled) {
@@ -488,7 +523,7 @@ export function useAccounts() {
   const accounts = useMemo(() => {
     return attachUsagesToAccounts(
       visibleAccountList?.items || [],
-      usagesQuery.data || []
+      usagesQuery.data || [],
     );
   }, [visibleAccountList?.items, usagesQuery.data]);
 
@@ -554,7 +589,7 @@ export function useAccounts() {
    */
   const invalidateUsageData = async () => {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["usage"] }),
+      queryClient.invalidateQueries({ queryKey: usageListQueryKey }),
       queryClient.invalidateQueries({ queryKey: ["usage-aggregate"] }),
       queryClient.invalidateQueries({ queryKey: ["today-summary"] }),
       queryClient.invalidateQueries({ queryKey: ["startup-snapshot"] }),
@@ -565,7 +600,7 @@ export function useAccounts() {
 
   const invalidateAccountListData = async () => {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["accounts", "list"] }),
+      queryClient.invalidateQueries({ queryKey: accountListQueryKey }),
       queryClient.invalidateQueries({ queryKey: ["startup-snapshot"] }),
     ]);
   };
@@ -765,6 +800,7 @@ export function useAccounts() {
       note,
       tags,
       sort,
+      status,
       quotaCapacityPrimaryWindowTokens,
       quotaCapacitySecondaryWindowTokens,
     }: {
@@ -774,6 +810,7 @@ export function useAccounts() {
       note?: string | null;
       tags?: string[] | string | null;
       sort?: number | null;
+      status?: string | null;
       quotaCapacityPrimaryWindowTokens?: number | null;
       quotaCapacitySecondaryWindowTokens?: number | null;
     }) =>
@@ -783,6 +820,7 @@ export function useAccounts() {
         note,
         tags,
         sort,
+        status,
         quotaCapacityPrimaryWindowTokens,
         quotaCapacitySecondaryWindowTokens,
       }),
@@ -841,6 +879,103 @@ export function useAccounts() {
           action: actionLabel,
           error: getAppErrorMessage(error),
         })
+      );
+    },
+  });
+
+  const toggleManyAccountStatusMutation = useMutation({
+    mutationFn: async ({
+      accountIds,
+      enabled,
+    }: ToggleManyAccountStatusInput): Promise<ToggleManyAccountStatusResult> => {
+      const normalizedIds = Array.from(
+        new Set(accountIds.map((accountId) => accountId.trim()).filter(Boolean)),
+      );
+      if (normalizedIds.length === 0) {
+        return { requested: 0, succeeded: 0, failed: [] };
+      }
+
+      const settled = await Promise.allSettled(
+        normalizedIds.map((accountId) =>
+          enabled
+            ? accountClient.enableAccount(accountId)
+            : accountClient.disableAccount(accountId),
+        ),
+      );
+      const failed = settled.flatMap((result, index) =>
+        result.status === "rejected"
+          ? [
+              {
+                accountId: normalizedIds[index],
+                reason: getAppErrorMessage(result.reason),
+              },
+            ]
+          : [],
+      );
+
+      return {
+        requested: normalizedIds.length,
+        succeeded: normalizedIds.length - failed.length,
+        failed,
+      };
+    },
+    onSuccess: async (result, variables) => {
+      await invalidateAccountData();
+      const actionLabel = variables.enabled ? t("开启账号") : t("关闭账号");
+      const selectedCount = Math.max(
+        Number(variables.selectedCount ?? result.requested) || 0,
+        result.requested,
+      );
+      const skipped = Math.max(selectedCount - result.requested, 0);
+
+      if (result.requested === 0) {
+        toast.info(
+          variables.enabled
+            ? t("当前选中账号没有可开启项")
+            : t("当前选中账号没有可关闭项"),
+        );
+        return;
+      }
+
+      if (result.failed.length > 0) {
+        const summary =
+          skipped > 0
+            ? t("批量{action}完成：成功{success}个，失败{failed}个，跳过{skipped}个", {
+                action: actionLabel,
+                success: result.succeeded,
+                failed: result.failed.length,
+                skipped,
+              })
+            : t("批量{action}完成：成功{success}个，失败{failed}个", {
+                action: actionLabel,
+                success: result.succeeded,
+                failed: result.failed.length,
+              });
+        toast.warning(
+          `${summary}；${t("首个失败")}: ${result.failed[0].accountId} - ${result.failed[0].reason}`,
+        );
+        return;
+      }
+
+      toast.success(
+        skipped > 0
+          ? t("批量{action}完成：成功{success}个，跳过{skipped}个", {
+              action: actionLabel,
+              success: result.succeeded,
+              skipped,
+            })
+          : t("批量{action}完成：成功{success}个", {
+              action: actionLabel,
+              success: result.succeeded,
+            }),
+      );
+    },
+    onError: (error: unknown, variables) => {
+      toast.error(
+        t("批量{action}失败: {error}", {
+          action: variables.enabled ? t("开启账号") : t("关闭账号"),
+          error: getAppErrorMessage(error),
+        }),
       );
     },
   });
@@ -1070,6 +1205,10 @@ export function useAccounts() {
       await invalidateAccountData();
       toast.success(t("账号列表已刷新"));
     },
+    // 静默刷新账号数据（不弹 toast）：测试结束后只回读最新账号状态，避免误触「用量刷新」提示。
+    refreshAccountsSilently: async () => {
+      await invalidateAccountData();
+    },
     deleteAccount: (accountId: string) => {
       if (!ensureServiceReady("删除账号")) return;
       deleteMutation.mutate(accountId);
@@ -1136,6 +1275,7 @@ export function useAccounts() {
         note?: string | null;
         tags?: string[] | string | null;
         sort?: number | null;
+        status?: string | null;
         quotaCapacityPrimaryWindowTokens?: number | null;
         quotaCapacitySecondaryWindowTokens?: number | null;
       }
@@ -1150,6 +1290,18 @@ export function useAccounts() {
     ) => {
       if (!ensureServiceReady(enabled ? "启用账号" : "禁用账号")) return;
       toggleAccountStatusMutation.mutate({ accountId, enabled, sourceStatus });
+    },
+    toggleManyAccountStatuses: async (
+      accountIds: string[],
+      enabled: boolean,
+      selectedCount?: number,
+    ) => {
+      if (!ensureServiceReady(enabled ? "批量开启账号" : "批量关闭账号")) return;
+      await toggleManyAccountStatusMutation.mutateAsync({
+        accountIds,
+        enabled,
+        selectedCount,
+      });
     },
     isRefreshingAccountId:
       refreshAccountMutation.isPending && typeof refreshAccountMutation.variables === "string"
@@ -1199,5 +1351,6 @@ export function useAccounts() {
             (toggleAccountStatusMutation.variables as { accountId?: unknown }).accountId || ""
           )
         : "",
+    isUpdatingManyStatuses: toggleManyAccountStatusMutation.isPending,
   };
 }

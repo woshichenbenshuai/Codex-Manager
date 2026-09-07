@@ -1,21 +1,29 @@
 "use client";
 
+import { useLayoutEffect, useRef, useSyncExternalStore } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import {
   ArrowDown,
+  ArrowDownToLine,
   ArrowUp,
   ArrowUpDown,
+  ArrowUpToLine,
   BarChart3,
   Download,
   FileUp,
   FolderOpen,
   KeyRound,
+  LayoutGrid,
   Loader2,
+  List,
   MoreVertical,
   Network,
   PencilLine,
+  PackageSearch,
   Pin,
   Plus,
+  Power,
+  PowerOff,
   RefreshCw,
   Search,
   Trash2,
@@ -24,9 +32,15 @@ import {
 import { AddAccountModal } from "@/components/modals/add-account-modal";
 import { AccountResetCreditControl } from "@/components/account-reset-credit-control";
 import { ConfirmDialog } from "@/components/modals/confirm-dialog";
+import { AccountTestModal } from "@/components/modals/account-test-modal";
 import UsageModal from "@/components/modals/usage-modal";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardFooter,
+  CardHeader,
+} from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -48,6 +62,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import {
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -69,6 +89,10 @@ import {
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  ToggleGroup,
+  ToggleGroupItem,
+} from "@/components/ui/toggle-group";
+import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
@@ -87,6 +111,7 @@ import { AccountProxyStatusHeader } from "@/components/accounts/account-proxy-st
 import {
   type AccountEditorState,
   type AccountExportMode,
+  type AccountMoveDirection,
   type AccountSizeSortMode,
   type DeleteDialogState,
   type StatusFilter,
@@ -119,6 +144,49 @@ interface CleanupStatusOption {
   count: number;
 }
 
+type AccountViewMode = "table" | "grid";
+
+const ACCOUNT_VIEW_MODE_STORAGE_KEY = "codexmanager.accounts.view-mode";
+const ACCOUNT_VIEW_MODE_CHANGE_EVENT = "codexmanager:accounts-view-mode-change";
+let accountViewModeMemoryValue: AccountViewMode = "table";
+
+function getAccountViewModeSnapshot(): AccountViewMode {
+  if (typeof window === "undefined") {
+    return accountViewModeMemoryValue;
+  }
+  try {
+    const saved = window.localStorage.getItem(ACCOUNT_VIEW_MODE_STORAGE_KEY);
+    accountViewModeMemoryValue = saved === "grid" ? "grid" : "table";
+  } catch {
+    // Restricted browser and embedded runtimes may deny storage access.
+  }
+  return accountViewModeMemoryValue;
+}
+
+function getServerAccountViewModeSnapshot(): AccountViewMode {
+  return "table";
+}
+
+function subscribeAccountViewMode(onStoreChange: () => void): () => void {
+  window.addEventListener("storage", onStoreChange);
+  window.addEventListener(ACCOUNT_VIEW_MODE_CHANGE_EVENT, onStoreChange);
+  return () => {
+    window.removeEventListener("storage", onStoreChange);
+    window.removeEventListener(ACCOUNT_VIEW_MODE_CHANGE_EVENT, onStoreChange);
+  };
+}
+
+function setAccountViewMode(next: AccountViewMode): void {
+  accountViewModeMemoryValue = next;
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(ACCOUNT_VIEW_MODE_STORAGE_KEY, next);
+  } catch {
+    // Keep the preference for this page session when storage is unavailable.
+  }
+  window.dispatchEvent(new Event(ACCOUNT_VIEW_MODE_CHANGE_EVENT));
+}
+
 export interface AccountsPageViewProps {
   accounts: Account[];
   planTypes: PlanTypeOption[];
@@ -135,6 +203,8 @@ export interface AccountsPageViewProps {
   visibleAccounts: Account[];
   filteredAccountIndexMap: Map<string, number>;
   effectiveSelectedIds: string[];
+  selectedEnableTargetCount: number;
+  selectedDisableTargetCount: number;
   addAccountModalOpen: boolean;
   usageModalOpen: boolean;
   exportDialogOpen: boolean;
@@ -147,11 +217,19 @@ export interface AccountsPageViewProps {
   proxyDialogAccount: Account | null;
   proxySettings: AccountProxySettings | null;
   proxyProfiles: ProxyProfile[];
+  canTestAccounts: boolean;
+  canManageAccountModels: boolean;
+  fetchingModelsAccountId: string | null;
+  openModelAssociation: (account: Account) => Promise<void>;
   isProxySettingsLoading: boolean;
   proxyEnabledDraft: boolean;
   proxySourceDraft: AccountProxySource;
   proxyProfileIdDraft: string;
   proxyUrlDraft: string;
+  accountTestAccount: Account | null;
+  openAccountTest: (account: Account) => void;
+  handleAccountTestOpenChange: (open: boolean) => void;
+  onAccountTestFinished: (accountId: string) => void;
   selectedAccount: Account | null;
   accountEditorState: AccountEditorState | null;
   deleteDialogState: DeleteDialogState;
@@ -161,6 +239,7 @@ export interface AccountsPageViewProps {
   tagsDraft: string;
   noteDraft: string;
   sortDraft: string;
+  forceEnabledDraft: boolean;
   quotaPrimaryDraft: string;
   quotaSecondaryDraft: string;
   isRefreshingAllAccounts: boolean;
@@ -178,6 +257,7 @@ export interface AccountsPageViewProps {
   isReorderingAccounts: boolean;
   isUpdatingProfileAccountId: string | null;
   isUpdatingStatusAccountId: string | null;
+  isUpdatingManyStatuses: boolean;
   statusFilterOptions: StatusFilterOption[];
   importFileActionLabel: string;
   importDirectoryActionLabel: string;
@@ -198,6 +278,7 @@ export interface AccountsPageViewProps {
   setTagsDraft: Dispatch<SetStateAction<string>>;
   setNoteDraft: Dispatch<SetStateAction<string>>;
   setSortDraft: Dispatch<SetStateAction<string>>;
+  setForceEnabledDraft: Dispatch<SetStateAction<boolean>>;
   setQuotaPrimaryDraft: Dispatch<SetStateAction<string>>;
   setQuotaSecondaryDraft: Dispatch<SetStateAction<string>>;
   setPage: Dispatch<SetStateAction<number>>;
@@ -210,6 +291,8 @@ export interface AccountsPageViewProps {
   openUsage: (account: Account) => void;
   handleUsageModalOpenChange: (open: boolean) => void;
   handleDeleteSelected: () => void;
+  handleEnableSelected: () => void;
+  handleDisableSelected: () => void;
   openCleanupDialog: () => void;
   toggleCleanupStatus: (status: string) => void;
   handleConfirmCleanupStatuses: () => Promise<void>;
@@ -225,7 +308,7 @@ export interface AccountsPageViewProps {
   openAccountEditor: (account: Account) => void;
   handleMoveAccount: (
     account: Account,
-    direction: "up" | "down",
+    direction: AccountMoveDirection,
   ) => Promise<void>;
   handleApplyAccountSizeSort: (mode: AccountSizeSortMode) => Promise<void>;
   handleConfirmAccountEditor: () => Promise<void>;
@@ -239,6 +322,7 @@ export interface AccountsPageViewProps {
   refreshAccount: (accountId: string) => void;
   clearPreferredAccount: (accountId: string) => void;
   setPreferredAccount: (accountId: string) => void;
+  toggleForceEnabled: (account: Account) => Promise<void>;
   toggleAccountStatus: (
     accountId: string,
     enabled: boolean,
@@ -264,6 +348,8 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     visibleAccounts,
     filteredAccountIndexMap,
     effectiveSelectedIds,
+    selectedEnableTargetCount,
+    selectedDisableTargetCount,
     addAccountModalOpen,
     usageModalOpen,
     exportDialogOpen,
@@ -276,6 +362,9 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     proxyDialogAccount,
     proxySettings,
     proxyProfiles,
+    canManageAccountModels,
+    fetchingModelsAccountId,
+    openModelAssociation,
     isProxySettingsLoading,
     proxyEnabledDraft,
     proxyProfileIdDraft,
@@ -288,6 +377,7 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     tagsDraft,
     noteDraft,
     sortDraft,
+    forceEnabledDraft,
     quotaPrimaryDraft,
     quotaSecondaryDraft,
     isRefreshingAllAccounts,
@@ -305,6 +395,7 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     isReorderingAccounts,
     isUpdatingProfileAccountId,
     isUpdatingStatusAccountId,
+    isUpdatingManyStatuses,
     statusFilterOptions,
     importFileActionLabel,
     importDirectoryActionLabel,
@@ -323,6 +414,7 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     setTagsDraft,
     setNoteDraft,
     setSortDraft,
+    setForceEnabledDraft,
     setQuotaPrimaryDraft,
     setQuotaSecondaryDraft,
     setPage,
@@ -335,6 +427,8 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     openUsage,
     handleUsageModalOpenChange,
     handleDeleteSelected,
+    handleEnableSelected,
+    handleDisableSelected,
     openCleanupDialog,
     toggleCleanupStatus,
     handleConfirmCleanupStatuses,
@@ -359,11 +453,16 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     importByFile,
     importByDirectory,
     refreshAccount,
+    onAccountTestFinished,
     clearPreferredAccount,
     setPreferredAccount,
+    toggleForceEnabled,
     toggleAccountStatus,
   } = props;
 
+  const forceToggleBlocked = ["disabled", "inactive", "unavailable", "banned"].includes(
+    String(currentEditingAccount?.status || "").trim().toLowerCase(),
+  );
   const accountProxyBusy =
     isProxySettingsLoading || isSavingAccountProxy || isClearingAccountProxy;
   const selectedProxyProfile =
@@ -374,6 +473,450 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     (total, option) =>
       cleanupStatusDraft.includes(option.id) ? total + option.count : total,
     0,
+  );
+  const statusMutationBusy =
+    isUpdatingManyStatuses || Boolean(isUpdatingStatusAccountId);
+  const accountPoolLayoutRef = useRef<HTMLDivElement>(null);
+  const viewMode = useSyncExternalStore(
+    subscribeAccountViewMode,
+    getAccountViewModeSnapshot,
+    getServerAccountViewModeSnapshot,
+  );
+
+  const changeViewMode = (values: string[]) => {
+    const next = values[0];
+    if (next !== "table" && next !== "grid") return;
+    setAccountViewMode(next);
+  };
+
+  useLayoutEffect(() => {
+    if (viewMode !== "table") return;
+    const layout = accountPoolLayoutRef.current;
+    if (!layout) return;
+
+    const mainRows = Array.from(
+      layout.querySelectorAll<HTMLElement>("[data-account-pool-main-row]"),
+    );
+    const actionRows = Array.from(
+      layout.querySelectorAll<HTMLElement>("[data-account-pool-action-row]"),
+    );
+    const syncRowHeights = () => {
+      actionRows.forEach((actionRow, index) => {
+        const mainRow = mainRows[index];
+        actionRow.style.height = mainRow
+          ? `${mainRow.getBoundingClientRect().height}px`
+          : "";
+      });
+    };
+
+    syncRowHeights();
+    if (typeof ResizeObserver === "undefined") {
+      return () => {
+        actionRows.forEach((row) => row.style.removeProperty("height"));
+      };
+    }
+
+    const observer = new ResizeObserver(syncRowHeights);
+    mainRows.forEach((row) => observer.observe(row));
+    return () => {
+      observer.disconnect();
+      actionRows.forEach((row) => row.style.removeProperty("height"));
+    };
+  }, [isLoading, viewMode, visibleAccounts]);
+
+  const renderAccountActions = (account: Account) => {
+    const statusAction = getAccountStatusAction(account, t);
+    const StatusActionIcon = statusAction.icon;
+    const isRefreshingCurrentAccount =
+      isRefreshingAccountId === account.id;
+    const isRefreshingCurrentRt = isRefreshingRtAccountId === account.id;
+    const isAtListTop = accounts[0]?.id === account.id;
+    const isAtListBottom =
+      accounts[accounts.length - 1]?.id === account.id;
+    const normalizedAccountStatus = account.status.trim().toLowerCase();
+    const isForceEnabled = normalizedAccountStatus === "force_enabled";
+    const forceToggleBlocked = [
+      "disabled",
+      "inactive",
+      "unavailable",
+      "banned",
+    ].includes(normalizedAccountStatus);
+    const isForceToggleBusy =
+      isUpdatingManyStatuses ||
+      isUpdatingProfileAccountId === account.id ||
+      isUpdatingStatusAccountId === account.id;
+
+    return (
+      <div className="table-action-cell gap-1">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 text-muted-foreground transition-colors hover:text-primary"
+          disabled={!isServiceReady}
+          onClick={() => openUsage(account)}
+          title={t("用量详情")}
+          aria-label={t("用量详情")}
+        >
+          <BarChart3 className="h-4 w-4" />
+        </Button>
+        {canManageAccountModels ? (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-muted-foreground transition-colors hover:text-primary"
+            disabled={!isServiceReady || Boolean(fetchingModelsAccountId)}
+            onClick={() => void openModelAssociation(account)}
+            title={t("获取账号模型")}
+            aria-label={t("获取账号模型")}
+          >
+            {fetchingModelsAccountId === account.id ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <PackageSearch className="h-4 w-4" />
+            )}
+          </Button>
+        ) : null}
+        <DropdownMenu>
+          <DropdownMenuTrigger>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              render={<span />}
+              nativeButton={false}
+              disabled={!isServiceReady}
+              title={t("更多账号操作")}
+              aria-label={t("更多账号操作")}
+            >
+              <MoreVertical className="h-4 w-4" />
+              <span className="sr-only">{t("更多账号操作")}</span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuGroup>
+              <DropdownMenuLabel className="px-2 py-1 text-[11px] uppercase tracking-[0.16em] text-muted-foreground/80">
+                {t("排序")}
+              </DropdownMenuLabel>
+              <DropdownMenuItem
+                className="gap-2"
+                disabled={
+                  !isServiceReady || isReorderingAccounts || isAtListTop
+                }
+                onClick={() => void handleMoveAccount(account, "top")}
+              >
+                <ArrowUpToLine className="h-4 w-4" />
+                {t("移到顶部")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="gap-2"
+                disabled={
+                  !isServiceReady || isReorderingAccounts || isAtListBottom
+                }
+                onClick={() => void handleMoveAccount(account, "bottom")}
+              >
+                <ArrowDownToLine className="h-4 w-4" />
+                {t("移到底部")}
+              </DropdownMenuItem>
+            </DropdownMenuGroup>
+            <DropdownMenuSeparator />
+            <DropdownMenuGroup>
+              <DropdownMenuItem
+                className="gap-2"
+                disabled={
+                  !isServiceReady ||
+                  isRefreshingAllAccounts ||
+                  isRefreshingCurrentAccount
+                }
+                onClick={() => refreshAccount(account.id)}
+              >
+                <RefreshCw
+                  className={cn(
+                    "h-4 w-4",
+                    isRefreshingCurrentAccount && "animate-spin",
+                  )}
+                />
+                {t("刷新用量")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="gap-2"
+                disabled={!isServiceReady || isRefreshingCurrentRt}
+                onClick={() => refreshAccountRt(account.id)}
+              >
+                <KeyRound
+                  className={cn(
+                    "h-4 w-4",
+                    isRefreshingCurrentRt && "animate-pulse",
+                  )}
+                />
+                {t("刷新 AT/RT")}
+                <DropdownMenuShortcut>RT</DropdownMenuShortcut>
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                className="gap-2"
+                disabled={!isServiceReady || isUpdatingPreferred}
+                onClick={() =>
+                  account.preferred
+                    ? clearPreferredAccount(account.id)
+                    : setPreferredAccount(account.id)
+                }
+              >
+                <Pin className="h-4 w-4" />
+                {account.preferred ? t("取消优先") : t("设为优先")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="gap-2"
+                disabled={!isServiceReady}
+                onClick={() => void openProxyDialog(account)}
+              >
+                <Network className="h-4 w-4" />
+                {t("账号代理")}
+              </DropdownMenuItem>
+              {props.canTestAccounts ? (
+                <DropdownMenuItem
+                  className="gap-2"
+                  disabled={!isServiceReady}
+                  onClick={() => props.openAccountTest(account)}
+                >
+                  <Zap className="h-4 w-4" />
+                  {t("测试账号")}
+                </DropdownMenuItem>
+              ) : null}
+              <DropdownMenuItem
+                className="gap-2"
+                disabled={
+                  !isServiceReady || forceToggleBlocked || isForceToggleBusy
+                }
+                onClick={() => void toggleForceEnabled(account)}
+              >
+                {isForceEnabled ? (
+                  <PowerOff className="h-4 w-4" />
+                ) : (
+                  <Power className="h-4 w-4" />
+                )}
+                {isForceEnabled ? t("取消强制开启") : t("强制开启")}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                className="gap-2"
+                disabled={
+                  !isServiceReady ||
+                  isUpdatingManyStatuses ||
+                  isUpdatingStatusAccountId === account.id ||
+                  statusAction.action === null
+                }
+                onClick={() =>
+                  statusAction.action &&
+                  toggleAccountStatus(
+                    account.id,
+                    statusAction.action === "enable",
+                    account.status,
+                  )
+                }
+              >
+                <StatusActionIcon className="h-4 w-4" />
+                {statusAction.label}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                className="gap-2 text-red-500"
+                disabled={!isServiceReady}
+                onClick={() => handleDeleteSingle(account)}
+              >
+                <Trash2 className="h-4 w-4" /> {t("删除")}
+              </DropdownMenuItem>
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    );
+  };
+
+  const renderAccountGrid = () => (
+    <div
+      data-testid="account-grid"
+      className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3"
+    >
+      {!isLoading && visibleAccounts.length > 0 ? (
+        <div className="col-span-full flex items-center gap-2 px-1 text-sm text-muted-foreground">
+          <Checkbox
+            id="account-grid-select-all"
+            checked={visibleAccounts.every((account) =>
+              effectiveSelectedIds.includes(account.id),
+            )}
+            onCheckedChange={toggleSelectAllVisible}
+            aria-label={t("全选")}
+          />
+          <Label htmlFor="account-grid-select-all">{t("全选")}</Label>
+        </div>
+      ) : null}
+      {isLoading ? (
+        Array.from({ length: 6 }).map((_, index) => (
+          <Card key={index} size="sm" className="glass-card mission-panel">
+            <CardHeader className="border-b border-border/50">
+              <Skeleton className="h-5 w-2/3" />
+              <Skeleton className="h-4 w-1/2" />
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3">
+              <Skeleton className="h-20 w-full" />
+              <Skeleton className="h-9 w-full" />
+            </CardContent>
+            <CardFooter className="justify-end gap-2">
+              <Skeleton className="size-8" />
+              <Skeleton className="size-8" />
+            </CardFooter>
+          </Card>
+        ))
+      ) : visibleAccounts.length === 0 ? (
+        <Empty className="col-span-full min-h-64 border border-border/60 bg-card/45">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <Search />
+            </EmptyMedia>
+            <EmptyTitle>{t("未找到符合条件的账号")}</EmptyTitle>
+          </EmptyHeader>
+        </Empty>
+      ) : (
+        visibleAccounts.map((account) => {
+          const quotaItems = buildQuotaSummaryItems(account, t);
+          const filteredIndex = filteredAccountIndexMap.get(account.id) ?? -1;
+          const canMoveUp = filteredIndex > 0;
+          const canMoveDown =
+            filteredIndex !== -1 && filteredIndex < filteredAccounts.length - 1;
+
+          return (
+            <Card
+              key={account.id}
+              size="sm"
+              data-testid="account-card"
+              className="glass-card mission-panel min-w-0 shadow-sm"
+            >
+              <CardHeader className="border-b border-border/50">
+                <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_minmax(72px,auto)] items-start gap-3">
+                  <Checkbox
+                    checked={effectiveSelectedIds.includes(account.id)}
+                    onCheckedChange={() => toggleSelect(account.id)}
+                    aria-label={`${t("选择账号")} ${account.name}`}
+                  />
+                  <AccountInfoCell
+                    account={account}
+                    isPreferred={account.preferred}
+                  />
+                  <div className="min-w-0 justify-self-end">
+                    <AccountStatusCell account={account} />
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="flex min-w-0 flex-col gap-4">
+                <div className="flex min-w-0 flex-col gap-2">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    {t("额度详情")}
+                  </span>
+                  <QuotaOverviewCell items={quotaItems} />
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                    {account.quotaCapacityPrimaryWindowTokens ||
+                    account.quotaCapacitySecondaryWindowTokens ? (
+                      <span className="inline-flex min-h-5 max-w-full items-center rounded-full border border-border/50 bg-background/40 px-2 py-0.5 leading-none break-words [overflow-wrap:anywhere]">
+                        {t("容量覆盖")}: {account.quotaCapacityPrimaryWindowTokens
+                          ? `5h ${formatCompactNumber(
+                              account.quotaCapacityPrimaryWindowTokens,
+                              "0.00",
+                              2,
+                              true,
+                            )}`
+                          : "5h --"}
+                        {" / "}
+                        {account.quotaCapacitySecondaryWindowTokens
+                          ? `7d ${formatCompactNumber(
+                              account.quotaCapacitySecondaryWindowTokens,
+                              "0.00",
+                              2,
+                              true,
+                            )}`
+                          : "7d --"}
+                      </span>
+                    ) : (
+                      <span className="inline-flex min-h-5 max-w-full items-center rounded-full border border-border/50 bg-background/40 px-2 py-0.5 leading-none break-words [overflow-wrap:anywhere]">
+                        {t("未设置账号容量覆盖")}
+                      </span>
+                    )}
+                    <AccountResetCreditControl
+                      account={account}
+                      disabled={!isServiceReady}
+                    />
+                  </div>
+                </div>
+                <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+                  <div className="flex min-w-0 flex-col gap-2 rounded-lg border border-border/50 bg-muted/20 p-3">
+                    <span className="text-xs font-medium text-muted-foreground">
+                      {t("顺序")}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <span className="min-w-8 rounded-md bg-muted/60 px-2 py-1 text-center font-mono text-xs font-semibold tabular-nums">
+                        {account.priority}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        disabled={
+                          !isServiceReady ||
+                          !canMoveUp ||
+                          isReorderingAccounts ||
+                          isUpdatingProfileAccountId === account.id
+                        }
+                        onClick={() => void handleMoveAccount(account, "up")}
+                        title={t("上移一位")}
+                        aria-label={t("上移一位")}
+                      >
+                        <ArrowUp />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        disabled={
+                          !isServiceReady ||
+                          !canMoveDown ||
+                          isReorderingAccounts ||
+                          isUpdatingProfileAccountId === account.id
+                        }
+                        onClick={() => void handleMoveAccount(account, "down")}
+                        title={t("下移一位")}
+                        aria-label={t("下移一位")}
+                      >
+                        <ArrowDown />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        disabled={
+                          !isServiceReady ||
+                          isReorderingAccounts ||
+                          isUpdatingProfileAccountId === account.id
+                        }
+                        onClick={() => openAccountEditor(account)}
+                        title={t("编辑账号信息")}
+                        aria-label={t("编辑账号信息")}
+                      >
+                        <PencilLine />
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="flex min-w-0 flex-col gap-2 rounded-lg border border-border/50 bg-muted/20 p-3">
+                    <span className="text-xs font-medium text-muted-foreground">
+                      {t("账号代理")}
+                    </span>
+                    <AccountProxyCell account={account} />
+                  </div>
+                </div>
+              </CardContent>
+              <CardFooter className="justify-end bg-muted/20 px-3 py-2">
+                {renderAccountActions(account)}
+              </CardFooter>
+            </Card>
+          );
+        })
+      )}
+    </div>
   );
 
   return (
@@ -389,7 +932,7 @@ export function AccountsPageView(props: AccountsPageViewProps) {
       ) : null}
 
       <Card className="glass-card mission-panel shadow-sm">
-        <CardContent className="grid gap-3 pt-0 lg:grid-cols-[200px_auto_minmax(0,1fr)_auto] lg:items-center">
+        <CardContent className="grid min-w-0 gap-3 pt-0 lg:grid-cols-[200px_auto_minmax(0,1fr)_auto] lg:items-center">
           <div className="min-w-0">
             <Input
               placeholder={t("搜索账号名 / 编号...")}
@@ -399,9 +942,9 @@ export function AccountsPageView(props: AccountsPageViewProps) {
             />
           </div>
 
-          <div className="flex shrink-0 items-center gap-3">
+          <div className="grid min-w-0 grid-cols-2 gap-2 sm:flex sm:shrink-0 sm:items-center sm:gap-3">
             <Select value={planFilter} onValueChange={handlePlanFilterChange}>
-              <SelectTrigger className="h-10 w-[140px] shrink-0 rounded-xl bg-card/50">
+              <SelectTrigger className="h-10 w-full min-w-0 rounded-xl bg-card/50 sm:w-[140px] sm:shrink-0">
                 <SelectValue placeholder={t("全部类型")}>
                   {(value) => formatPlanFilterLabel(String(value || ""), t)}
                 </SelectValue>
@@ -426,7 +969,7 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                 handleStatusFilterChange(value as StatusFilter)
               }
             >
-              <SelectTrigger className="h-10 w-[152px] shrink-0 rounded-xl bg-card/50">
+              <SelectTrigger className="h-10 w-full min-w-0 rounded-xl bg-card/50 sm:w-[152px] sm:shrink-0">
                 <SelectValue placeholder={t("全部状态")}>
                   {(value) => formatStatusFilterLabel(String(value || ""), t)}
                 </SelectValue>
@@ -445,7 +988,29 @@ export function AccountsPageView(props: AccountsPageViewProps) {
 
           <div className="hidden min-w-0 lg:block" />
 
-          <div className="ml-auto flex shrink-0 items-center gap-2 lg:ml-0 lg:justify-self-end">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 sm:ml-auto sm:shrink-0 lg:ml-0 lg:justify-self-end">
+            <ToggleGroup
+              value={[viewMode]}
+              onValueChange={changeViewMode}
+              variant="outline"
+              spacing={0}
+              aria-label={t("账号展示方式")}
+            >
+              <ToggleGroupItem
+                value="table"
+                aria-label={t("列表视图")}
+                title={t("列表视图")}
+              >
+                <List />
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="grid"
+                aria-label={t("宫格视图")}
+                title={t("宫格视图")}
+              >
+                <LayoutGrid />
+              </ToggleGroupItem>
+            </ToggleGroup>
             <Tooltip>
               <TooltipTrigger render={<span />} className="inline-flex">
                 <Button
@@ -577,6 +1142,52 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                     {exportActionLabel}
                     <DropdownMenuShortcut>
                       {exportActionShortcut}
+                    </DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel className="px-2 py-1 text-[11px] uppercase tracking-[0.16em] text-muted-foreground/80">
+                    {t("批量状态")}
+                  </DropdownMenuLabel>
+                  <DropdownMenuItem
+                    className="h-9 rounded-lg px-2"
+                    disabled={
+                      !isServiceReady ||
+                      effectiveSelectedIds.length === 0 ||
+                      selectedEnableTargetCount === 0 ||
+                      statusMutationBusy
+                    }
+                    onClick={handleEnableSelected}
+                  >
+                    {isUpdatingManyStatuses ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Power className="mr-2 h-4 w-4" />
+                    )}
+                    {t("批量开启选中账号")}
+                    <DropdownMenuShortcut>
+                      {selectedEnableTargetCount || "-"}
+                    </DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    className="h-9 rounded-lg px-2"
+                    disabled={
+                      !isServiceReady ||
+                      effectiveSelectedIds.length === 0 ||
+                      selectedDisableTargetCount === 0 ||
+                      statusMutationBusy
+                    }
+                    onClick={handleDisableSelected}
+                  >
+                    {isUpdatingManyStatuses ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <PowerOff className="mr-2 h-4 w-4" />
+                    )}
+                    {t("批量关闭选中账号")}
+                    <DropdownMenuShortcut>
+                      {selectedDisableTargetCount || "-"}
                     </DropdownMenuShortcut>
                   </DropdownMenuItem>
                 </DropdownMenuGroup>
@@ -814,13 +1425,27 @@ export function AccountsPageView(props: AccountsPageViewProps) {
         </DialogContent>
       </Dialog>
 
-      <Card className="glass-card mission-panel overflow-hidden py-0 shadow-sm">
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
+      {viewMode === "grid" ? (
+        renderAccountGrid()
+      ) : (
+        <Card className="glass-card mission-panel overflow-hidden py-0 shadow-sm">
+          <CardContent className="p-0">
+            <div ref={accountPoolLayoutRef} className="account-pool-layout">
+            <div className="account-pool-main-pane">
+              <Table className="account-pool-main-table">
+                <colgroup>
+                  <col className="account-pool-col-select" />
+                  <col className="account-pool-col-info" />
+                  <col className="account-pool-col-quota" />
+                  <col className="account-pool-col-order" />
+                  <col className="account-pool-col-proxy" />
+                  <col className="account-pool-col-status" />
+                </colgroup>
+                <TableHeader>
+                  <TableRow data-account-pool-main-row>
                 <TableHead className="w-12 text-center">
                   <Checkbox
+                    aria-label={t("全选")}
                     checked={
                       visibleAccounts.length > 0 &&
                       visibleAccounts.every((account) =>
@@ -830,24 +1455,23 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                     onCheckedChange={toggleSelectAllVisible}
                   />
                 </TableHead>
-                <TableHead className="w-[clamp(280px,34vw,440px)] min-w-[280px] max-w-[440px] whitespace-normal">
+                <TableHead className="w-[360px] min-w-[320px] max-w-[360px] whitespace-normal">
                   {t("账号信息")}
                 </TableHead>
                 <TableHead className="min-w-[300px] text-center">
                   {t("额度详情")}
                 </TableHead>
-                <TableHead className="w-[132px]">{t("顺序")}</TableHead>
+                <TableHead className="w-[168px]">{t("顺序")}</TableHead>
                 <TableHead className="min-w-[180px]">{t("账号代理")}</TableHead>
-                <TableHead className="w-[112px]">{t("状态")}</TableHead>
-                <TableHead className="table-sticky-action-head w-[112px] text-center">
-                  {t("操作")}
+                <TableHead className="account-pool-status-head whitespace-normal">
+                  {t("状态")}
                 </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
               {isLoading ? (
                 Array.from({ length: 5 }).map((_, index) => (
-                  <TableRow key={index}>
+                  <TableRow key={index} data-account-pool-main-row>
                     <TableCell>
                       <Skeleton className="mx-auto h-4 w-4" />
                     </TableCell>
@@ -867,18 +1491,15 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                     <TableCell>
                       <Skeleton className="h-8 w-28" />
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="account-pool-status-cell align-top">
                       <Skeleton className="h-6 w-16 rounded-full" />
-                    </TableCell>
-                    <TableCell className="table-sticky-action-cell">
-                      <Skeleton className="mx-auto h-8 w-24" />
                     </TableCell>
                   </TableRow>
                 ))
               ) : visibleAccounts.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={7} className="h-48 text-center">
-                    <div className="flex flex-col items-center justify-center gap-2 text-muted-foreground">
+                <TableRow data-account-pool-main-row>
+                  <TableCell colSpan={6} className="h-48 text-center">
+                    <div className="flex w-[calc(100dvw-6rem)] flex-col items-center justify-center gap-2 text-muted-foreground sm:w-auto">
                       <Search className="h-8 w-8 opacity-20" />
                       <p>{t("未找到符合条件的账号")}</p>
                     </div>
@@ -887,12 +1508,6 @@ export function AccountsPageView(props: AccountsPageViewProps) {
               ) : (
                 visibleAccounts.map((account) => {
                   const quotaItems = buildQuotaSummaryItems(account, t);
-                  const statusAction = getAccountStatusAction(account, t);
-                  const StatusActionIcon = statusAction.icon;
-                  const isRefreshingCurrentAccount =
-                    isRefreshingAccountId === account.id;
-                  const isRefreshingCurrentRt =
-                    isRefreshingRtAccountId === account.id;
                   const filteredIndex =
                     filteredAccountIndexMap.get(account.id) ?? -1;
                   const canMoveUp = filteredIndex > 0;
@@ -900,14 +1515,19 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                     filteredIndex !== -1 &&
                     filteredIndex < filteredAccounts.length - 1;
                   return (
-                    <TableRow key={account.id} className="group">
+                    <TableRow
+                      key={account.id}
+                      className="group"
+                      data-account-pool-main-row
+                    >
                       <TableCell className="text-center">
                         <Checkbox
+                          aria-label={`${t("选择账号")} ${account.name}`}
                           checked={effectiveSelectedIds.includes(account.id)}
                           onCheckedChange={() => toggleSelect(account.id)}
                         />
                       </TableCell>
-                      <TableCell className="w-[clamp(280px,34vw,440px)] min-w-[280px] max-w-[440px] whitespace-normal align-top">
+                      <TableCell className="w-[360px] min-w-[320px] max-w-[360px] whitespace-normal align-top">
                         <AccountInfoCell
                           account={account}
                           isPreferred={account.preferred}
@@ -915,7 +1535,7 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                       </TableCell>
                       <TableCell>
                         <QuotaOverviewCell items={quotaItems} />
-                        <div className="mt-1.5 flex flex-wrap gap-1.5 text-[10px] text-muted-foreground">
+                        <div className="mt-2 flex flex-wrap gap-1.5 text-[11px] text-muted-foreground">
                           {account.quotaCapacityPrimaryWindowTokens ||
                           account.quotaCapacitySecondaryWindowTokens ? (
                             <span className="inline-flex min-h-5 max-w-full items-center rounded-full border border-border/50 bg-background/40 px-2 py-0.5 leading-none break-words [overflow-wrap:anywhere]">
@@ -949,15 +1569,15 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                           />
                         </div>
                       </TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-1">
-                          <span className="rounded bg-muted/50 px-2 py-0.5 font-mono text-xs">
+                      <TableCell className="align-middle whitespace-nowrap">
+                        <div className="flex min-w-max flex-nowrap items-center gap-1">
+                          <span className="min-w-8 rounded-md bg-muted/60 px-2 py-1 text-center font-mono text-xs font-semibold tabular-nums">
                             {account.priority}
                           </span>
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="h-7 w-7 text-muted-foreground transition-colors hover:text-primary"
+                            className="h-8 w-8 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary active:scale-95"
                             disabled={
                               !isServiceReady ||
                               !canMoveUp ||
@@ -967,12 +1587,12 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                             onClick={() => void handleMoveAccount(account, "up")}
                             title={t("上移一位")}
                           >
-                            <ArrowUp className="h-3.5 w-3.5" />
+                            <ArrowUp className="h-4 w-4" />
                           </Button>
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="h-7 w-7 text-muted-foreground transition-colors hover:text-primary"
+                            className="h-8 w-8 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary active:scale-95"
                             disabled={
                               !isServiceReady ||
                               !canMoveDown ||
@@ -984,157 +1604,83 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                             }
                             title={t("下移一位")}
                           >
-                            <ArrowDown className="h-3.5 w-3.5" />
+                            <ArrowDown className="h-4 w-4" />
                           </Button>
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="h-7 w-7 text-muted-foreground transition-colors hover:text-primary"
+                            className="h-8 w-8 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-primary active:scale-95"
                             disabled={
                               !isServiceReady ||
                               isReorderingAccounts ||
                               isUpdatingProfileAccountId === account.id
                             }
                             onClick={() => openAccountEditor(account)}
+                            aria-label={t("编辑账号信息")}
                             title={t("编辑账号信息")}
                           >
-                            <PencilLine className="h-3.5 w-3.5" />
+                            <PencilLine className="h-4 w-4" />
                           </Button>
                         </div>
                       </TableCell>
                       <TableCell>
                         <AccountProxyCell account={account} />
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="account-pool-status-cell align-top">
                         <AccountStatusCell account={account} />
-                      </TableCell>
-                      <TableCell className="table-sticky-action-cell">
-                        <div className="table-action-cell gap-1">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-muted-foreground transition-colors hover:text-primary"
-                            disabled={!isServiceReady}
-                            onClick={() => openUsage(account)}
-                            title={t("用量详情")}
-                            aria-label={t("用量详情")}
-                          >
-                            <BarChart3 className="h-4 w-4" />
-                          </Button>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8"
-                                render={<span />}
-                                nativeButton={false}
-                                disabled={!isServiceReady}
-                                title={t("更多账号操作")}
-                                aria-label={t("更多账号操作")}
-                              >
-                                <MoreVertical className="h-4 w-4" />
-                                <span className="sr-only">
-                                  {t("更多账号操作")}
-                                </span>
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                                  <DropdownMenuGroup>
-                              <DropdownMenuItem
-                                className="gap-2"
-                                disabled={
-                                  !isServiceReady ||
-                                  isRefreshingAllAccounts ||
-                                  isRefreshingCurrentAccount
-                                }
-                                onClick={() => refreshAccount(account.id)}
-                              >
-                                <RefreshCw
-                                  className={cn(
-                                    "h-4 w-4",
-                                    isRefreshingCurrentAccount && "animate-spin",
-                                  )}
-                                />
-                                {t("刷新用量")}
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                className="gap-2"
-                                disabled={!isServiceReady || isRefreshingCurrentRt}
-                                onClick={() => refreshAccountRt(account.id)}
-                              >
-                                <KeyRound
-                                  className={cn(
-                                    "h-4 w-4",
-                                    isRefreshingCurrentRt && "animate-pulse",
-                                  )}
-                                />
-                                {t("刷新 AT/RT")}
-                                <DropdownMenuShortcut>RT</DropdownMenuShortcut>
-                              </DropdownMenuItem>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                className="gap-2"
-                                disabled={!isServiceReady || isUpdatingPreferred}
-                                onClick={() =>
-                                  account.preferred
-                                    ? clearPreferredAccount(account.id)
-                                    : setPreferredAccount(account.id)
-                                }
-                              >
-                                <Pin className="h-4 w-4" />
-                                {account.preferred ? t("取消优先") : t("设为优先")}
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                className="gap-2"
-                                disabled={!isServiceReady}
-                                onClick={() => void openProxyDialog(account)}
-                              >
-                                <Network className="h-4 w-4" />
-                                {t("账号代理")}
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                className="gap-2"
-                                disabled={
-                                  !isServiceReady ||
-                                  isUpdatingStatusAccountId === account.id ||
-                                  statusAction.action === null
-                                }
-                                onClick={() =>
-                                  statusAction.action &&
-                                  toggleAccountStatus(
-                                    account.id,
-                                    statusAction.action === "enable",
-                                    account.status,
-                                  )
-                                }
-                              >
-                                <StatusActionIcon className="h-4 w-4" />
-                                {statusAction.label}
-                              </DropdownMenuItem>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                className="gap-2 text-red-500"
-                                disabled={!isServiceReady}
-                                onClick={() => handleDeleteSingle(account)}
-                              >
-                                <Trash2 className="h-4 w-4" /> {t("删除")}
-                              </DropdownMenuItem>
-                              </DropdownMenuGroup>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </div>
                       </TableCell>
                     </TableRow>
                   );
                 })
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+            <div
+              className="account-pool-action-rail"
+              role="group"
+              aria-label={t("账号操作")}
+            >
+              <div
+                className="account-pool-action-rail-head"
+                data-account-pool-action-row
+              >
+                {t("操作")}
+              </div>
+              {isLoading ? (
+                Array.from({ length: 5 }).map((_, index) => (
+                  <div
+                    key={index}
+                    className="account-pool-action-rail-row"
+                    data-account-pool-action-row
+                  >
+                    <Skeleton className="mx-auto h-8 w-20" />
+                  </div>
+                ))
+              ) : visibleAccounts.length === 0 ? (
+                <div
+                  className="account-pool-action-rail-row"
+                  aria-hidden="true"
+                  data-account-pool-action-row
+                />
+              ) : (
+                visibleAccounts.map((account) => (
+                  <div
+                    key={account.id}
+                    className="account-pool-action-rail-row"
+                    data-account-pool-action-row
+                  >
+                    {renderAccountActions(account)}
+                  </div>
+                ))
               )}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+            </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
-      <div className="flex items-center justify-between px-2">
+      <div className="flex flex-col gap-3 px-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-xs text-muted-foreground">
           {t("共")} {filteredAccounts.length} {t("个账号")}
           {effectiveSelectedIds.length > 0 ? (
@@ -1143,8 +1689,8 @@ export function AccountsPageView(props: AccountsPageViewProps) {
             </span>
           ) : null}
         </div>
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2">
+        <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:items-center sm:gap-6">
+          <div className="flex items-center justify-between gap-2 sm:justify-start">
             <span className="whitespace-nowrap text-xs text-muted-foreground">
               {t("每页显示")}
             </span>
@@ -1376,6 +1922,14 @@ export function AccountsPageView(props: AccountsPageViewProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {props.canTestAccounts ? (
+        <AccountTestModal
+          account={props.accountTestAccount}
+          open={isPageActive && Boolean(props.accountTestAccount)}
+          onOpenChange={props.handleAccountTestOpenChange}
+          onFinished={onAccountTestFinished}
+        />
+      ) : null}
       <ConfirmDialog
         open={isPageActive && Boolean(deleteDialogState)}
         onOpenChange={(open) => {
@@ -1514,6 +2068,23 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                   placeholder={t("留空使用计划模板")}
                 />
               </div>
+            </div>
+            <div className="flex items-start justify-between gap-4 rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-3">
+              <div className="min-w-0 space-y-1">
+                <Label htmlFor="account-force-enabled-switch">
+                  {t("额度耗尽后仍使用账号")}
+                </Label>
+                <p className="text-[11px] leading-4 text-muted-foreground">
+                  {t("开启后忽略 5h/7d 耗尽状态，继续把该账号加入网关候选；默认关闭。")}
+                </p>
+              </div>
+              <Switch
+                id="account-force-enabled-switch"
+                aria-label={t("额度耗尽后仍使用账号")}
+                checked={forceEnabledDraft}
+                disabled={Boolean(isUpdatingProfileAccountId) || forceToggleBlocked}
+                onCheckedChange={setForceEnabledDraft}
+              />
             </div>
             <div className="grid gap-3 rounded-xl bg-muted/20 px-3 py-3 text-[11px] text-muted-foreground sm:grid-cols-2">
               <div className="space-y-1">

@@ -14,6 +14,8 @@ pub(crate) mod group;
 pub(crate) mod import;
 #[path = "account_list.rs"]
 pub(crate) mod list;
+#[path = "account_models.rs"]
+pub(crate) mod models;
 #[path = "account_plan.rs"]
 pub(crate) mod plan;
 #[path = "account_proxy.rs"]
@@ -24,6 +26,8 @@ pub(crate) mod proxy_health;
 pub(crate) mod proxy_testing;
 #[path = "account_status.rs"]
 pub(crate) mod status;
+#[path = "account_test.rs"]
+pub(crate) mod test;
 #[path = "account_update.rs"]
 pub(crate) mod update;
 #[path = "account_warmup.rs"]

@@ -5,6 +5,116 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-05
+
+### Fixed
+
+- 修复订阅查询新增 User-Agent 后触发网页防护、导致额度刷新失败并进一步显示 Token 授权错误的回归；订阅查询恢复不设置 User-Agent。
+- 额度查询和 Token 刷新恢复标准 Codex User-Agent，不再继承自定义网关 User-Agent，覆盖默认代理和账号独立代理路径。
+
+### Changed
+
+- 发布版本提升到 `0.6.0`，同步 workspace、前端、Tauri 桌面端和锁文件；沿用已有账号与设置存储。
+- `release-all` 将五个平台的服务端构建与桌面构建并行，保留原有桌面、Service、Web 和 Docker 产物；按 Cargo 工作区隔离构建缓存，推荐从主分支发起固定提交的发布以复用跨版本缓存。
+
+## [0.5.7] - 2026-09-05
+
+### Added
+
+- 账号编辑器新增“额度耗尽后仍使用账号”开关，持久化为 `force_enabled`，默认关闭；开启后该账号仍可参与网关候选，适合需要人工接管额度判定的场景。
+- 模型目录默认新增 `gpt-6-astra`；fresh DB 和升级数据库都会通过 revision 8 数据迁移获得其官方 API 限制与含缓存写入的价格、Codex 运行元数据及默认账号池路由，同时保留同名 custom 模型和用户已编辑的 builtin。
+- 账号页新增会记住选择的表格/卡片视图切换；管理员可针对明确选中的 ChatGPT 账号，使用该账号的凭据、账号标识与代理拉取上游模型，并选择性关联到模型目录 V2 的账号池路由，不会在账号池中轮转请求。
+- API Key 服务等级新增 Standard 与 Ultrafast，并贯通 Responses HTTP、WebSocket 和请求日志：Standard 使用上游默认速度并记为 `standard`，Fast 映射为 `priority`，Ultrafast 原值透传；继续接受 Flex 以保持兼容，实际可用等级仍由模型与上游决定。
+- 新增可配置的网关出站 `User-Agent`：`gateway.user_agent` 全局生效，单个聚合 API 的 `aggregate_apis.user_agent` 在真实 route 转发、模型拉取、连通性测试和余额查询中优先；两者均未设置时动态生成 Codex-compatible 默认值（#459）。
+
+### Changed
+
+- 发布版本提升到 `0.5.7`，同步更新 workspace、前端包、Tauri 桌面端与锁文件。
+
+### Fixed
+
+- 修复 Responses WebSocket 的工具输出续接：同一工具调用的重复输出会在上游发送前去重，连接前导事件不再错误消耗终止恢复机会，并可在跨任务续接时有界补回缺失的工具调用上下文（#458）。
+- 修复 Luna Reserve 用量在后续刷新或暂态空列表后从账号页消失的问题，并统一兼容附加额度的 snake_case/camelCase 返回结构。
+- 修复 Luna Reserve 路由边界：仅显式请求 `gpt-reserve` 时，仍有 Reserve 额度的账号才进入 Reserve 候选池；普通 `gpt-5.6-luna` 仍走常规账号池，不会因 Reserve 可用而绕过已耗尽的标准 5h/7d 窗口；硬性授权或停用状态仍按原规则处理。
+
+## [0.5.6] - 2026-09-02
+
+### Added
+
+- 新增管理员专用的“测试账号”功能，可向真实上游发起文字或图片模型测试，并通过按不可猜测 `testId` 隔离的 Tauri 事件或 Web SSE 实时展示进度、结果和取消状态；账号状态以 `status + updated_at` CAS 安全回写，旧任务不会覆盖新状态，`banned`、`disabled` 和 `inactive` 也不会被自动恢复（#452）。
+- 新增“混合轮转（聚合 API 优先）”策略：优先尝试聚合 API，仅在候选全部失败且请求尚未被消费时安全回落账号池；仅聚合模型不会绕过其绑定路由（#454）。
+- 聚合 API 管理页支持拉取上游模型并选择性关联到模型目录 V2 route，无需恢复旧模型来源表或自动关联链路。
+
+### Changed
+
+- 发布版本提升到 `0.5.6`，同步更新 workspace、前端包、Tauri 桌面端与锁文件。
+- 改进 prompt-cache/cache affinity 路由：按平台 Key、协议和模型隔离 `prompt_cache_key` 或根 session ID，原子收敛并发冷启动绑定，让父子任务及流式请求稳定复用同一账号，并仅在回落成功后重新绑定；管理员仪表盘新增缓存命中率。
+
+### Fixed
+
+- 修复部分强校验供应商的聚合 API 连通性测试误报：probe 默认模拟 Codex 官方客户端标识，也可配置自定义 `User-Agent`，且不改变正常 route 转发（#451）。
+- 修复 Codex Device Code 登录生命周期、取消和浏览器回调竞争，并同步托管 gateway profile 的认证与 WebSocket 能力。
+- 修复原生 Codex 图片生成请求的识别与路由：扩展请求可直达 Codex 图片端点并保留必要标识，普通 OpenAI-compatible 客户端继续使用兼容适配路径。
+- 桌面更新器会清理已完成或废弃的版本目录，同时保留待安装版本和更新日志。
+
+## [0.5.5] - 2026-08-23
+
+### Fixed
+
+- 修复关闭启动时显示主界面后，桌面恢复到前台时服务短暂不可用的问题。
+- 启动和恢复流程现在会合并窗口导航，等待首页就绪后再显示窗口，并优先复用已初始化的服务，减少重复启动和预热请求。
+
+## [0.5.4] - 2026-08-23
+
+### Changed
+
+- 发布版本提升到 `0.5.4`，同步更新 workspace、前端包、Tauri 桌面端与锁文件。
+- 对齐 Responses WebSocket 官方语义：增加有界心跳与恢复、连接上限续接、大图像帧支持、压缩协商回退、首帧/前导事件安全重放和账号重新选择，并在恢复耗尽后保留 HTTP fallback。
+- 提高 CI 的 Cargo Git 依赖获取稳定性：使用 CLI fetch、网络重试、锁定依赖预取和缓存，但不重试实际构建或测试失败。
+- 更新 AIXiamo 赞助入口、教程链接和相关说明。
+
+### Fixed
+
+- 修复关闭启动时显示主界面后，桌面主窗口初始化、刷新和服务自动启动不可靠的问题。
+- 修复切换到直连 OpenAI 后历史对话仍引用 `cm` provider 的兼容性问题；直连模式现在明确使用内置 `openai` provider，并避免切换时扫描重写整个 Codex 历史目录。
+- 兼容 Codex 0.149 的托管网关认证，自动为 `cm` provider 写入 `requires_openai_auth`，避免请求缺少 API key。
+- 修复 Responses WebSocket 早期断连、连接时限、首帧失败、前导事件续接、`store=false` 上下文和账号资格变化等场景下的错误恢复；已产生实质输出后不会静默重复请求。
+- 修复部分非成功上游响应的账号切换和默认模型组路由语义。
+
+## [0.5.3] - 2026-08-08
+
+### Fixed
+
+- 修复同一团队下添加第二个账号会覆盖已有账号的问题，按登录主体隔离账号身份。
+- 流式请求遇到可切换的上游错误时，同一账号最多重试一次，仍失败后再切换账号，减少限频恶化。
+
+## [0.5.2] - 2026-07-31
+
+### Changed
+
+- 发布版本提升到 `0.5.2`，同步更新 workspace、前端包、Tauri 桌面端与锁文件。
+- 模型目录与请求计费支持缓存写入 Token 价格，并补齐 Anthropic、Gemini 与 OpenAI 风格响应中的缓存写入用量采集。
+- 适当增大宽屏侧栏菜单的纵向间距，低高度窗口继续使用紧凑布局以避免溢出。
+
+### Fixed
+
+- 非 `2xx` 失败请求不再计入 Token 与预估费用汇总；客户端取消的 `499` 仍保留可能已产生的实际钱包扣费，但不会进入成功用量统计。
+
+## [0.5.1] - 2026-07-26
+
+### Added
+
+- 恢复“Free 账号模型上限”设置；可选择 `auto`（不限制）或模型目录中的具体上限。
+
+### Changed
+
+- 发布版本提升到 `0.5.1`，同步更新 workspace、前端包、Tauri 桌面端与锁文件。
+- 清理低风险 Rust 告警，并仅在 Windows MSVC 目标上抑制 `link.exe` 正常建库信息产生的 `linker_messages` 噪声，其他编译告警仍保持可见。
+
+### Fixed
+
+- Free 账号模型上限现在只过滤超过上限的 Free 账号候选，不会改写请求模型；Plus / Pro 账号不受影响，额度保护仍在过滤后执行，混合账号优先模式在账号耗尽后仍按现有策略回退到聚合 API。
+
 ## [0.5.0] - 2026-07-23
 
 ### Added
@@ -425,7 +535,11 @@
 ### Changed
 - 账号管理页操作区整合为单一“账号操作”下拉菜单，替代右侧多按钮堆叠，界面更简洁。
 
-[Unreleased]: https://github.com/qxcnm/Codex-Manager/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/qxcnm/Codex-Manager/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/qxcnm/Codex-Manager/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/qxcnm/Codex-Manager/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/qxcnm/Codex-Manager/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/qxcnm/Codex-Manager/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/qxcnm/Codex-Manager/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/qxcnm/Codex-Manager/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/qxcnm/Codex-Manager/compare/v0.4.2...v0.4.3

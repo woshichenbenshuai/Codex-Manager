@@ -63,21 +63,6 @@ export const serviceClient = {
     );
     return normalizeStartupSnapshot(result);
   },
-  exportCodexModelsCache: (params: {
-    userAgent: string;
-    models: Array<Record<string, unknown>>;
-    codexHome?: string | null;
-    etag?: string | null;
-    fetchedAt?: string;
-  }) =>
-    invoke<unknown>("service_export_codex_models_cache", {
-      userAgent: params.userAgent,
-      models: params.models,
-      codexHome: params.codexHome || null,
-      etag: params.etag || null,
-      fetchedAt: params.fetchedAt || new Date().toISOString(),
-    }),
-
   async getGatewayTransport(): Promise<GatewayTransportSettings> {
     const result = await invoke<unknown>("service_gateway_transport_get", withAddr());
     return readGatewayTransportSettings(result);
@@ -161,14 +146,18 @@ export const serviceClient = {
     );
     return normalizeRequestLogListResult(result);
   },
-  async listRequestLogsWithSummary(params?: {
-    query?: string;
-    statusFilter?: string;
-    page?: number;
-    pageSize?: number;
-    startTs?: number | null;
-    endTs?: number | null;
-  }, options?: RequestOptions): Promise<RequestLogListWithSummaryResult> {
+  async listRequestLogsWithSummary(
+    params?: {
+      query?: string;
+      statusFilter?: string;
+      page?: number;
+      pageSize?: number;
+      startTs?: number | null;
+      endTs?: number | null;
+    },
+    options?: RequestOptions,
+    addr?: string | null,
+  ): Promise<RequestLogListWithSummaryResult> {
     const result = await invoke<unknown>(
       "service_requestlog_list_with_summary",
       withAddr({
@@ -178,6 +167,7 @@ export const serviceClient = {
         pageSize: params?.pageSize ?? 20,
         startTs: params?.startTs ?? null,
         endTs: params?.endTs ?? null,
+        ...(addr === undefined ? {} : { addr: addr || null }),
       }),
       options
     );
@@ -200,7 +190,11 @@ export const serviceClient = {
     );
     return normalizeRequestLogFilterSummary(result);
   },
-  clearRequestLogs: () => invoke("service_requestlog_clear", withAddr()),
+  clearRequestLogs: (addr?: string | null) =>
+    invoke(
+      "service_requestlog_clear",
+      withAddr(addr === undefined ? {} : { addr: addr || null }),
+    ),
   async getTodaySummary(params?: {
     dayStartTs?: number;
     dayEndTs?: number;

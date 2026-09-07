@@ -19,6 +19,7 @@ export interface CodexProfileStatus {
   selectedAccountId: string | null;
   selectedApiKeyId: string | null;
   gatewayBaseUrl: string | null;
+  supportsWebsockets: boolean;
   providerId: string;
   hasBackup: boolean;
   lastAppliedAt: number | null;
@@ -84,6 +85,8 @@ export interface CodexProfileApiKeyCandidate {
   status: string;
   modelSlug: string | null;
   reasoningEffort: string | null;
+  rotationStrategy: string;
+  catalogSource: "official" | "managed";
 }
 
 export interface CodexProfileCandidates {

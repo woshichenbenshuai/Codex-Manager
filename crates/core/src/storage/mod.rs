@@ -42,8 +42,9 @@ pub use model_billing_v2::{
     ChargeComputationV2, ChargeSnapshotInputV2, ChargeSnapshotV2, ModelPriceTierV2,
 };
 pub use model_catalog_v2::{
-    ManagedModelBatchStateV2Update, ManagedModelStateV2Update, ManagedModelV2,
-    ManagedModelV2Upsert, ModelCatalogV2Stats, ModelPriceV2, ModelRouteV2,
+    ManagedModelBatchStateV2Update, ManagedModelRouteEnsureResultV2, ManagedModelRouteEnsureV2,
+    ManagedModelStateV2Update, ManagedModelV2, ManagedModelV2Upsert, ModelCatalogV2Stats,
+    ModelFastPolicyV2, ModelPriceV2, ModelRouteV2,
 };
 pub use proxy_profiles::derive_proxy_profile_url_metadata;
 
@@ -615,11 +616,11 @@ pub struct LoginSession {
 }
 
 fn login_session_select_columns() -> &'static str {
-    "login_id, code_verifier, state, status, error, workspace_id, note, tags, created_at, updated_at"
+    "login_id, code_verifier, state, status, error, workspace_id, note, tags, group_name, created_at, updated_at"
 }
 
 fn insert_login_session_sql() -> &'static str {
-    "INSERT INTO login_sessions (login_id, code_verifier, state, status, error, workspace_id, note, tags, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+    "INSERT INTO login_sessions (login_id, code_verifier, state, status, error, workspace_id, note, tags, group_name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
 }
 
 fn login_session_by_id_sql() -> String {
@@ -1252,6 +1253,7 @@ pub struct ApiKeyCodexProfileCandidate {
     pub name: Option<String>,
     pub model_slug: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub rotation_strategy: String,
     pub status: String,
 }
 
@@ -1266,6 +1268,7 @@ pub struct AggregateApi {
     pub auth_params_json: Option<String>,
     pub action: Option<String>,
     pub model_override: Option<String>,
+    pub user_agent: Option<String>,
     pub status: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -1301,6 +1304,7 @@ pub struct AggregateApiListSummary {
     pub auth_params_json: Option<String>,
     pub action: Option<String>,
     pub model_override: Option<String>,
+    pub user_agent: Option<String>,
     pub status: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -1327,6 +1331,7 @@ pub struct AggregateApiListSnapshot {
 #[derive(Debug, Clone)]
 pub struct AggregateApiUpdateConfig {
     pub auth_type: String,
+    pub user_agent: Option<String>,
     pub balance_query_enabled: bool,
     pub balance_query_template: Option<String>,
     pub balance_query_base_url: Option<String>,
@@ -2251,6 +2256,35 @@ impl Storage {
             "124_codex_skill_repositories",
             include_str!("../../migrations/124_codex_skill_repositories.sql"),
         )?;
+        self.apply_sql_or_compat_migration(
+            "125_request_token_stats_successful_usage",
+            include_str!("../../migrations/125_request_token_stats_successful_usage.sql"),
+            |s| s.ensure_request_token_stats_usage_included_column(),
+        )?;
+        self.apply_gpt56_current_pricing_migration()?;
+        self.apply_sql_migration(
+            "127_model_catalog_cache_write_prices",
+            include_str!("../../migrations/127_model_catalog_cache_write_prices.sql"),
+        )?;
+        self.apply_sql_migration(
+            "128_login_sessions_group_name",
+            include_str!("../../migrations/128_login_sessions_group_name.sql"),
+        )?;
+        self.apply_sql_migration(
+            "129_model_fast_policy",
+            include_str!("../../migrations/129_model_fast_policy.sql"),
+        )?;
+        self.apply_sql_migration(
+            "130_accounts_subject_identity",
+            include_str!("../../migrations/130_accounts_subject_identity.sql"),
+        )?;
+        self.apply_model_catalog_gpt6_astra_migration()?;
+        self.apply_model_catalog_gpt56_metadata_fix_migration()?;
+        self.apply_sql_or_compat_migration(
+            "133_aggregate_api_user_agent",
+            include_str!("../../migrations/133_aggregate_api_user_agent.sql"),
+            |s| s.ensure_aggregate_apis_table(),
+        )?;
         self.ensure_api_key_rotation_columns()?;
         self.ensure_api_key_account_group_filter_column()?;
         self.ensure_aggregate_apis_table()?;
@@ -2379,6 +2413,7 @@ impl Storage {
                 &session.workspace_id,
                 &session.note,
                 &session.tags,
+                &session.group_name,
                 session.created_at,
                 session.updated_at,
             ),
@@ -2411,9 +2446,9 @@ impl Storage {
                 workspace_id: row.get(5)?,
                 note: row.get(6)?,
                 tags: row.get(7)?,
-                group_name: None,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                group_name: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
             }))
         } else {
             Ok(None)

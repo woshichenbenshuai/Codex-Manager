@@ -102,6 +102,9 @@ export function normalizeCodexProfileStatus(payload: unknown): CodexProfileStatu
     ),
     selectedApiKeyId: toNullableString(source.selectedApiKeyId ?? source.selected_api_key_id),
     gatewayBaseUrl: toNullableString(source.gatewayBaseUrl ?? source.gateway_base_url),
+    supportsWebsockets: asBoolean(
+      source.supportsWebsockets ?? source.supports_websockets,
+    ),
     providerId: asString(source.providerId ?? source.provider_id) || "cm",
     hasBackup: asBoolean(source.hasBackup ?? source.has_backup),
     lastAppliedAt: toNullableNumber(source.lastAppliedAt ?? source.last_applied_at),
@@ -215,6 +218,13 @@ function normalizeApiKeyCandidate(
     reasoningEffort: toNullableString(
       source.reasoningEffort ?? source.reasoning_effort,
     ),
+    rotationStrategy:
+      asString(source.rotationStrategy ?? source.rotation_strategy) ||
+      "account_rotation",
+    catalogSource:
+      asString(source.catalogSource ?? source.catalog_source) === "managed"
+        ? "managed"
+        : "official",
   };
 }
 
@@ -293,6 +303,7 @@ export const codexProfileClient = {
     apiKeyId: string;
     codexHome?: string | null;
     baseUrl?: string | null;
+    supportsWebsockets: boolean;
     reloadAfterSwitch: boolean;
   }): Promise<CodexProfileStatus> {
     const result = await invoke<unknown>(
@@ -301,6 +312,7 @@ export const codexProfileClient = {
         apiKeyId: params.apiKeyId,
         codexHome: params.codexHome || null,
         baseUrl: params.baseUrl || null,
+        supportsWebsockets: params.supportsWebsockets,
         reloadAfterSwitch: params.reloadAfterSwitch,
       }),
     );

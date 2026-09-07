@@ -24,6 +24,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { accountClient } from "@/lib/api/account-client";
+import {
+  buildAccountListQueryKey,
+  buildAccountLookupQueryKey,
+  buildAccountUsageListQueryKey,
+} from "@/lib/api/account-query-keys";
 import { appClient } from "@/lib/api/app-client";
 import { CODEX_PROFILE_CANDIDATES_QUERY_KEY } from "@/lib/api/codex-profile-client";
 import { useRuntimeCapabilities } from "@/hooks/useRuntimeCapabilities";
@@ -51,7 +56,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-const BROWSER_LOGIN_TIMEOUT_MS = 2 * 60 * 1000;
+const BROWSER_LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
 const DEVICE_CODE_LOGIN_TIMEOUT_MS = 15 * 60 * 1000;
 const LOGIN_COMPLETION_GRACE_MS = 5 * 60 * 1000;
 
@@ -339,8 +344,15 @@ export function AddAccountModal({ open, onOpenChange }: AddAccountModalProps) {
    */
   const invalidateLoginQueries = async () => {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["accounts"] }),
-      queryClient.invalidateQueries({ queryKey: ["usage"] }),
+      queryClient.invalidateQueries({
+        queryKey: buildAccountListQueryKey(serviceStatus.addr),
+      }),
+      queryClient.invalidateQueries({
+        queryKey: buildAccountLookupQueryKey(serviceStatus.addr),
+      }),
+      queryClient.invalidateQueries({
+        queryKey: buildAccountUsageListQueryKey(serviceStatus.addr),
+      }),
       queryClient.invalidateQueries({ queryKey: ["startup-snapshot"] }),
       queryClient.invalidateQueries({
         queryKey: CODEX_PROFILE_CANDIDATES_QUERY_KEY,
@@ -412,9 +424,12 @@ export function AddAccountModal({ open, onOpenChange }: AddAccountModalProps) {
       try {
         const [currentAccountResult, latestAccounts] = await Promise.all([
           accountClient.readCurrentAccessTokenAccount(false),
-          accountClient.list(),
+          accountClient.list(serviceStatus.addr),
         ]);
-        queryClient.setQueryData(["accounts", "list"], latestAccounts);
+        queryClient.setQueryData(
+          buildAccountListQueryKey(serviceStatus.addr),
+          latestAccounts,
+        );
         const currentAccountId = currentAccountResult.account?.accountId || "";
         if (
           currentAccountId &&
@@ -690,11 +705,13 @@ export function AddAccountModal({ open, onOpenChange }: AddAccountModalProps) {
     setIsPollingLogin(false);
     setIsLoading(true);
     setLoginHint(t("正在解析回调..."));
+    let callbackState = "";
     try {
       const url = new URL(manualCallback);
       const state = url.searchParams.get("state") || "";
       const code = url.searchParams.get("code") || "";
       const redirectUri = `${url.origin}${url.pathname}`;
+      callbackState = state;
 
       await accountClient.completeLogin(state, code, redirectUri);
       if (operationToken !== loginPollTokenRef.current) {
@@ -706,6 +723,47 @@ export function AddAccountModal({ open, onOpenChange }: AddAccountModalProps) {
     } catch (err: unknown) {
       if (operationToken !== loginPollTokenRef.current) {
         return;
+      }
+      if (callbackState) {
+        try {
+          const recoveredStatus =
+            await accountClient.getLoginStatus(callbackState);
+          if (operationToken !== loginPollTokenRef.current) {
+            return;
+          }
+          // 中文注释：自动回调可能已先完成，按已记录的成功状态继续刷新账号并关闭弹窗。
+          if (recoveredStatus.status === "success") {
+            activeLoginIdRef.current = "";
+            setLoginHint(t("授权完成，正在同步账号列表..."));
+            try {
+              await completeLoginSuccess(t("登录成功"), operationToken);
+            } catch (syncError: unknown) {
+              if (operationToken !== loginPollTokenRef.current) {
+                return;
+              }
+              const message =
+                syncError instanceof Error
+                  ? syncError.message
+                  : String(syncError);
+              setIsPollingLogin(false);
+              setLoginHint(`${t("登录成功，但账号同步失败")}：${message}`);
+              toast.error(`${t("登录成功，但账号同步失败")}：${message}`);
+            }
+            return;
+          }
+          if (recoveredStatus.status === "completing") {
+            activeLoginIdRef.current = callbackState;
+            void waitForLogin(
+              callbackState,
+              operationToken,
+              "chatgpt",
+              t("授权已确认，正在完成登录..."),
+            );
+            return;
+          }
+        } catch {
+          // 保留原始解析错误，状态恢复查询失败不应覆盖更有用的错误信息。
+        }
       }
       setLoginHint(
         `${t("解析失败")}: ${err instanceof Error ? err.message : String(err)}`,
@@ -750,8 +808,15 @@ export function AddAccountModal({ open, onOpenChange }: AddAccountModalProps) {
         `${t("导入完成")}：${t("共")}${total}，${t("新增")}${created}，${t("更新")}${updated}，${t("失败")}${failed}`,
       );
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["accounts"] }),
-        queryClient.invalidateQueries({ queryKey: ["usage"] }),
+        queryClient.invalidateQueries({
+          queryKey: buildAccountListQueryKey(serviceStatus.addr),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: buildAccountLookupQueryKey(serviceStatus.addr),
+        }),
+        queryClient.invalidateQueries({
+          queryKey: buildAccountUsageListQueryKey(serviceStatus.addr),
+        }),
         queryClient.invalidateQueries({ queryKey: ["startup-snapshot"] }),
         queryClient.invalidateQueries({
           queryKey: CODEX_PROFILE_CANDIDATES_QUERY_KEY,
@@ -1000,7 +1065,7 @@ export function AddAccountModal({ open, onOpenChange }: AddAccountModalProps) {
                     <div className="space-y-2">
                       <Label className="text-xs flex items-center gap-1.5 text-muted-foreground">
                         <Hash className="h-3 w-3" />{" "}
-                        {t("手动解析回调（当本地 48760 端口占用时）")}
+                        {t("手动解析回调（仅在自动回调未完成时使用）")}
                       </Label>
                       <div className="flex gap-2">
                         <Input

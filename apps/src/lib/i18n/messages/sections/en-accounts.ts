@@ -234,6 +234,14 @@ export const EN_ACCOUNTS_MESSAGES: MessageCatalog = {
   "额度容量必须是大于 0 的数字，留空表示未覆盖":
     "Quota capacity must be a number greater than 0. Leave blank for no override.",
   "额度已耗尽": "Quota exhausted",
+  "强制开启": "Force enabled",
+  "取消强制开启": "Disable force enabled",
+  "仅 Luna Reserve": "Luna Reserve only",
+  "Luna Reserve 额度": "Luna Reserve quota",
+  "额度耗尽后仍使用账号": "Keep using account after quota exhaustion",
+  "开启后忽略 5h/7d 耗尽状态，继续把该账号加入网关候选；默认关闭。":
+    "When enabled, ignore exhausted 5h/7d windows and keep this account in the gateway pool; off by default.",
+  "手动强制开启": "Manually force enabled",
   "额度已重置，但最新用量同步失败，请稍后手动刷新":
     "Quota was reset, but the latest usage could not be synced. Refresh it manually later.",
   "重置 5h + 7d": "Reset 5h + 7d",
@@ -267,5 +275,52 @@ export const EN_ACCOUNTS_MESSAGES: MessageCatalog = {
   "暂无重置券记录": "No reset credit history",
   "无法读取重置券详情，请重新核对。":
     "Reset credit details could not be loaded. Check again.",
+  "开启账号": "enable accounts",
+  "关闭账号": "disable accounts",
+  "批量开启账号": "Bulk enable accounts",
+  "批量关闭账号": "Bulk disable accounts",
+  "批量状态": "Bulk status",
+  "批量开启选中账号": "Enable selected accounts",
+  "批量关闭选中账号": "Disable selected accounts",
+  "请先选择账号": "Select accounts first",
+  "当前选中账号没有可开启项": "No selected accounts can be enabled",
+  "当前选中账号没有可关闭项": "No selected accounts can be disabled",
+  "批量{action}完成：成功{success}个，失败{failed}个，跳过{skipped}个":
+    "Bulk {action} complete: {success} succeeded, {failed} failed, {skipped} skipped",
+  "批量{action}完成：成功{success}个，失败{failed}个":
+    "Bulk {action} complete: {success} succeeded, {failed} failed",
+  "批量{action}完成：成功{success}个，跳过{skipped}个":
+    "Bulk {action} complete: {success} succeeded, {skipped} skipped",
+  "批量{action}完成：成功{success}个":
+    "Bulk {action} complete: {success} succeeded",
+  "批量{action}失败: {error}": "Bulk {action} failed: {error}",
+  "测试账号": "Test account",
+  "测试类型": "Test type",
+  "选择测试类型": "Select test type",
+  "文字模型": "Text model",
+  "图片模型": "Image model",
+  "测试模型": "Test model",
+  "选择模型": "Select model",
+  "官方模型": "Official models",
+  "图片": "Image",
+  "未加载到可用模型，测试将使用后端默认模型。":
+    "No available models were loaded. The backend default model will be used.",
+  "已取消测试，可再次点击「开始测试」。":
+    "Test canceled. Click Start test to run it again.",
+  "准备就绪，点击「开始测试」发起一次真实请求。":
+    "Ready. Click Start test to send a real request.",
+  "模型：": "Model: ",
+  "测试成功": "Test succeeded",
+  "该账号为手动禁用，测试虽成功但不会被自动恢复为「可用」。":
+    "This account is manually disabled. A successful test will not automatically mark it as available.",
+  "图片预览": "Image preview",
+  "开始测试": "Start test",
+  "启动测试失败": "Failed to start test",
   "预计删除": "Estimated delete",
+  "获取账号模型": "Fetch account models",
+  "账号展示方式": "Account view",
+  "列表视图": "List view",
+  "宫格视图": "Grid view",
+  "选择账号": "Select account",
+  "账号模型": "Account models",
 };

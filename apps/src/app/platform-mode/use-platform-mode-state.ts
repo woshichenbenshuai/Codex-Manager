@@ -28,14 +28,22 @@ const RELOAD_AFTER_SWITCH_STORAGE_KEY =
   "codexmanager.platform-mode.reload-after-switch";
 const RELOAD_AFTER_SWITCH_EVENT =
   "codexmanager:platform-mode-reload-after-switch";
+const SAFE_RELOAD_DEFAULT_MIGRATION_KEY =
+  "codexmanager.platform-mode.reload-safe-default-v2";
 
-let reloadAfterSwitchMemoryValue = true;
+let reloadAfterSwitchMemoryValue = false;
 
 function getReloadAfterSwitchPreference(): boolean {
   if (typeof window === "undefined") {
     return reloadAfterSwitchMemoryValue;
   }
   try {
+    if (window.localStorage.getItem(SAFE_RELOAD_DEFAULT_MIGRATION_KEY) !== "1") {
+      // Older versions enabled process termination by default. Reset that inherited preference
+      // once; users can explicitly opt in again after the migration.
+      window.localStorage.setItem(RELOAD_AFTER_SWITCH_STORAGE_KEY, "false");
+      window.localStorage.setItem(SAFE_RELOAD_DEFAULT_MIGRATION_KEY, "1");
+    }
     const stored = window.localStorage.getItem(RELOAD_AFTER_SWITCH_STORAGE_KEY);
     if (stored === "true" || stored === "false") {
       reloadAfterSwitchMemoryValue = stored === "true";
@@ -92,12 +100,12 @@ export function modeImpact(
   t: (value: string, params?: Record<string, string | number>) => string,
 ): string {
   if (mode === "direct_account") {
-    return t("当前为账号直连，Codex CLI 直连 OpenAI，CodexManager 无法统计 CLI 请求日志和用量。");
+    return t("Codex 直接连接 OpenAI，并跟随 OpenAI 官方模型目录；CodexManager 不参与请求转发或模型目录管理。");
   }
   if (mode === "gateway") {
-    return t("当前为本地网关，Codex CLI 经过 CodexManager 转发，请求日志、Token 和费用统计可用。");
+    return t("Codex 请求由 CodexManager 转发；实际路由和模型目录取决于当前平台密钥的配置。");
   }
-  return t("选择账号直连或本地网关后，CodexManager 会接管该 Codex profile 的 auth.json / config.toml。");
+  return t("选择接入方式后，CodexManager 会接管该 Codex profile 的 auth.json / config.toml。");
 }
 
 export function usePlatformModePageState(
@@ -112,10 +120,13 @@ export function usePlatformModePageState(
   const [selectedAccountIdDraft, setSelectedAccountIdDraft] = useState<string | null>(null);
   const [selectedApiKeyIdDraft, setSelectedApiKeyIdDraft] = useState<string | null>(null);
   const [gatewayBaseUrlDraft, setGatewayBaseUrlDraft] = useState<string | null>(null);
+  const [supportsWebsocketsDraft, setSupportsWebsocketsDraft] = useState<boolean | null>(
+    null,
+  );
   const reloadAfterSwitch = useSyncExternalStore(
     subscribeToReloadAfterSwitchPreference,
     getReloadAfterSwitchPreference,
-    () => true,
+    () => false,
   );
   const browserOrigin = useSyncExternalStore(
     () => () => undefined,
@@ -175,6 +186,8 @@ export function usePlatformModePageState(
   );
   const gatewayBaseUrl =
     gatewayBaseUrlDraft ?? status?.gatewayBaseUrl ?? defaultGatewayBaseUrl;
+  const supportsWebsockets =
+    supportsWebsocketsDraft ?? status?.supportsWebsockets ?? false;
   const isDirectActive = status?.mode === "direct_account";
   const isGatewayActive = status?.mode === "gateway";
   const activeAccountValue = status?.selectedAccountId
@@ -248,7 +261,7 @@ export function usePlatformModePageState(
       }),
     onSuccess: async (nextStatus) => {
       await refreshAll();
-      toast.success(t("已切换到账号直连"));
+      toast.success(t("已切换为直接连接 OpenAI"));
       showHistoryRepairToast(nextStatus.historyRepair);
       showRuntimeReloadToast(nextStatus.runtimeReload);
     },
@@ -263,11 +276,12 @@ export function usePlatformModePageState(
         apiKeyId: selectedApiKeyId,
         codexHome: codexHomeInput,
         baseUrl: gatewayBaseUrl,
+        supportsWebsockets,
         reloadAfterSwitch,
       }),
     onSuccess: async (nextStatus) => {
       await refreshAll();
-      toast.success(t("已切换到本地网关"));
+      toast.success(t("已切换为通过 CodexManager"));
       showHistoryRepairToast(nextStatus.historyRepair);
       showRuntimeReloadToast(nextStatus.runtimeReload);
     },
@@ -348,6 +362,7 @@ export function usePlatformModePageState(
     selectedAccountId,
     selectedApiKeyId,
     gatewayBaseUrl,
+    supportsWebsockets,
     reloadAfterSwitch,
     defaultGatewayBaseUrl,
     isDirectActive,
@@ -358,6 +373,7 @@ export function usePlatformModePageState(
     setSelectedAccountIdDraft,
     setSelectedApiKeyIdDraft,
     setGatewayBaseUrlDraft,
+    setSupportsWebsocketsDraft,
     setReloadAfterSwitch,
     refreshAll,
     saveConfigMutation,
