@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import {
   ArrowDown,
@@ -476,7 +476,6 @@ export function AccountsPageView(props: AccountsPageViewProps) {
   );
   const statusMutationBusy =
     isUpdatingManyStatuses || Boolean(isUpdatingStatusAccountId);
-  const accountPoolLayoutRef = useRef<HTMLDivElement>(null);
   const viewMode = useSyncExternalStore(
     subscribeAccountViewMode,
     getAccountViewModeSnapshot,
@@ -488,41 +487,6 @@ export function AccountsPageView(props: AccountsPageViewProps) {
     if (next !== "table" && next !== "grid") return;
     setAccountViewMode(next);
   };
-
-  useLayoutEffect(() => {
-    if (viewMode !== "table") return;
-    const layout = accountPoolLayoutRef.current;
-    if (!layout) return;
-
-    const mainRows = Array.from(
-      layout.querySelectorAll<HTMLElement>("[data-account-pool-main-row]"),
-    );
-    const actionRows = Array.from(
-      layout.querySelectorAll<HTMLElement>("[data-account-pool-action-row]"),
-    );
-    const syncRowHeights = () => {
-      actionRows.forEach((actionRow, index) => {
-        const mainRow = mainRows[index];
-        actionRow.style.height = mainRow
-          ? `${mainRow.getBoundingClientRect().height}px`
-          : "";
-      });
-    };
-
-    syncRowHeights();
-    if (typeof ResizeObserver === "undefined") {
-      return () => {
-        actionRows.forEach((row) => row.style.removeProperty("height"));
-      };
-    }
-
-    const observer = new ResizeObserver(syncRowHeights);
-    mainRows.forEach((row) => observer.observe(row));
-    return () => {
-      observer.disconnect();
-      actionRows.forEach((row) => row.style.removeProperty("height"));
-    };
-  }, [isLoading, viewMode, visibleAccounts]);
 
   const renderAccountActions = (account: Account) => {
     const statusAction = getAccountStatusAction(account, t);
@@ -1430,19 +1394,9 @@ export function AccountsPageView(props: AccountsPageViewProps) {
       ) : (
         <Card className="glass-card mission-panel overflow-hidden py-0 shadow-sm">
           <CardContent className="p-0">
-            <div ref={accountPoolLayoutRef} className="account-pool-layout">
-            <div className="account-pool-main-pane">
-              <Table className="account-pool-main-table">
-                <colgroup>
-                  <col className="account-pool-col-select" />
-                  <col className="account-pool-col-info" />
-                  <col className="account-pool-col-quota" />
-                  <col className="account-pool-col-order" />
-                  <col className="account-pool-col-proxy" />
-                  <col className="account-pool-col-status" />
-                </colgroup>
+              <Table className="min-w-[1280px]">
                 <TableHeader>
-                  <TableRow data-account-pool-main-row>
+                  <TableRow>
                 <TableHead className="w-12 text-center">
                   <Checkbox
                     aria-label={t("全选")}
@@ -1462,16 +1416,19 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                   {t("额度详情")}
                 </TableHead>
                 <TableHead className="w-[168px]">{t("顺序")}</TableHead>
-                <TableHead className="min-w-[180px]">{t("账号代理")}</TableHead>
-                <TableHead className="account-pool-status-head whitespace-normal">
+                <TableHead className="w-[180px]">{t("账号代理")}</TableHead>
+                <TableHead className="w-[140px] whitespace-normal">
                   {t("状态")}
+                </TableHead>
+                <TableHead className="table-sticky-action-head w-[120px] text-center">
+                  {t("操作")}
                 </TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
               {isLoading ? (
                 Array.from({ length: 5 }).map((_, index) => (
-                  <TableRow key={index} data-account-pool-main-row>
+                  <TableRow key={index}>
                     <TableCell>
                       <Skeleton className="mx-auto h-4 w-4" />
                     </TableCell>
@@ -1491,14 +1448,17 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                     <TableCell>
                       <Skeleton className="h-8 w-28" />
                     </TableCell>
-                    <TableCell className="account-pool-status-cell align-top">
+                    <TableCell className="align-top">
                       <Skeleton className="h-6 w-16 rounded-full" />
+                    </TableCell>
+                    <TableCell className="table-sticky-action-cell">
+                      <Skeleton className="mx-auto h-8 w-24" />
                     </TableCell>
                   </TableRow>
                 ))
               ) : visibleAccounts.length === 0 ? (
-                <TableRow data-account-pool-main-row>
-                  <TableCell colSpan={6} className="h-48 text-center">
+                <TableRow>
+                  <TableCell colSpan={7} className="h-48 text-center">
                     <div className="flex w-[calc(100dvw-6rem)] flex-col items-center justify-center gap-2 text-muted-foreground sm:w-auto">
                       <Search className="h-8 w-8 opacity-20" />
                       <p>{t("未找到符合条件的账号")}</p>
@@ -1518,7 +1478,6 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                     <TableRow
                       key={account.id}
                       className="group"
-                      data-account-pool-main-row
                     >
                       <TableCell className="text-center">
                         <Checkbox
@@ -1626,8 +1585,11 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                       <TableCell>
                         <AccountProxyCell account={account} />
                       </TableCell>
-                      <TableCell className="account-pool-status-cell align-top">
+                      <TableCell className="align-top whitespace-normal">
                         <AccountStatusCell account={account} />
+                      </TableCell>
+                      <TableCell className="table-sticky-action-cell">
+                        {renderAccountActions(account)}
                       </TableCell>
                     </TableRow>
                   );
@@ -1635,47 +1597,6 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                   )}
                 </TableBody>
               </Table>
-            </div>
-            <div
-              className="account-pool-action-rail"
-              role="group"
-              aria-label={t("账号操作")}
-            >
-              <div
-                className="account-pool-action-rail-head"
-                data-account-pool-action-row
-              >
-                {t("操作")}
-              </div>
-              {isLoading ? (
-                Array.from({ length: 5 }).map((_, index) => (
-                  <div
-                    key={index}
-                    className="account-pool-action-rail-row"
-                    data-account-pool-action-row
-                  >
-                    <Skeleton className="mx-auto h-8 w-20" />
-                  </div>
-                ))
-              ) : visibleAccounts.length === 0 ? (
-                <div
-                  className="account-pool-action-rail-row"
-                  aria-hidden="true"
-                  data-account-pool-action-row
-                />
-              ) : (
-                visibleAccounts.map((account) => (
-                  <div
-                    key={account.id}
-                    className="account-pool-action-rail-row"
-                    data-account-pool-action-row
-                  >
-                    {renderAccountActions(account)}
-                  </div>
-                ))
-              )}
-            </div>
-            </div>
           </CardContent>
         </Card>
       )}

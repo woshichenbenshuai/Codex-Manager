@@ -312,11 +312,12 @@ test("聚合 API、模型组和模型目录的读写固定到当前服务地址"
   assert.match(managedModelsSource, /commitImport\(input, serviceAddr\)/);
 });
 
-test("账号表格选择框有可访问名称且操作栏不伪装成残缺表格", async () => {
+test("账号表格选择框有可访问名称且操作列保留在同一表格", async () => {
   const source = await readSource("src/app/accounts/accounts-page-view.tsx");
 
   assert.match(source, /aria-label=\{t\("全选"\)\}/);
   assert.match(source, /aria-label=\{`\$\{t\("选择账号"\)\} \$\{account\.name\}`\}/);
-  assert.match(source, /className="account-pool-action-rail"\s*role="group"/);
-  assert.doesNotMatch(source, /role="(?:columnheader|cell)"/);
+  assert.match(source, /className="table-sticky-action-head w-\[120px\] text-center"/);
+  assert.match(source, /className="table-sticky-action-cell"/);
+  assert.doesNotMatch(source, /account-pool-action-rail/);
 });

@@ -91,31 +91,20 @@ test("wide tables retain reachable actions and visible empty states", async () =
   assert.match(apiKeysSource, /w-\[calc\(100dvw-6rem\)\]/);
   assert.match(modelsSource, /table-sticky-action-head/);
   assert.match(modelsSource, /table-sticky-action-cell/);
-  assert.match(
-    accountsSource,
-    /account-pool-layout[\s\S]*account-pool-main-pane[\s\S]*account-pool-main-table[\s\S]*account-pool-col-status[\s\S]*account-pool-action-rail/,
-  );
-  assert.doesNotMatch(accountsSource, /table-sticky-action-(?:head|cell)/);
-  assert.match(accountsSource, /new ResizeObserver\(syncRowHeights\)/);
-  assert.match(accountsSource, /data-account-pool-main-row/);
-  assert.match(accountsSource, /data-account-pool-action-row/);
+  assert.match(accountsSource, /<Table className="min-w-\[1280px\]">/);
+  assert.match(accountsSource, /table-sticky-action-head/);
+  assert.match(accountsSource, /table-sticky-action-cell/);
+  assert.doesNotMatch(accountsSource, /account-pool-action-rail/);
+  assert.doesNotMatch(accountsSource, /new ResizeObserver\(syncRowHeights\)/);
   assert.match(
     stylesSource,
-    /\.account-pool-layout[\s\S]*grid-template-columns: minmax\(0, 1fr\) var\(--account-pool-action-width\);/,
+    /\.account-pool-quota-grid[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/,
   );
-  assert.match(stylesSource, /\.account-pool-main-pane[\s\S]*overflow-x: auto;/);
   assert.match(
     stylesSource,
-    /\.account-pool-main-table[\s\S]*table-layout: fixed;[\s\S]*width: 100%;[\s\S]*min-width: 1206px;/,
+    /\.table-sticky-action-head,[\s\S]*\.table-sticky-action-cell[\s\S]*position: sticky;[\s\S]*right: 0;/,
   );
-  assert.match(stylesSource, /\.account-pool-col-quota[\s\S]*width: 330px;/);
-  assert.match(stylesSource, /\.account-pool-quota-grid[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
-  assert.match(stylesSource, /\.account-pool-col-order[\s\S]*width: 168px;/);
   assert.match(accountsSource, /w-\[168px\].*顺序/);
-  assert.match(
-    stylesSource,
-    /\.account-pool-action-rail[\s\S]*position: relative;[\s\S]*z-index: 5;[\s\S]*width: var\(--account-pool-action-width\);/,
-  );
 });
 
 test("primary and theme buttons expose clear interaction state", async () => {
