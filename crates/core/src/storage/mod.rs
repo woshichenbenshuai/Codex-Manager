@@ -1026,6 +1026,84 @@ pub struct AppUserSession {
     pub revoked_at: Option<i64>,
 }
 
+#[derive(Clone)]
+pub struct AppUserTotpState {
+    pub user_id: String,
+    pub secret_ciphertext: Option<String>,
+    pub pending_secret_ciphertext: Option<String>,
+    pub enabled: bool,
+    pub confirmed_at: Option<i64>,
+    pub last_used_step: Option<i64>,
+}
+
+impl std::fmt::Debug for AppUserTotpState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppUserTotpState")
+            .field("user_id", &self.user_id)
+            .field(
+                "secret_ciphertext",
+                &self.secret_ciphertext.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "pending_secret_ciphertext",
+                &self
+                    .pending_secret_ciphertext
+                    .as_ref()
+                    .map(|_| "[REDACTED]"),
+            )
+            .field("enabled", &self.enabled)
+            .field("confirmed_at", &self.confirmed_at)
+            .field("last_used_step", &self.last_used_step)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct AppLoginChallenge {
+    pub id: String,
+    pub user_id: String,
+    pub token_hash: String,
+    pub purpose: String,
+    pub expires_at: i64,
+    pub attempts: i64,
+    pub last_attempt_at: Option<i64>,
+    pub used_at: Option<i64>,
+    pub created_at: i64,
+    pub setup_secret_ciphertext: Option<String>,
+    pub initiated_by_user_id: Option<String>,
+    pub target_user_id: String,
+    pub locked_until: Option<i64>,
+}
+
+impl std::fmt::Debug for AppLoginChallenge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppLoginChallenge")
+            .field("id", &self.id)
+            .field("user_id", &self.user_id)
+            .field("token_hash", &"[REDACTED]")
+            .field("purpose", &self.purpose)
+            .field("expires_at", &self.expires_at)
+            .field("attempts", &self.attempts)
+            .field("last_attempt_at", &self.last_attempt_at)
+            .field("used_at", &self.used_at)
+            .field("created_at", &self.created_at)
+            .field(
+                "setup_secret_ciphertext",
+                &self.setup_secret_ciphertext.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("initiated_by_user_id", &self.initiated_by_user_id)
+            .field("target_user_id", &self.target_user_id)
+            .field("locked_until", &self.locked_until)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppAuthThrottleState {
+    pub attempts: i64,
+    pub locked_until: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppProject {
     pub id: String,
@@ -2284,6 +2362,14 @@ impl Storage {
             "133_aggregate_api_user_agent",
             include_str!("../../migrations/133_aggregate_api_user_agent.sql"),
             |s| s.ensure_aggregate_apis_table(),
+        )?;
+        self.apply_sql_migration(
+            "134_app_user_totp",
+            include_str!("../../migrations/134_app_user_totp.sql"),
+        )?;
+        self.apply_sql_migration(
+            "135_app_auth_hardening",
+            include_str!("../../migrations/135_app_auth_hardening.sql"),
         )?;
         self.ensure_api_key_rotation_columns()?;
         self.ensure_api_key_account_group_filter_column()?;

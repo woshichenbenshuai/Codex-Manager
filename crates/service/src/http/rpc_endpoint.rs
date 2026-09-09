@@ -72,21 +72,70 @@ fn is_json_content_type(request: &Request) -> bool {
         .unwrap_or(false)
 }
 
-fn rpc_actor_from_request_headers(request: &Request) -> crate::RpcActor {
-    crate::RpcActor::from_parts(
+fn resolve_rpc_actor_from_parts(
+    role: Option<&str>,
+    user_id: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<crate::RpcActor, ()> {
+    if role.is_none() && user_id.is_none() && session_id.is_none() {
+        return Ok(crate::RpcActor::system_admin());
+    }
+    let (Some(_claimed_role), Some(claimed_user_id), Some(session_id)) =
+        (role, user_id, session_id)
+    else {
+        return Err(());
+    };
+    let session = crate::auth::app_manager::resolve_app_user_session_by_id(session_id)
+        .map_err(|err| {
+            log::warn!("rpc actor session validation failed: {err}");
+        })?
+        .ok_or(())?;
+    if session.user.id != claimed_user_id {
+        return Err(());
+    }
+    Ok(crate::RpcActor::from_parts_with_session(
+        Some(&session.user.role),
+        Some(&session.user.id),
+        Some(&session.session_id),
+    ))
+}
+
+fn rpc_actor_from_request_headers(request: &Request) -> Result<crate::RpcActor, ()> {
+    resolve_rpc_actor_from_parts(
         get_header_value(request, "X-CodexManager-Rpc-Actor-Role"),
         get_header_value(request, "X-CodexManager-Rpc-Actor-User-Id"),
+        get_header_value(request, "X-CodexManager-Rpc-Actor-Session-Id"),
     )
 }
 
-fn rpc_actor_from_axum_headers(headers: &HeaderMap) -> crate::RpcActor {
+fn rpc_actor_from_axum_headers(headers: &HeaderMap) -> Result<crate::RpcActor, ()> {
     let role = headers
         .get("X-CodexManager-Rpc-Actor-Role")
-        .and_then(|value| value.to_str().ok());
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let user_id = headers
         .get("X-CodexManager-Rpc-Actor-User-Id")
-        .and_then(|value| value.to_str().ok());
-    crate::RpcActor::from_parts(role, user_id)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let session_id = headers
+        .get("X-CodexManager-Rpc-Actor-Session-Id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    resolve_rpc_actor_from_parts(role, user_id, session_id)
+}
+
+fn revalidate_rpc_actor(actor: crate::RpcActor) -> Result<crate::RpcActor, ()> {
+    let Some(session_id) = actor.session_id.as_deref() else {
+        return Ok(actor);
+    };
+    resolve_rpc_actor_from_parts(
+        Some(&actor.role),
+        actor.user_id.as_deref(),
+        Some(session_id),
+    )
 }
 
 /// 函数 `is_loopback_origin`
@@ -338,7 +387,10 @@ pub(crate) async fn handle_rpc_http(request: axum::extract::Request) -> AxumResp
     if let Some(response) = validate_axum_headers(headers) {
         return response;
     }
-    let actor = rpc_actor_from_axum_headers(headers);
+    let actor = match rpc_actor_from_axum_headers(headers) {
+        Ok(actor) => actor,
+        Err(()) => return (StatusCode::UNAUTHORIZED, "{}").into_response(),
+    };
     if headers
         .get("Content-Length")
         .and_then(|value| value.to_str().ok())
@@ -351,21 +403,28 @@ pub(crate) async fn handle_rpc_http(request: axum::extract::Request) -> AxumResp
         Ok(body) => body,
         Err(status) => return (status, "{}").into_response(),
     };
-    let (status, response_body, success) =
-        match tokio::task::spawn_blocking(move || handle_rpc_body(&body_for_task, actor)).await {
-            Ok(result) => result,
-            Err(err) => {
-                log::error!("rpc http blocking task failed: {}", err);
-                let fallback = JsonRpcResponse {
-                    id: 0.into(),
-                    result: crate::error_codes::rpc_error_payload(
-                        "internal_error: rpc task failed".to_string(),
-                    ),
-                };
-                let body = serde_json::to_string(&fallback).unwrap_or_else(|_| "{}".to_string());
-                (200, body, false)
-            }
+    let (status, response_body, success) = match tokio::task::spawn_blocking(move || {
+        let actor = match revalidate_rpc_actor(actor) {
+            Ok(actor) => actor,
+            Err(()) => return (401, "{}".to_string(), false),
         };
+        handle_rpc_body(&body_for_task, actor)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            log::error!("rpc http blocking task failed: {}", err);
+            let fallback = JsonRpcResponse {
+                id: 0.into(),
+                result: crate::error_codes::rpc_error_payload(
+                    "internal_error: rpc task failed".to_string(),
+                ),
+            };
+            let body = serde_json::to_string(&fallback).unwrap_or_else(|_| "{}".to_string());
+            (200, body, false)
+        }
+    };
     if success {
         rpc_metrics_guard.mark_success();
     }
@@ -433,7 +492,6 @@ pub fn handle_rpc(mut request: Request) {
         }
     }
 
-    let actor = rpc_actor_from_request_headers(&request);
     let mut body = String::new();
     let read_result = request
         .as_reader()
@@ -451,6 +509,14 @@ pub fn handle_rpc(mut request: Request) {
         let _ = request.respond(Response::from_string("{}").with_status_code(400));
         return;
     }
+
+    let actor = match rpc_actor_from_request_headers(&request) {
+        Ok(actor) => actor,
+        Err(()) => {
+            let _ = request.respond(Response::from_string("{}").with_status_code(401));
+            return;
+        }
+    };
 
     let (status, response_body, success) = handle_rpc_body(&body, actor);
     if success {

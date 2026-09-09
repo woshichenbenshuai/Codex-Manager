@@ -117,6 +117,7 @@ fn unknown_method_returns_jsonrpc_error() {
 #[test]
 fn member_actor_cannot_call_admin_only_rpc() {
     for method in [
+        "accountManager/status",
         "accountManager/users/list",
         "codexProfile/repairHistory",
         "codexProfile/pruneHistoryBackups",
@@ -304,11 +305,11 @@ fn admin_actor_can_batch_update_managed_model_state_v2() {
 }
 
 #[test]
-fn password_mode_can_call_admin_rpcs() {
+fn password_mode_cannot_call_admin_rpcs() {
     let _guard = test_env_guard();
     let db_path = setup_dashboard_test_db("codexmanager-password-model-source-rpc");
     set_web_access_password(Some("password123")).expect("set web password");
-    set_web_auth_mode("password").expect("enable password mode");
+    set_web_auth_mode("accounts").expect("enable accounts mode");
     let actor = RpcActor::from_parts(Some(ROLE_MEMBER), Some("password-mode-user"));
 
     let admin_resp = response_result(handle_request_with_actor(
@@ -322,19 +323,19 @@ fn password_mode_can_call_admin_rpcs() {
     ));
     let admin_err = rpc_error(&admin_resp);
     assert!(
-        !admin_err.contains("permission_denied"),
-        "password mode unexpectedly denied accountManager/users/list: {admin_err}"
+        admin_err.contains("permission_denied"),
+        "member unexpectedly called accountManager/users/list: {admin_err}"
     );
 
     let _ = std::fs::remove_file(db_path);
 }
 
 #[test]
-fn removed_legacy_model_rpcs_return_unknown_method() {
+fn removed_legacy_model_rpcs_are_unknown_to_admin_and_denied_to_member() {
     let _guard = test_env_guard();
     let db_path = setup_dashboard_test_db("codexmanager-member-prune-stale-remote-denied");
     set_web_access_password(Some("password123")).expect("set web password");
-    set_web_auth_mode("password").expect("enable password mode");
+    set_web_auth_mode("accounts").expect("enable accounts mode");
 
     for method in [
         "apikey/modelCatalogPruneStaleRemote",
@@ -345,17 +346,26 @@ fn removed_legacy_model_rpcs_return_unknown_method() {
         "quota/modelPriceRule/upsert",
         "aggregateApi/supplierModels/list",
     ] {
-        let resp = handle_request_with_actor(
+        let admin_resp = handle_request_with_actor(
             rpc_request(method, serde_json::json!({})),
-            RpcActor::from_parts(Some(ROLE_MEMBER), Some("member-user")),
+            RpcActor::system_admin(),
         );
-        match resp {
+        match admin_resp {
             JsonRpcMessage::Error(err) => {
                 assert_eq!(err.error.code, -32601, "{method}");
                 assert_eq!(err.error.message, "unknown_method", "{method}");
             }
             other => panic!("{method}: expected unknown_method, got {other:?}"),
         }
+        let member_resp = response_result(handle_request_with_actor(
+            rpc_request(method, serde_json::json!({})),
+            RpcActor::from_parts(Some(ROLE_MEMBER), Some("member-user")),
+        ));
+        assert!(
+            rpc_error(&member_resp).contains("permission_denied"),
+            "{method}: {:?}",
+            member_resp.result
+        );
     }
 
     let _ = std::fs::remove_file(db_path);
@@ -675,6 +685,25 @@ fn create_test_member(
     .expect("create member")
 }
 
+#[test]
+fn member_session_response_hides_global_billing_lock_details() {
+    let _guard = test_env_guard();
+    let db_path = setup_dashboard_test_db("codexmanager-member-session-redaction");
+    let user = create_test_member("member-session-redaction", Some(1_000_000));
+
+    let admin_lock = billing_mode_lock_status().expect("read administrator billing lock");
+    assert!(admin_lock.account_mode_locked);
+    assert!(!admin_lock.reasons.is_empty());
+
+    let session = app_session_result(&RpcActor::from_parts(Some(ROLE_MEMBER), Some(&user.id)))
+        .expect("read member session");
+    assert!(!session.billing_mode_lock.account_mode_locked);
+    assert!(!session.billing_mode_lock.distribution_locked);
+    assert!(session.billing_mode_lock.reasons.is_empty());
+
+    let _ = std::fs::remove_file(db_path);
+}
+
 fn create_owned_test_api_key(user_id: &str, name: &str, model: &str) -> String {
     let created = apikey_create::create_api_key(
         Some(name.to_string()),
@@ -839,8 +868,8 @@ fn member_api_key_updates_preserve_admin_routing_fields() {
         None,
         None,
         None,
-        None,
-        None,
+        Some("https://admin-upstream.example/v1".to_string()),
+        Some("{\"authorization\":\"Bearer admin-secret\"}".to_string()),
         Some(crate::apikey_profile::ROTATION_HYBRID.to_string()),
         None,
         Some("plus".to_string()),
@@ -891,12 +920,64 @@ fn member_api_key_updates_preserve_admin_routing_fields() {
     assert_eq!(stored.aggregate_api_id.as_deref(), Some("aggregate-admin"));
     assert_eq!(stored.account_plan_filter.as_deref(), Some("plus"));
     assert_eq!(
+        stored.upstream_base_url.as_deref(),
+        Some("https://admin-upstream.example/v1")
+    );
+    assert!(stored
+        .static_headers_json
+        .as_deref()
+        .is_some_and(|value| value.contains("admin-secret")));
+    assert_eq!(
         storage
             .find_api_key_account_group_filter(&created.id)
             .expect("read preserved group")
             .as_deref(),
         Some("team-a")
     );
+
+    let listed = response_result(handle_request_with_actor(
+        rpc_request("apikey/list", serde_json::json!({})),
+        RpcActor::from_parts(Some(ROLE_MEMBER), Some(&member.id)),
+    ));
+    let listed_key = listed.result["items"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["id"] == created.id))
+        .expect("member key is listed");
+    for field in [
+        "aggregateApiId",
+        "accountPlanFilter",
+        "accountGroupFilter",
+        "aggregateApiUrl",
+        "upstreamBaseUrl",
+        "staticHeadersJson",
+    ] {
+        assert!(
+            listed_key[field].is_null(),
+            "field {field} leaked: {listed_key}"
+        );
+    }
+
+    let snapshot = response_result(handle_request_with_actor(
+        rpc_request(
+            "startup/snapshot",
+            serde_json::json!({
+                "includeApiModels": false,
+                "includeApiKeys": true,
+                "includeAccounts": false,
+                "includeUsageSnapshots": false,
+                "includeAccountRuntime": false,
+                "includeAccountDetails": false
+            }),
+        ),
+        RpcActor::from_parts(Some(ROLE_MEMBER), Some(&member.id)),
+    ));
+    let snapshot_key = snapshot.result["apiKeys"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["id"] == created.id))
+        .expect("member key is present in startup snapshot");
+    assert!(snapshot_key["upstreamBaseUrl"].is_null());
+    assert!(snapshot_key["staticHeadersJson"].is_null());
+    assert!(snapshot_key["aggregateApiId"].is_null());
 
     let member_created = response_result(handle_request_with_actor(
         rpc_request(
@@ -922,7 +1003,7 @@ fn member_api_key_updates_preserve_admin_routing_fields() {
 }
 
 #[test]
-fn account_group_name_rpc_is_admin_only_without_blocking_member_profile_updates() {
+fn account_group_name_rpc_is_admin_only_and_member_account_update_is_denied() {
     let _guard = test_env_guard();
     let db_path = setup_dashboard_test_db("codexmanager-account-group-rpc-permission");
     let storage = storage_helpers::open_storage().expect("open storage");
@@ -973,7 +1054,7 @@ fn account_group_name_rpc_is_admin_only_without_blocking_member_profile_updates(
         member.clone(),
     ));
     assert!(
-        member_sort.result.get("error").is_none(),
+        rpc_error(&member_sort).contains("permission_denied"),
         "{:?}",
         member_sort.result
     );
@@ -984,15 +1065,16 @@ fn account_group_name_rpc_is_admin_only_without_blocking_member_profile_updates(
         ),
         member,
     ));
-    assert_eq!(
-        rpc_error(&member_group),
-        "permission_denied: account/update groupName"
+    assert!(
+        rpc_error(&member_group).contains("permission_denied"),
+        "{:?}",
+        member_group.result
     );
     let unchanged = storage
         .find_account_by_id("acc-group-rpc")
         .expect("read unchanged account")
         .expect("account exists");
-    assert_eq!(unchanged.sort, 7);
+    assert_eq!(unchanged.sort, 0);
     assert_eq!(unchanged.group_name.as_deref(), Some("team-a"));
 
     let admin_clear = response_result(handle_request_with_actor(
@@ -1093,6 +1175,86 @@ fn startup_snapshot_can_skip_api_model_catalog_for_light_dashboard_reads() {
             .map(Vec::len),
         Some(0)
     );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn member_initialize_hides_local_runtime_paths() {
+    let _guard = test_env_guard();
+    let db_path = setup_dashboard_test_db("codexmanager-member-initialize-redaction");
+    let response = response_result(handle_request_with_actor(
+        rpc_request("initialize", serde_json::json!({})),
+        RpcActor::from_parts(Some(ROLE_MEMBER), Some("member-initialize")),
+    ));
+
+    assert_eq!(response.result["codexHome"], "<restricted>");
+    assert_eq!(response.result["platformFamily"], "");
+    assert_eq!(response.result["platformOs"], "");
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn member_startup_snapshot_only_returns_authorized_sanitized_models() {
+    let _guard = test_env_guard();
+    let db_path = setup_dashboard_test_db("codexmanager-member-startup-model-filter");
+    let member = create_test_member("startup-model-filter-member", None);
+    let storage = storage_helpers::open_storage().expect("open storage");
+    let allowed = storage
+        .allowed_model_slugs_for_user_v2(&member.id, codexmanager_core::storage::now_ts())
+        .expect("read member model access")
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        !allowed.is_empty(),
+        "default member group should expose models"
+    );
+    drop(storage);
+
+    let response = response_result(handle_request_with_actor(
+        rpc_request("startup/snapshot", serde_json::json!({})),
+        RpcActor::from_parts(Some(ROLE_MEMBER), Some(&member.id)),
+    ));
+    assert!(
+        response.result.get("error").is_none(),
+        "{:?}",
+        response.result
+    );
+    let models = response.result["apiModels"]["models"]
+        .as_array()
+        .expect("member model list");
+    let returned = models
+        .iter()
+        .filter_map(|model| model.get("slug").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        returned.is_subset(&allowed),
+        "member snapshot returned unauthorized models: {:?}",
+        returned.difference(&allowed).collect::<Vec<_>>()
+    );
+    for model in models {
+        let object = model.as_object().expect("model object");
+        for sensitive in [
+            "base_instructions",
+            "model_messages",
+            "routes",
+            "route",
+            "permission_group_ids",
+            "permissionGroupIds",
+            "instructions",
+            "instructions_template",
+            "instructionsTemplate",
+            "instructions_variables",
+            "instructionsVariables",
+        ] {
+            assert!(
+                !object.contains_key(sensitive),
+                "leaked {sensitive}: {model}"
+            );
+        }
+    }
 
     let _ = std::fs::remove_file(db_path);
 }
@@ -2469,6 +2631,95 @@ fn member_cannot_read_or_mutate_other_user_api_key() {
 }
 
 #[test]
+fn member_cannot_bind_owned_api_key_to_unauthorized_model() {
+    let _guard = test_env_guard();
+    let db_path = setup_dashboard_test_db("codexmanager-member-apikey-model-deny");
+    let user = create_test_member("apikey-model-deny", Some(2_000_000));
+    let key_id = create_owned_test_api_key(&user.id, "member restricted key", "gpt-5.4-mini");
+    let storage = storage_helpers::open_storage().expect("open storage");
+    let default_group_id = storage
+        .default_model_group_id()
+        .expect("read default model group")
+        .expect("default model group");
+    drop(storage);
+    set_model_group_users(ModelGroupUsersSetParams {
+        group_id: default_group_id,
+        user_ids: Vec::new(),
+    })
+    .expect("remove member from default model group");
+
+    let response = response_result(handle_request_with_actor(
+        rpc_request(
+            "apikey/updateModel",
+            serde_json::json!({
+                "id": key_id,
+                "modelSlug": "gpt-5.4"
+            }),
+        ),
+        RpcActor::from_parts(Some(ROLE_MEMBER), Some(&user.id)),
+    ));
+    assert!(
+        rpc_error(&response).contains("model_not_allowed"),
+        "unexpected response: {:?}",
+        response.result
+    );
+
+    let storage = storage_helpers::open_storage().expect("reopen storage");
+    let key = storage
+        .find_api_key_by_id(&key_id)
+        .expect("read API key")
+        .expect("API key exists");
+    assert_eq!(key.model_slug.as_deref(), Some("gpt-5.4-mini"));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
+fn member_cannot_create_api_key_bound_to_unauthorized_model() {
+    let _guard = test_env_guard();
+    let db_path = setup_dashboard_test_db("codexmanager-member-apikey-create-model-deny");
+    let user = create_test_member("apikey-create-model-deny", Some(2_000_000));
+    let storage = storage_helpers::open_storage().expect("open storage");
+    let default_group_id = storage
+        .default_model_group_id()
+        .expect("read default model group")
+        .expect("default model group");
+    drop(storage);
+    set_model_group_users(ModelGroupUsersSetParams {
+        group_id: default_group_id,
+        user_ids: Vec::new(),
+    })
+    .expect("remove member from default model group");
+
+    let response = response_result(handle_request_with_actor(
+        rpc_request(
+            "apikey/create",
+            serde_json::json!({
+                "name": "unauthorized model key",
+                "modelSlug": "gpt-5.4"
+            }),
+        ),
+        RpcActor::from_parts(Some(ROLE_MEMBER), Some(&user.id)),
+    ));
+
+    assert!(
+        rpc_error(&response).contains("model_not_allowed"),
+        "unexpected response: {:?}",
+        response.result
+    );
+    let storage = storage_helpers::open_storage().expect("reopen storage");
+    assert!(
+        storage
+            .list_api_key_ids_for_user(&user.id)
+            .expect("list member API keys")
+            .is_empty(),
+        "denied create must not persist an API key"
+    );
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[test]
 fn member_api_key_usage_stats_filter_to_owned_keys() {
     let _guard = test_env_guard();
     let db_path = setup_dashboard_test_db("codexmanager-member-apikey-usage-filter");
@@ -2530,13 +2781,20 @@ fn member_created_api_key_ignores_admin_only_routing_fields() {
     let db_path = setup_dashboard_test_db("codexmanager-member-apikey-create-sanitizes");
     let user = create_test_member("apikey-create-sanitize", Some(2_000_000));
     let actor = RpcActor::from_parts(Some(ROLE_MEMBER), Some(&user.id));
+    let allowed_model = storage_helpers::open_storage()
+        .expect("open storage")
+        .allowed_model_slugs_for_user_v2(&user.id, codexmanager_core::storage::now_ts())
+        .expect("read member model access")
+        .into_iter()
+        .next()
+        .expect("default member group should expose a model");
 
     let created = response_result(handle_request_with_actor(
         rpc_request(
             "apikey/create",
             serde_json::json!({
                 "name": "member safe key",
-                "modelSlug": "gpt-5-mini",
+                "modelSlug": allowed_model,
                 "rotationStrategy": "aggregate_api_rotation",
                 "aggregateApiId": "agg-secret",
                 "upstreamBaseUrl": "https://example.invalid/v1",

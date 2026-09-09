@@ -99,6 +99,16 @@ pub(super) fn parse_app_settings_patch(params: Option<&Value>) -> Result<AppSett
 /// # 返回
 /// 返回函数执行结果
 pub(super) fn apply_app_settings_patch(patch: AppSettingsPatch) -> Result<(), String> {
+    // Legacy shared-password mode is only a migration boundary. Reject it
+    // before applying other fields in the same patch so a failed mode change
+    // cannot still persist a new legacy password.
+    if patch
+        .web_auth_mode
+        .as_deref()
+        .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("password"))
+    {
+        return Err("独立访问密码模式已废弃，请使用账户登录模式".to_string());
+    }
     if let Some(enabled) = patch.update_auto_check {
         set_update_auto_check_enabled(enabled)?;
     }

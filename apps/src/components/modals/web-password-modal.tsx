@@ -13,7 +13,6 @@ import {
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -28,7 +27,7 @@ import { useRuntimeCapabilities } from "@/hooks/useRuntimeCapabilities";
 import { useAppStore } from "@/lib/store/useAppStore";
 import { appClient } from "@/lib/api/app-client";
 import { toast } from "sonner";
-import { ShieldAlert, ShieldCheck, KeyRound, Trash2, UsersRound, WalletCards } from "lucide-react";
+import { ShieldAlert, ShieldCheck, Trash2, UsersRound, WalletCards } from "lucide-react";
 import { useI18n } from "@/lib/i18n/provider";
 
 interface WebPasswordModalProps {
@@ -73,9 +72,9 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
   const appSettings = useAppStore((state) => state.appSettings);
   const setAppSettings = useAppStore((state) => state.setAppSettings);
   const { canAccessManagementRpc, isDesktopRuntime } = useRuntimeCapabilities();
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [webAuthMode, setWebAuthMode] = useState(appSettings.webAuthMode || "none");
+  const [webAuthMode, setWebAuthMode] = useState(
+    appSettings.webAuthMode === "password" ? "accounts" : appSettings.webAuthMode || "none",
+  );
   const [distributionEnabled, setDistributionEnabled] = useState(
     Boolean(appSettings.distributionEnabled)
   );
@@ -101,7 +100,7 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
     if (isDesktopRuntime || typeof window === "undefined") {
       return;
     }
-    if (nextMode === "accounts" || nextMode === "password") {
+    if (nextMode === "accounts") {
       window.location.replace("/__login?force=1");
       return;
     }
@@ -109,14 +108,14 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
   };
 
   useEffect(() => {
-    setWebAuthMode(appSettings.webAuthMode || "none");
+    setWebAuthMode(
+      appSettings.webAuthMode === "password" ? "accounts" : appSettings.webAuthMode || "none",
+    );
     setDistributionEnabled(Boolean(appSettings.distributionEnabled));
   }, [appSettings.distributionEnabled, appSettings.webAuthMode]);
 
   useEffect(() => {
     if (!open) {
-      setPassword("");
-      setConfirmPassword("");
       return;
     }
 
@@ -177,18 +176,6 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
       toast.info(t("访问密码"));
       return;
     }
-    if (password && password !== confirmPassword) {
-      toast.error(t("确认新密码"));
-      return;
-    }
-    if (
-      webAuthMode === "password" &&
-      !appSettings.webAccessPasswordConfigured &&
-      !password
-    ) {
-      toast.error(t("新密码"));
-      return;
-    }
     if (accountModeLocked && appSettings.webAuthMode === "accounts" && webAuthMode !== "accounts") {
       toast.error(t("已进入账号计费模式，不能从界面关闭账号系统。"));
       return;
@@ -208,13 +195,10 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
       const settings = await appClient.setSettings({
         webAuthMode,
         distributionEnabled,
-        ...(password ? { webAccessPassword: password } : {}),
       });
       setAppSettings(settings);
       toast.success(t("保存"));
       onOpenChange(false);
-      setPassword("");
-      setConfirmPassword("");
       if (previousMode !== settings.webAuthMode) {
         redirectToCurrentWebAuthBoundary(settings.webAuthMode || "none");
       }
@@ -247,13 +231,11 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
     try {
       const settings = await appClient.setSettings({
         webAccessPassword: "",
-        webAuthMode: webAuthMode === "password" ? "none" : webAuthMode,
+        webAuthMode: "none",
       });
       setAppSettings(settings);
       toast.success(t("清除"));
       onOpenChange(false);
-      setPassword("");
-      setConfirmPassword("");
     } catch (err: unknown) {
       toast.error(`${t("清除")} ${t("失败")}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -272,7 +254,7 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
             <div className="space-y-1">
               <DialogTitle>{t("访问控制")}</DialogTitle>
               <DialogDescription>
-                {t("统一管理 Web 登录方式、访问密码和团队额度分发。")}
+                {t("统一管理 Web 账号登录和团队额度分发。旧访问密码仅用于一次性迁移。")}
               </DialogDescription>
             </div>
           </div>
@@ -283,7 +265,7 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
             <Alert>
               <ShieldAlert />
               <AlertDescription>
-                {t("当前运行环境暂不支持读取或保存访问密码。")}
+                {t("当前运行环境暂不支持读取或保存访问控制设置。")}
               </AlertDescription>
             </Alert>
           ) : null}
@@ -299,13 +281,13 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
           ) : appSettings.webAccessPasswordConfigured ? (
             <Alert>
               <ShieldCheck />
-              <AlertDescription>{t("当前已启用访问密码保护")}</AlertDescription>
+              <AlertDescription>{t("旧访问密码仅用于一次性迁移")}</AlertDescription>
             </Alert>
           ) : (
             <Alert>
               <ShieldAlert />
               <AlertDescription>
-                {t("当前未设置访问密码，Web 管理页处于公开状态")}
+                {t("当前未启用账号登录，Web 管理页处于公开状态")}
               </AlertDescription>
             </Alert>
           )}
@@ -329,7 +311,6 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
                   {(value) => {
                     const mode = String(value || "none");
                     if (mode === "accounts") return t("账号系统");
-                    if (mode === "password") return t("访问密码");
                     return t("不启用");
                   }}
                 </SelectValue>
@@ -339,9 +320,6 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
                 <SelectItem value="none" disabled={accountModeLocked}>
                   {t("不启用")}
                 </SelectItem>
-                <SelectItem value="password" disabled={accountModeLocked}>
-                  {t("访问密码")}
-                </SelectItem>
                 <SelectItem value="accounts">{t("账号系统")}</SelectItem>
                 </SelectGroup>
               </SelectContent>
@@ -349,9 +327,7 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
             <p className="text-xs text-muted-foreground">
               {webAuthMode === "accounts"
                   ? t("适合多人使用：管理员维护成员账号，成员按归属钱包消费额度。")
-                : webAuthMode === "password"
-                  ? t("适合个人或小团队：所有访问者共用同一个访问密码。")
-                  : t("公开访问不会拦截 Web 管理页，请只在本机可信环境使用。")}
+                : t("公开访问不会拦截 Web 管理页，请只在本机可信环境使用。")}
               {accountModeLocked
                 ? ` ${t("已进入账号计费模式，不能从界面关闭账号系统。")}`
                 : ""}
@@ -393,45 +369,6 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
             </Alert>
           ) : null}
 
-          {webAuthMode === "password" ? (
-            <Card size="sm">
-              <CardContent className="grid gap-3">
-                <div className="flex items-center gap-2 text-sm font-medium">
-                  <KeyRound className="h-4 w-4 text-muted-foreground" />
-                  {t("访问密码")}
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="grid gap-2">
-                    <Label htmlFor="password">{t("新密码")}</Label>
-                    <Input
-                      id="password"
-                      type="password"
-                      placeholder={t("新密码")}
-                      value={password}
-                      disabled={!canAccessManagementRpc}
-                      onChange={(e) => setPassword(e.target.value)}
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="confirm">{t("确认新密码")}</Label>
-                    <Input
-                      id="confirm"
-                      type="password"
-                      placeholder={t("确认新密码")}
-                      value={confirmPassword}
-                      disabled={!canAccessManagementRpc}
-                      onChange={(e) => setConfirmPassword(e.target.value)}
-                    />
-                  </div>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {appSettings.webAccessPasswordConfigured
-                    ? t("留空保存时会保留当前访问密码。")
-                    : t("首次启用访问密码模式必须填写密码。")}
-                </p>
-              </CardContent>
-            </Card>
-          ) : null}
         </div>
 
         <DialogFooter className="m-0 rounded-b-xl border-t bg-muted/40 px-5 py-4">

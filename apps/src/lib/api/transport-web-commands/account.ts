@@ -36,8 +36,18 @@ export function createAccountWebCommands(postWebRpc: WebRpcCaller): Record<strin
     service_account_proxy_diagnostics_history: { rpcMethod: "account/proxy/diagnostics-history" },
     service_account_manager_status: { rpcMethod: "accountManager/status" },
     service_account_manager_session_current: { rpcMethod: "accountManager/session/current" },
+    service_account_manager_session_list: { rpcMethod: "accountManager/session/list" },
+    service_account_manager_session_revoke: { rpcMethod: "accountManager/session/revoke" },
     service_account_manager_profile_update: { rpcMethod: "accountManager/profile/update" },
     service_account_manager_password_change: { rpcMethod: "accountManager/password/change" },
+    service_account_manager_totp_status: { rpcMethod: "accountManager/totp/status" },
+    service_account_manager_totp_setup_begin: {
+      rpcMethod: "accountManager/totp/setup/begin",
+    },
+    service_account_manager_totp_setup_confirm: {
+      rpcMethod: "accountManager/totp/setup/confirm",
+    },
+    service_account_manager_totp_disable: { rpcMethod: "accountManager/totp/disable" },
     service_account_manager_users_list: { rpcMethod: "accountManager/users/list" },
     service_account_manager_user_create: {
       rpcMethod: "accountManager/users/create",
@@ -48,6 +58,9 @@ export function createAccountWebCommands(postWebRpc: WebRpcCaller): Record<strin
       mapParams: (params) => asRecord(asRecord(params)?.payload) ?? {},
     },
     service_account_manager_user_delete: { rpcMethod: "accountManager/users/delete" },
+    service_account_manager_user_totp_reset: {
+      rpcMethod: "accountManager/users/totp/reset",
+    },
     service_account_manager_wallet_top_up: {
       rpcMethod: "accountManager/wallet/topUp",
       mapParams: (params) => {

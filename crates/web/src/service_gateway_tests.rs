@@ -1,8 +1,9 @@
 use super::{
-    account_test_events_role_allowed, account_test_events_target_url,
+    account_test_events_target_url, administrative_observability_role_allowed,
     format_upstream_error_message, gateway_proxy_max_body_bytes, gateway_proxy_target_url,
-    service_probe_client, should_skip_gateway_request_header, should_skip_gateway_response_header,
-    tcp_probe, ENV_GATEWAY_PROXY_MAX_BODY_BYTES,
+    quit_role_allowed, rpc_proxy_requires_authenticated_session, service_probe_client,
+    should_skip_gateway_request_header, should_skip_gateway_response_header, tcp_probe,
+    ENV_GATEWAY_PROXY_MAX_BODY_BYTES,
 };
 use axum::http::{header, HeaderValue, Uri};
 use axum::{body::Bytes, extract::State, http::HeaderMap};
@@ -125,7 +126,6 @@ async fn rpc_proxy_rejects_body_over_the_bounded_upload_limit() {
         service_rpc_url: "http://127.0.0.1:1/rpc".to_string(),
         service_addr: "127.0.0.1:1".to_string(),
         rpc_token: "test-token".to_string(),
-        web_auth_session_key: "test-session".to_string(),
         shutdown_tx,
         spawned_service: std::sync::Arc::new(tokio::sync::Mutex::new(false)),
         missing_ui_html: std::sync::Arc::new(String::new()),
@@ -183,7 +183,6 @@ async fn account_test_events_proxies_sse_stream_from_service() {
         service_rpc_url: "http://127.0.0.1:1/rpc".to_string(),
         service_addr: upstream,
         rpc_token: "test-token".to_string(),
-        web_auth_session_key: "test-session".to_string(),
         shutdown_tx,
         spawned_service: std::sync::Arc::new(tokio::sync::Mutex::new(false)),
         missing_ui_html: std::sync::Arc::new(String::new()),
@@ -214,19 +213,37 @@ async fn account_test_events_proxies_sse_stream_from_service() {
 }
 
 #[test]
-fn account_test_events_require_admin_in_accounts_mode() {
-    assert!(account_test_events_role_allowed("none", None));
-    assert!(account_test_events_role_allowed("password", None));
-    assert!(account_test_events_role_allowed("accounts", Some("admin")));
-    assert!(account_test_events_role_allowed(
-        "accounts",
+fn administrative_observability_requires_admin_when_web_auth_is_active() {
+    assert!(administrative_observability_role_allowed(false, None));
+    assert!(administrative_observability_role_allowed(
+        true,
+        Some("admin")
+    ));
+    assert!(administrative_observability_role_allowed(
+        true,
         Some("system_admin")
     ));
-    assert!(!account_test_events_role_allowed(
-        "accounts",
+    assert!(!administrative_observability_role_allowed(
+        true,
         Some("member")
     ));
-    assert!(!account_test_events_role_allowed("accounts", None));
+    assert!(!administrative_observability_role_allowed(true, None));
+}
+
+#[test]
+fn rpc_proxy_fails_closed_when_account_session_disappears() {
+    assert!(rpc_proxy_requires_authenticated_session(true, false));
+    assert!(!rpc_proxy_requires_authenticated_session(true, true));
+    assert!(!rpc_proxy_requires_authenticated_session(false, false));
+}
+
+#[test]
+fn quit_requires_an_administrator_when_web_auth_is_active() {
+    assert!(quit_role_allowed(false, None));
+    assert!(quit_role_allowed(true, Some("admin")));
+    assert!(quit_role_allowed(true, Some("system_admin")));
+    assert!(!quit_role_allowed(true, Some("member")));
+    assert!(!quit_role_allowed(true, None));
 }
 
 #[test]

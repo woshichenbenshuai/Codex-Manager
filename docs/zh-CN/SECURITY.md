@@ -60,6 +60,11 @@ CodexManager 当前仍在快速迭代，但会尽量处理合理范围内的安�
 - 不要在 README、Issue、PR、文档里贴可直接使用的敏感值。
 - 新增日志时，优先记录结构化上下文，不直接输出明文敏感数据。
 - 新增设置项时，区分“适合持久化的配置”和“只能在环境变量中提供的敏感值”。
+- Web 账号登录使用账户名、密码和管理员强制的 TOTP 验证器；验证器密钥只保存为加密密文。
+- 公网监听不得使用 `none` 鉴权；Docker 首次启动必须设置一次性 `CODEXMANAGER_WEB_BOOTSTRAP_PASSWORD`。
+- `CODEXMANAGER_WEB_TOTP_ENCRYPTION_KEY` 必须在服务重启和 service/web 分离部署时保持一致，不得提交到仓库。
+- 非 loopback Web 必须配置最终的 HTTPS 公共地址；认证 Cookie 固定使用 `Secure`，登录、退出和 Web RPC 的写请求执行同源校验。
+- 反向代理转发的客户端 IP 只在代理来源命中 `CODEXMANAGER_WEB_TRUSTED_PROXY_CIDRS` 时采信。
 
 ## 当前已知边界
 

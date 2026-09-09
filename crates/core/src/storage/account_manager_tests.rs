@@ -1,5 +1,5 @@
 use super::super::Storage;
-use super::super::{ApiKey, ApiKeyOwner, BillingRule};
+use super::super::{ApiKey, ApiKeyOwner, AppLoginChallenge, AppUser, AppUserSession, BillingRule};
 use super::{
     active_admin_count_sql, active_app_session_by_token_hash_sql,
     active_app_session_user_with_wallet_sql, active_billing_rules_sql, api_key_owner_chunk_sql,
@@ -18,6 +18,38 @@ use super::{
     user_wallets_for_users_chunk_sql,
 };
 use rusqlite::{params_from_iter, types::Value};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+struct TestDbPath(PathBuf);
+
+impl TestDbPath {
+    fn new(label: &str) -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        Self(std::env::temp_dir().join(format!(
+            "codexmanager-core-{label}-{}-{nonce}.db",
+            std::process::id()
+        )))
+    }
+
+    fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDbPath {
+    fn drop(&mut self) {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut candidate = self.0.as_os_str().to_os_string();
+            candidate.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(candidate));
+        }
+    }
+}
 
 fn seed_api_key(storage: &Storage, key_id: &str) {
     storage
@@ -1303,6 +1335,16 @@ fn active_app_session_user_by_token_hash_joins_public_user_and_wallet() {
     assert_eq!(active.user.wallet_balance_credit_micros, Some(2000));
     assert_eq!(active.user.wallet_frozen_credit_micros, Some(125));
 
+    let active_by_id = storage
+        .find_active_app_session_user_by_id("session-active", 50)
+        .expect("find active session by id")
+        .expect("active session id exists");
+    assert_eq!(active_by_id.user.id, "user-active");
+    assert_eq!(
+        active_by_id.user.wallet_id.as_deref(),
+        Some("wallet-active")
+    );
+
     let admin = storage
         .find_active_app_session_user_by_token_hash("hash-admin", 50)
         .expect("find admin session")
@@ -1319,6 +1361,18 @@ fn active_app_session_user_by_token_hash_joins_public_user_and_wallet() {
         assert!(storage
             .find_active_app_session_user_by_token_hash(token_hash, 50)
             .expect("find inactive session")
+            .is_none());
+    }
+
+    for session_id in [
+        "session-disabled",
+        "session-expired",
+        "session-revoked",
+        "session-missing",
+    ] {
+        assert!(storage
+            .find_active_app_session_user_by_id(session_id, 50)
+            .expect("find inactive session by id")
             .is_none());
     }
 
@@ -1452,4 +1506,491 @@ fn wallet_owner_lookup_uses_unique_owner_index() {
         plan.contains("sqlite_autoindex_app_wallets_2"),
         "expected wallet owner lookup to use unique owner index, got {plan}"
     );
+}
+
+fn test_challenge(token_hash: &str, created_at: i64) -> AppLoginChallenge {
+    AppLoginChallenge {
+        id: format!("challenge-{created_at}"),
+        user_id: "user-auth".to_string(),
+        token_hash: token_hash.to_string(),
+        purpose: "login".to_string(),
+        expires_at: created_at + 300,
+        attempts: 0,
+        last_attempt_at: None,
+        used_at: None,
+        created_at,
+        setup_secret_ciphertext: None,
+        initiated_by_user_id: Some("user-auth".to_string()),
+        target_user_id: "user-auth".to_string(),
+        locked_until: None,
+    }
+}
+
+#[test]
+fn replacing_challenge_invalidates_old_token_and_reservation_is_bounded() {
+    let mut storage = Storage::open_in_memory().expect("open storage");
+    storage.init().expect("init storage");
+    seed_app_user(&storage, "user-auth");
+
+    storage
+        .replace_app_login_challenge(&test_challenge("old-token-hash", 100))
+        .expect("create old challenge");
+    storage
+        .replace_app_login_challenge(&test_challenge("new-token-hash", 101))
+        .expect("replace challenge");
+
+    assert!(storage
+        .reserve_app_login_challenge_attempt("old-token-hash", "login", 102)
+        .expect("read old challenge")
+        .is_none());
+    for expected in 1..=5 {
+        let challenge = storage
+            .reserve_app_login_challenge_attempt("new-token-hash", "login", 102 + expected * 3)
+            .expect("reserve attempt")
+            .expect("challenge remains available");
+        assert_eq!(challenge.attempts, expected);
+    }
+    assert!(storage
+        .reserve_app_login_challenge_attempt("new-token-hash", "login", 120)
+        .expect("read exhausted challenge")
+        .is_none());
+}
+
+#[test]
+fn totp_login_completion_consumes_challenge_step_and_session_atomically() {
+    let mut storage = Storage::open_in_memory().expect("open storage");
+    storage.init().expect("init storage");
+    seed_app_user(&storage, "user-auth");
+    storage
+        .update_app_user_totp("user-auth", Some("ciphertext"), true, Some(1), None)
+        .expect("enable TOTP");
+    let challenge = test_challenge("token-hash", 100);
+    storage
+        .replace_app_login_challenge(&challenge)
+        .expect("create challenge");
+    let session = AppUserSession {
+        id: "session-one".to_string(),
+        user_id: "user-auth".to_string(),
+        token_hash: "session-token-hash".to_string(),
+        expires_at: 1_000,
+        created_at: 103,
+        last_seen_at: Some(103),
+        revoked_at: None,
+    };
+    assert!(storage
+        .complete_app_totp_login(&challenge.id, "user-auth", 7, &session, 103)
+        .expect("complete login"));
+    assert!(!storage
+        .complete_app_totp_login(&challenge.id, "user-auth", 7, &session, 104)
+        .expect("reject replay"));
+    assert!(storage
+        .find_active_app_session_by_token_hash("session-token-hash", 104)
+        .expect("read session")
+        .is_some());
+}
+
+#[test]
+fn concurrent_first_admin_claim_creates_exactly_one_administrator() {
+    let db_path = TestDbPath::new("first-admin-race");
+    let storage = Storage::open(db_path.as_path()).expect("open storage");
+    storage.init().expect("init storage");
+    drop(storage);
+
+    let worker_count = 8;
+    let barrier = Arc::new(Barrier::new(worker_count));
+    let mut workers = Vec::new();
+    for index in 0..worker_count {
+        let path = db_path.as_path().to_path_buf();
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            let mut storage = Storage::open(path).expect("open concurrent storage");
+            let user_id = format!("admin-{index}");
+            let user = AppUser {
+                id: user_id.clone(),
+                username: format!("admin-{index}"),
+                display_name: None,
+                password_hash: "hash".to_string(),
+                role: "admin".to_string(),
+                status: "active".to_string(),
+                created_at: 100 + index as i64,
+                updated_at: 100 + index as i64,
+                last_login_at: None,
+            };
+            let challenge = AppLoginChallenge {
+                id: format!("challenge-{index}"),
+                user_id: user_id.clone(),
+                token_hash: format!("token-{index}"),
+                purpose: "bootstrap_totp_setup".to_string(),
+                expires_at: 1_000,
+                attempts: 0,
+                last_attempt_at: None,
+                used_at: None,
+                created_at: 100 + index as i64,
+                setup_secret_ciphertext: Some(format!("ciphertext-{index}")),
+                initiated_by_user_id: None,
+                target_user_id: user_id,
+                locked_until: None,
+            };
+            barrier.wait();
+            storage
+                .claim_first_app_admin_with_challenge(&user, &challenge)
+                .expect("claim first administrator")
+        }));
+    }
+
+    let successful = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("join first-admin worker"))
+        .filter(|success| *success)
+        .count();
+    assert_eq!(successful, 1);
+
+    let storage = Storage::open(db_path.as_path()).expect("reopen storage");
+    assert_eq!(
+        storage.active_admin_count().expect("count administrators"),
+        1
+    );
+}
+
+#[test]
+fn concurrent_admin_deletes_preserve_one_active_administrator() {
+    let db_path = TestDbPath::new("last-admin-delete-race");
+    let storage = Storage::open(db_path.as_path()).expect("open storage");
+    storage.init().expect("init storage");
+    for index in 0..2 {
+        storage
+            .insert_app_user(&AppUser {
+                id: format!("admin-{index}"),
+                username: format!("admin-{index}"),
+                display_name: None,
+                password_hash: "hash".to_string(),
+                role: "admin".to_string(),
+                status: "active".to_string(),
+                created_at: 100 + index,
+                updated_at: 100 + index,
+                last_login_at: None,
+            })
+            .expect("seed administrator");
+    }
+    drop(storage);
+
+    let barrier = Arc::new(Barrier::new(2));
+    let mut workers = Vec::new();
+    for index in 0..2 {
+        let path = db_path.as_path().to_path_buf();
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            let storage = Storage::open(path).expect("open concurrent storage");
+            barrier.wait();
+            storage
+                .delete_app_user(&format!("admin-{index}"))
+                .expect("delete administrator")
+        }));
+    }
+
+    let deleted = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("join delete worker"))
+        .sum::<usize>();
+    assert_eq!(deleted, 1);
+
+    let storage = Storage::open(db_path.as_path()).expect("reopen storage");
+    assert_eq!(
+        storage.active_admin_count().expect("count administrators"),
+        1
+    );
+}
+
+#[test]
+fn concurrent_challenge_reservations_never_exceed_attempt_limit() {
+    let db_path = TestDbPath::new("challenge-attempt-race");
+    let mut storage = Storage::open(db_path.as_path()).expect("open storage");
+    storage.init().expect("init storage");
+    seed_app_user(&storage, "user-auth");
+    storage
+        .replace_app_login_challenge(&test_challenge("concurrent-token", 100))
+        .expect("create challenge");
+    drop(storage);
+
+    let worker_count = 12;
+    let barrier = Arc::new(Barrier::new(worker_count));
+    let mut workers = Vec::new();
+    for _ in 0..worker_count {
+        let path = db_path.as_path().to_path_buf();
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            let mut storage = Storage::open(path).expect("open concurrent storage");
+            barrier.wait();
+            storage
+                .reserve_app_login_challenge_attempt("concurrent-token", "login", 102)
+                .expect("reserve challenge attempt")
+                .is_some()
+        }));
+    }
+
+    let successful = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("join reservation worker"))
+        .filter(|success| *success)
+        .count();
+    assert!(successful <= 5, "reserved {successful} attempts");
+
+    let storage = Storage::open(db_path.as_path()).expect("reopen storage");
+    let attempts: i64 = storage
+        .conn
+        .query_row(
+            "SELECT attempts FROM app_login_challenges WHERE token_hash = ?1",
+            ["concurrent-token"],
+            |row| row.get(0),
+        )
+        .expect("read reserved attempts");
+    assert_eq!(attempts as usize, successful);
+    assert!(attempts <= 5);
+}
+
+#[test]
+fn concurrent_auth_attempt_reservations_are_strictly_bounded() {
+    let db_path = TestDbPath::new("auth-throttle-race");
+    let storage = Storage::open(db_path.as_path()).expect("open storage");
+    storage.init().expect("init storage");
+    drop(storage);
+
+    let worker_count = 20;
+    let barrier = Arc::new(Barrier::new(worker_count));
+    let mut workers = Vec::new();
+    for _ in 0..worker_count {
+        let path = db_path.as_path().to_path_buf();
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            let mut storage = Storage::open(path).expect("open concurrent storage");
+            barrier.wait();
+            storage
+                .reserve_auth_attempt("login_username", "subject-hash", 100, 300, 5, 30, 900)
+                .expect("reserve authentication attempt")
+        }));
+    }
+
+    let successful = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("join reservation worker"))
+        .filter(|success| *success)
+        .count();
+    assert_eq!(successful, 5);
+
+    let mut storage = Storage::open(db_path.as_path()).expect("reopen storage");
+    let state = storage
+        .auth_throttle_state("login_username", "subject-hash")
+        .expect("read authentication throttle")
+        .expect("authentication throttle exists");
+    assert_eq!(state.attempts, 5);
+    assert_eq!(state.locked_until, Some(130));
+
+    assert!(storage
+        .reserve_auth_attempt("login_username", "subject-hash", 130, 300, 5, 30, 900)
+        .expect("reserve after first cooldown"));
+    let state = storage
+        .auth_throttle_state("login_username", "subject-hash")
+        .expect("read extended authentication throttle")
+        .expect("authentication throttle exists");
+    assert_eq!(state.attempts, 6);
+    assert_eq!(state.locked_until, Some(190));
+    assert!(!storage
+        .reserve_auth_attempt("login_username", "subject-hash", 131, 300, 5, 30, 900)
+        .expect("reject during extended cooldown"));
+
+    storage
+        .clear_auth_throttle("login_username", "subject-hash")
+        .expect("clear authentication throttle");
+    assert!(storage
+        .reserve_auth_attempt("login_username", "subject-hash", 132, 300, 5, 30, 900)
+        .expect("reserve after throttle reset"));
+    let state = storage
+        .auth_throttle_state("login_username", "subject-hash")
+        .expect("read reset authentication throttle")
+        .expect("authentication throttle exists");
+    assert_eq!(state.attempts, 1);
+    assert_eq!(state.locked_until, None);
+}
+
+#[test]
+fn concurrent_totp_completion_creates_only_one_session() {
+    let db_path = TestDbPath::new("totp-session-race");
+    let mut storage = Storage::open(db_path.as_path()).expect("open storage");
+    storage.init().expect("init storage");
+    seed_app_user(&storage, "user-auth");
+    storage
+        .update_app_user_totp("user-auth", Some("ciphertext"), true, Some(1), None)
+        .expect("enable TOTP");
+    let challenge = test_challenge("shared-token", 100);
+    storage
+        .replace_app_login_challenge(&challenge)
+        .expect("create challenge");
+    drop(storage);
+
+    let worker_count = 8;
+    let barrier = Arc::new(Barrier::new(worker_count));
+    let mut workers = Vec::new();
+    for index in 0..worker_count {
+        let path = db_path.as_path().to_path_buf();
+        let barrier = Arc::clone(&barrier);
+        let challenge_id = challenge.id.clone();
+        workers.push(std::thread::spawn(move || {
+            let mut storage = Storage::open(path).expect("open concurrent storage");
+            let session = AppUserSession {
+                id: format!("session-{index}"),
+                user_id: "user-auth".to_string(),
+                token_hash: format!("session-token-{index}"),
+                expires_at: 1_000,
+                created_at: 103,
+                last_seen_at: Some(103),
+                revoked_at: None,
+            };
+            barrier.wait();
+            storage
+                .complete_app_totp_login(&challenge_id, "user-auth", 7, &session, 103)
+                .expect("complete concurrent login")
+        }));
+    }
+
+    let successful = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("join login worker"))
+        .filter(|success| *success)
+        .count();
+    assert_eq!(successful, 1);
+
+    let storage = Storage::open(db_path.as_path()).expect("reopen storage");
+    let session_count: i64 = storage
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_user_sessions WHERE user_id = ?1",
+            ["user-auth"],
+            |row| row.get(0),
+        )
+        .expect("count sessions");
+    assert_eq!(session_count, 1);
+}
+
+fn test_session(id: &str, token_hash: &str) -> AppUserSession {
+    AppUserSession {
+        id: id.to_string(),
+        user_id: "user-auth".to_string(),
+        token_hash: token_hash.to_string(),
+        expires_at: 1_000,
+        created_at: 100,
+        last_seen_at: Some(100),
+        revoked_at: None,
+    }
+}
+
+#[test]
+fn password_change_keeps_only_current_session_and_clears_challenges() {
+    let mut storage = Storage::open_in_memory().expect("open storage");
+    storage.init().expect("init storage");
+    seed_app_user(&storage, "user-auth");
+    storage
+        .insert_app_user_session(&test_session("session-current", "token-current"))
+        .expect("insert current session");
+    storage
+        .insert_app_user_session(&test_session("session-other", "token-other"))
+        .expect("insert other session");
+    storage
+        .replace_app_login_challenge(&test_challenge("password-challenge", 100))
+        .expect("create challenge");
+
+    assert!(storage
+        .update_password_and_revoke_other_sessions(
+            "user-auth",
+            "new-password-hash",
+            Some("session-current"),
+            200,
+        )
+        .expect("change password"));
+    assert!(storage
+        .find_active_app_session_by_token_hash("token-current", 201)
+        .expect("read current session")
+        .is_some());
+    assert!(storage
+        .find_active_app_session_by_token_hash("token-other", 201)
+        .expect("read other session")
+        .is_none());
+    assert!(storage
+        .find_active_app_login_challenge("password-challenge", 201)
+        .expect("read cleared challenge")
+        .is_none());
+    assert_eq!(
+        storage
+            .find_app_user_by_id("user-auth")
+            .expect("read user")
+            .expect("user exists")
+            .password_hash,
+        "new-password-hash"
+    );
+}
+
+#[test]
+fn role_change_requires_totp_and_revokes_all_security_state() {
+    let mut storage = Storage::open_in_memory().expect("open storage");
+    storage.init().expect("init storage");
+    seed_app_user(&storage, "user-auth");
+    storage
+        .insert_app_user_session(&test_session("session-role", "token-role"))
+        .expect("insert session");
+    storage
+        .replace_app_login_challenge(&test_challenge("role-challenge", 100))
+        .expect("create challenge");
+
+    assert!(!storage
+        .update_role_status_and_revoke_user("user-auth", "admin", "active", 200)
+        .expect("reject promotion without TOTP"));
+    storage
+        .update_app_user_totp("user-auth", Some("ciphertext"), true, Some(200), None)
+        .expect("enable TOTP");
+    assert!(storage
+        .update_role_status_and_revoke_user("user-auth", "admin", "active", 201)
+        .expect("promote user"));
+    assert!(storage
+        .find_active_app_session_by_token_hash("token-role", 202)
+        .expect("read revoked session")
+        .is_none());
+    assert!(storage
+        .find_active_app_login_challenge("role-challenge", 202)
+        .expect("read cleared challenge")
+        .is_none());
+}
+
+#[test]
+fn disabling_totp_revokes_sessions_challenges_and_secret() {
+    let mut storage = Storage::open_in_memory().expect("open storage");
+    storage.init().expect("init storage");
+    seed_app_user(&storage, "user-auth");
+    storage
+        .update_app_user_totp("user-auth", Some("ciphertext"), true, Some(100), Some(3))
+        .expect("enable TOTP");
+    storage
+        .insert_app_user_session(&test_session("session-totp", "token-totp"))
+        .expect("insert session");
+    storage
+        .replace_app_login_challenge(&test_challenge("totp-challenge", 100))
+        .expect("create challenge");
+
+    assert!(storage
+        .disable_totp_and_revoke_user("user-auth", 200)
+        .expect("disable TOTP"));
+    let state = storage
+        .find_app_user_totp_state("user-auth")
+        .expect("read TOTP state")
+        .expect("TOTP state exists");
+    assert!(!state.enabled);
+    assert!(state.secret_ciphertext.is_none());
+    assert!(state.confirmed_at.is_none());
+    assert!(state.last_used_step.is_none());
+    assert!(storage
+        .find_active_app_session_by_token_hash("token-totp", 201)
+        .expect("read revoked session")
+        .is_none());
+    assert!(storage
+        .find_active_app_login_challenge("totp-challenge", 201)
+        .expect("read cleared challenge")
+        .is_none());
 }

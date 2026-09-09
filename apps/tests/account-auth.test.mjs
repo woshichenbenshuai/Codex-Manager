@@ -80,7 +80,7 @@ test("readCurrentAccessTokenAccountReadResult 解析当前账号与认证要求"
   assert.equal(result.requiresOpenaiAuth, true);
 });
 
-test("readChatgptAuthTokensRefreshResult 对齐刷新返回字段", () => {
+test("readChatgptAuthTokensRefreshResult 不暴露 accessToken", () => {
   const result = accountAuth.readChatgptAuthTokensRefreshResult({
     accessToken: " token ",
     chatgptAccountId: " org-2 ",
@@ -91,7 +91,7 @@ test("readChatgptAuthTokensRefreshResult 对齐刷新返回字段", () => {
     subscriptionRenewsAt: 1746502289,
   });
 
-  assert.equal(result.accessToken, "token");
+  assert.equal(Object.hasOwn(result, "accessToken"), false);
   assert.equal(result.chatgptAccountId, "org-2");
   assert.equal(result.chatgptPlanType, "team");
   assert.equal(result.hasSubscription, true);

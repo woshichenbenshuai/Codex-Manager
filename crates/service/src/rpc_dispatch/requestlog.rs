@@ -25,6 +25,13 @@ fn member_requestlog_scope(actor: &RpcActor) -> Result<(StorageHandle, Vec<Strin
     Ok((storage, key_ids))
 }
 
+fn clear_request_logs_for_actor(actor: &RpcActor) -> Result<(), String> {
+    if !actor.is_admin() {
+        return Err("permission_denied: requestlog/clear requires admin session".to_string());
+    }
+    requestlog_clear::clear_request_logs()
+}
+
 /// 函数 `try_handle`
 ///
 /// 作者: gaohongshun
@@ -138,7 +145,7 @@ pub(super) fn try_handle(req: &JsonRpcRequest, actor: &RpcActor) -> Option<JsonR
                 }
             }))
         }
-        "requestlog/clear" => super::ok_or_error(requestlog_clear::clear_request_logs()),
+        "requestlog/clear" => super::ok_or_error(clear_request_logs_for_actor(actor)),
         "requestlog/today_summary" => {
             let day_start_ts = super::i64_param(req, "dayStartTs");
             let day_end_ts = super::i64_param(req, "dayEndTs");
@@ -159,4 +166,16 @@ pub(super) fn try_handle(req: &JsonRpcRequest, actor: &RpcActor) -> Option<JsonR
     };
 
     Some(super::response(req, result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_log_clear_rejects_member_before_storage_access() {
+        let actor = RpcActor::from_parts(Some(crate::ROLE_MEMBER), Some("member"));
+        let error = clear_request_logs_for_actor(&actor).expect_err("member must be denied");
+        assert!(error.contains("permission_denied"));
+    }
 }

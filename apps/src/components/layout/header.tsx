@@ -171,9 +171,17 @@ export function Header() {
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     if (typeof window === "undefined") return;
-    window.location.assign("/__logout");
+    try {
+      await fetch("/__logout", {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+    } finally {
+      window.location.replace("/__login?force=1");
+    }
   };
 
   return (

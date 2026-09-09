@@ -192,7 +192,7 @@ PatewayAI 专注于官方高质量模型 API 中继，完整支持 Claude、Code
 | 首次启动、部署、Docker、macOS 放行 | [运行与部署指南](docs/zh-CN/report/运行与部署指南.md) |
 | 配置 Codex CLI / ccswitch 接入、`auth.json` 与 `config.toml` | [运行与部署指南](docs/zh-CN/report/运行与部署指南.md#通过-ccswitch-接入) |
 | 不登陆 Codex，使用 ChatGPT `/api/auth/session` 导入账号 | [不登陆 Codex 使用 ChatGPT 的 /api/auth/session 在软件中的使用](docs/zh-CN/report/不登陆Codex使用ChatGPT-auth-session导入账号.md) |
-| 配置端口、代理、数据库、Web 密码、环境变量 | [环境变量与运行配置](docs/zh-CN/report/环境变量与运行配置说明.md) |
+| 配置端口、代理、数据库、账户认证、环境变量 | [环境变量与运行配置](docs/zh-CN/report/环境变量与运行配置说明.md) |
 | 排查账号不命中、导入失败、挑战拦截、请求异常 | [FAQ 与账号命中规则](docs/zh-CN/report/FAQ与账号命中规则.md) |
 | 排查后台任务账号跳过、禁用与停用原因 | [后台任务账号跳过说明](docs/zh-CN/report/后台任务账号跳过说明.md) |
 | 管理模型、价格、路由、instructions policy 与本地缓存导出 | [模型目录 V2 管理与计费说明](docs/zh-CN/report/模型目录V2管理与计费说明.md) |

@@ -189,7 +189,29 @@ pub(crate) fn read_startup_snapshot_for_actor(
         Vec::new()
     };
     let api_models = if include_api_models {
-        crate::models_v2::models_response_with_storage(&storage)?
+        let allowed = storage
+            .allowed_model_slugs_for_user_v2(user_id, codexmanager_core::storage::now_ts())
+            .map_err(|err| format!("read allowed model groups failed: {err}"))?
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        let mut response = crate::models_v2::models_response_with_storage(&storage)?;
+        response
+            .models
+            .retain(|model| allowed.contains(model.slug.as_str()));
+        for model in &mut response.models {
+            model.base_instructions = None;
+            model.model_messages = None;
+            model.extra.remove("routes");
+            model.extra.remove("route");
+            model.extra.remove("permission_group_ids");
+            model.extra.remove("permissionGroupIds");
+            model.extra.remove("instructions");
+            model.extra.remove("instructions_template");
+            model.extra.remove("instructionsTemplate");
+            model.extra.remove("instructions_variables");
+            model.extra.remove("instructionsVariables");
+        }
+        response
     } else {
         Default::default()
     };

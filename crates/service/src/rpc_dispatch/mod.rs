@@ -184,34 +184,15 @@ fn permission_denied(method: &str) -> String {
 }
 
 const MEMBER_METHOD_ALLOWLIST: &[&str] = &[
-    "account/chatgptAuthTokens/refresh",
-    "account/chatgptAuthTokens/refreshAll",
-    "account/list",
-    "account/proxy/clear",
-    "account/proxy/cancel-test",
-    "account/proxy/get",
-    "account/proxy/latency-test",
-    "account/proxy/set",
-    "account/proxy/speed-test",
-    "account/proxy/cloudflare-speed-test",
-    "account/proxy/speed-test-history",
-    "account/proxy/latency-test-history",
-    "account/proxy/diagnostics-history",
-    "account/proxy/test",
-    "account/proxy/test-job",
-    "account/read",
-    "account/update",
-    "account/updateSorts",
-    "account/usage/aggregate",
-    "account/usage/list",
-    "account/usage/read",
-    "account/usage/resetCredits",
-    "account/usage/refresh",
-    "account/warmup",
     "accountManager/password/change",
     "accountManager/profile/update",
     "accountManager/session/current",
-    "accountManager/status",
+    "accountManager/session/list",
+    "accountManager/session/revoke",
+    "accountManager/totp/status",
+    "accountManager/totp/setup/begin",
+    "accountManager/totp/setup/confirm",
+    "accountManager/totp/disable",
     "apikey/create",
     "apikey/delete",
     "apikey/disable",
@@ -222,7 +203,6 @@ const MEMBER_METHOD_ALLOWLIST: &[&str] = &[
     "apikey/readSecret",
     "apikey/updateModel",
     "apikey/usageStats",
-    "appSettings/get",
     "dashboard/memberSummary",
     "requestlog/list",
     "requestlog/list_with_summary",
@@ -232,9 +212,6 @@ const MEMBER_METHOD_ALLOWLIST: &[&str] = &[
 ];
 
 fn member_method_allowed(method: &str) -> bool {
-    if crate::current_web_auth_mode() == "password" {
-        return true;
-    }
     MEMBER_METHOD_ALLOWLIST.contains(&method)
 }
 
@@ -275,9 +252,21 @@ pub(crate) fn handle_request_with_actor(req: JsonRpcRequest, actor: RpcActor) ->
         let result = InitializeResult {
             version: codexmanager_core::core_version().to_string(),
             user_agent: crate::gateway::current_codex_user_agent(),
-            codex_home: crate::process_env::db_dir().to_string_lossy().to_string(),
-            platform_family: std::env::consts::FAMILY.to_string(),
-            platform_os: std::env::consts::OS.to_string(),
+            codex_home: if actor.is_admin() {
+                crate::process_env::db_dir().to_string_lossy().to_string()
+            } else {
+                "<restricted>".to_string()
+            },
+            platform_family: if actor.is_admin() {
+                std::env::consts::FAMILY.to_string()
+            } else {
+                String::new()
+            },
+            platform_os: if actor.is_admin() {
+                std::env::consts::OS.to_string()
+            } else {
+                String::new()
+            },
         };
         return JsonRpcMessage::Response(response(&req, as_json(result)));
     }
@@ -298,7 +287,7 @@ pub(crate) fn handle_request_with_actor(req: JsonRpcRequest, actor: RpcActor) ->
     if let Some(resp) = apikey::try_handle(&req, &actor) {
         return JsonRpcMessage::Response(resp);
     }
-    if let Some(resp) = app_settings::try_handle(&req) {
+    if let Some(resp) = app_settings::try_handle(&req, &actor) {
         return JsonRpcMessage::Response(resp);
     }
     if let Some(resp) = codex_profile::try_handle(&req) {

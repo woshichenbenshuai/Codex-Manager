@@ -3,7 +3,6 @@ use crate::app_settings::{
     APP_SETTING_WEB_ACCESS_PASSWORD_HASH_KEY,
 };
 use rand::RngCore;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 /// 函数 `current_web_access_password_hash`
@@ -33,7 +32,27 @@ pub fn current_web_access_password_hash() -> Option<String> {
 /// # 返回
 /// 返回函数执行结果
 pub fn web_access_password_configured() -> bool {
-    current_web_access_password_hash().is_some()
+    current_web_access_password_hash().is_some_and(|value| !value.trim().is_empty())
+}
+
+pub fn bootstrap_web_access_password_if_missing() -> Result<bool, String> {
+    if crate::storage_helpers::open_storage()
+        .and_then(|storage| storage.active_admin_count().ok())
+        .is_some_and(|count| count > 0)
+    {
+        return Ok(false);
+    }
+    if web_access_password_configured() {
+        return Ok(false);
+    }
+    let Some(password) = std::env::var("CODEXMANAGER_WEB_BOOTSTRAP_PASSWORD")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| value.len() >= 8)
+    else {
+        return Ok(false);
+    };
+    set_web_access_password(Some(&password))
 }
 
 /// 函数 `set_web_access_password`
@@ -50,6 +69,16 @@ pub fn web_access_password_configured() -> bool {
 pub fn set_web_access_password(password: Option<&str>) -> Result<bool, String> {
     match normalize_optional_text(password) {
         Some(value) => {
+            crate::initialize_storage_if_needed()?;
+            if crate::storage_helpers::open_storage()
+                .and_then(|storage| storage.active_admin_count().ok())
+                .is_some_and(|count| count > 0)
+            {
+                return Err(
+                    "旧访问密码仅允许在首次管理员迁移前配置，账号系统初始化后不能重新启用"
+                        .to_string(),
+                );
+            }
             let hashed = hash_web_access_password(&value);
             save_persisted_app_setting(APP_SETTING_WEB_ACCESS_PASSWORD_HASH_KEY, Some(&hashed))?;
             Ok(true)
@@ -59,23 +88,6 @@ pub fn set_web_access_password(password: Option<&str>) -> Result<bool, String> {
             Ok(false)
         }
     }
-}
-
-/// 函数 `web_auth_status_value`
-///
-/// 作者: gaohongshun
-///
-/// 时间: 2026-04-02
-///
-/// # 参数
-/// 无
-///
-/// # 返回
-/// 返回函数执行结果
-pub fn web_access_auth_status_value() -> Result<Value, String> {
-    Ok(serde_json::json!({
-        "passwordConfigured": web_access_password_configured(),
-    }))
 }
 
 /// 函数 `verify_web_access_password`
@@ -91,25 +103,9 @@ pub fn web_access_auth_status_value() -> Result<Value, String> {
 /// 返回函数执行结果
 pub fn verify_web_access_password(password: &str) -> bool {
     let Some(stored_hash) = current_web_access_password_hash() else {
-        return true;
+        return false;
     };
     verify_password_hash(password, &stored_hash)
-}
-
-/// 函数 `build_web_access_session_token`
-///
-/// 作者: gaohongshun
-///
-/// 时间: 2026-04-02
-///
-/// # 参数
-/// - password_hash: 参数 password_hash
-/// - rpc_token: 参数 rpc_token
-///
-/// # 返回
-/// 返回函数执行结果
-pub fn build_web_access_session_token(password_hash: &str, rpc_token: &str) -> String {
-    hex_sha256(format!("codexmanager-web-auth-session:{password_hash}:{rpc_token}").as_bytes())
 }
 
 /// 函数 `hash_web_access_password`

@@ -425,7 +425,7 @@ fn current_app_settings_value_inner(
         object.insert("webAuthMode".to_string(), current_web_auth_mode().into());
         object.insert(
             "webAuthModeOptions".to_string(),
-            serde_json::json!(["none", "password", "accounts"]),
+            serde_json::json!(["none", "accounts"]),
         );
         object.insert(
             "distributionEnabled".to_string(),

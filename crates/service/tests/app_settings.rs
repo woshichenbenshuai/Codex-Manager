@@ -1,7 +1,9 @@
 use codexmanager_core::storage::{
     now_ts, ApiKey, ApiKeyOwner, AppWalletLedgerEntry, Storage, UserModelGroup,
 };
+use hmac::{Hmac, Mac};
 use serde_json::json;
+use sha1::Sha1;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,6 +16,10 @@ const ISOLATED_RUNTIME_ENV_KEYS: &[&str] = &[
     "CODEXMANAGER_ACCOUNT_MAX_INFLIGHT",
     "CODEXMANAGER_SERVICE_ADDR",
     "CODEXMANAGER_WEB_ADDR",
+    "CODEXMANAGER_WEB_BOOTSTRAP_PASSWORD",
+    "CODEXMANAGER_WEB_PUBLIC_BASE_URL",
+    "CODEXMANAGER_WEB_TOTP_ENCRYPTION_KEY",
+    "CODEXMANAGER_WEB_TRUSTED_PROXY_CIDRS",
     "CODEXMANAGER_ROUTE_STRATEGY",
     "CODEXMANAGER_FREE_ACCOUNT_MAX_MODEL",
     "CODEXMANAGER_MODEL_FORWARD_RULES",
@@ -244,6 +250,40 @@ fn create_admin_user(username: &str) -> codexmanager_service::AppUserPublicResul
     .expect("create admin user")
 }
 
+fn decode_base32(input: &str) -> Vec<u8> {
+    let mut buffer = 0u32;
+    let mut bits = 0u8;
+    let mut output = Vec::new();
+    for byte in input.bytes() {
+        let value = match byte.to_ascii_uppercase() {
+            b'A'..=b'Z' => byte.to_ascii_uppercase() - b'A',
+            b'2'..=b'7' => byte - b'2' + 26,
+            other => panic!("invalid Base32 byte: {other}"),
+        };
+        buffer = (buffer << 5) | u32::from(value);
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            output.push((buffer >> bits) as u8);
+        }
+    }
+    output
+}
+
+fn totp_code(secret: &str, timestamp: i64) -> String {
+    let key = decode_base32(secret);
+    let counter = timestamp.div_euclid(30).max(0) as u64;
+    let mut mac = Hmac::<Sha1>::new_from_slice(&key).expect("create HMAC-SHA1");
+    mac.update(&counter.to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let offset = usize::from(digest[19] & 0x0f);
+    let binary = ((u32::from(digest[offset]) & 0x7f) << 24)
+        | (u32::from(digest[offset + 1]) << 16)
+        | (u32::from(digest[offset + 2]) << 8)
+        | u32::from(digest[offset + 3]);
+    format!("{:06}", binary % 1_000_000)
+}
+
 fn assert_account_mode_locked_with_reason(reason: &str) {
     let status = codexmanager_service::app_auth_status_value().expect("auth status");
     assert_eq!(
@@ -340,27 +380,111 @@ fn app_settings_roundtrip_account_manager_mode_and_bootstrap() {
         assert_eq!(snapshot["distributionEnabled"], true);
         assert_eq!(snapshot["appUsersConfigured"], false);
 
-        let login = codexmanager_service::bootstrap_app_admin(
+        let _env = override_env_vars(&[(
+            "CODEXMANAGER_WEB_TOTP_ENCRYPTION_KEY",
+            Some("0000000000000000000000000000000000000000000000000000000000000000"),
+        )]);
+        codexmanager_service::set_web_access_password(Some("legacy-password"))
+            .expect("configure bootstrap password");
+        let result = codexmanager_service::bootstrap_app_admin_with_totp(
+            "legacy-password",
             "admin-user",
             "password123",
             Some("Admin User"),
         )
         .expect("bootstrap admin");
-        assert!(login.token.starts_with("cms_"));
-        assert_eq!(login.user.username, "admin-user");
-        assert_eq!(login.user.role, "admin");
-        assert!(login.user.wallet.is_none());
-
-        let resolved = codexmanager_service::resolve_app_user_session(&login.token)
-            .expect("resolve session")
-            .expect("active session");
-        assert_eq!(resolved.user.id, login.user.id);
+        let (challenge_token, setup) = match result {
+            codexmanager_service::AppLoginAttempt::TotpSetup {
+                challenge_token,
+                setup,
+            } => (challenge_token, setup),
+            other => panic!("expected authenticator setup, got {other:?}"),
+        };
+        assert!(!challenge_token.is_empty());
+        assert_eq!(setup.username, "admin-user");
+        assert_eq!(
+            setup.challenge_token.as_deref(),
+            Some(challenge_token.as_str())
+        );
 
         let status = codexmanager_service::app_auth_status_value().expect("auth status");
         assert_eq!(status["mode"], "accounts");
         assert_eq!(status["distributionEnabled"], true);
         assert_eq!(status["appUsersConfigured"], true);
         assert_eq!(status["appUserCount"], 1);
+    });
+}
+
+#[test]
+fn legacy_migration_requires_totp_rejects_replay_and_validates_encryption_key() {
+    with_temp_db(|_| {
+        let _env = override_env_vars(&[(
+            "CODEXMANAGER_WEB_TOTP_ENCRYPTION_KEY",
+            Some("1111111111111111111111111111111111111111111111111111111111111111"),
+        )]);
+        codexmanager_service::set_web_access_password(Some("legacy-password"))
+            .expect("configure migration password");
+        let setup = match codexmanager_service::bootstrap_app_admin_with_totp(
+            "legacy-password",
+            "secure-admin",
+            "password123",
+            Some("Secure Admin"),
+        )
+        .expect("start migration")
+        {
+            codexmanager_service::AppLoginAttempt::TotpSetup {
+                challenge_token,
+                setup,
+            } => (challenge_token, setup),
+            other => panic!("expected TOTP setup, got {other:?}"),
+        };
+        let setup_code = totp_code(&setup.1.secret, now_ts());
+        let migrated =
+            codexmanager_service::confirm_app_user_totp_setup(None, Some(&setup.0), &setup_code)
+                .expect("confirm migration TOTP");
+        assert_eq!(migrated.user.username, "secure-admin");
+        assert!(migrated.user.totp_enabled);
+        assert_eq!(codexmanager_service::current_web_auth_mode(), "accounts");
+        assert!(!codexmanager_service::web_access_password_configured());
+
+        let challenge =
+            match codexmanager_service::login_app_user("secure-admin", "password123", None, None)
+                .expect("password stage")
+            {
+                codexmanager_service::AppLoginAttempt::TotpChallenge {
+                    challenge_token,
+                    error,
+                    ..
+                } => {
+                    assert!(error.is_none());
+                    challenge_token
+                }
+                other => panic!("administrator bypassed TOTP: {other:?}"),
+            };
+        let login_code = totp_code(&setup.1.secret, now_ts().saturating_add(30));
+        let login = codexmanager_service::complete_app_login_challenge(&challenge, &login_code)
+            .expect("complete TOTP login");
+        assert_eq!(login.user.id, migrated.user.id);
+
+        let replay = codexmanager_service::login_app_user(
+            "secure-admin",
+            "password123",
+            Some(&login_code),
+            None,
+        )
+        .expect("replay produces retryable login result");
+        assert!(matches!(
+            replay,
+            codexmanager_service::AppLoginAttempt::TotpChallenge { error: Some(_), .. }
+        ));
+
+        std::env::set_var(
+            "CODEXMANAGER_WEB_TOTP_ENCRYPTION_KEY",
+            "2222222222222222222222222222222222222222222222222222222222222222",
+        );
+        let error = codexmanager_service::validate_web_totp_encryption_key()
+            .expect_err("wrong encryption key must fail validation");
+        assert!(error.contains("解密失败"), "{error}");
     });
 }
 
@@ -404,13 +528,44 @@ fn app_settings_rejects_password_mode_without_password() {
         })));
         assert!(result.is_err());
 
-        let snapshot = codexmanager_service::app_settings_set(Some(&json!({
+        let result = codexmanager_service::app_settings_set(Some(&json!({
             "webAccessPassword": "password123",
             "webAuthMode": "password"
-        })))
-        .expect("save password mode");
-        assert_eq!(snapshot["webAuthMode"], "password");
-        assert_eq!(snapshot["webAccessPasswordConfigured"], true);
+        })));
+        assert!(result.is_err());
+    });
+}
+
+#[test]
+fn legacy_access_password_cannot_be_reconfigured_after_admin_creation() {
+    with_temp_db(|_| {
+        assert!(!codexmanager_service::verify_web_access_password(
+            "anything"
+        ));
+        codexmanager_service::set_web_access_password(Some("migration-password"))
+            .expect("configure migration password");
+        codexmanager_service::create_app_user(codexmanager_service::AppUserCreateInput {
+            username: "existing-admin".to_string(),
+            password: "password123".to_string(),
+            display_name: None,
+            role: Some("admin".to_string()),
+            initial_balance_credit_micros: None,
+        })
+        .expect("create existing administrator");
+
+        let error = codexmanager_service::set_web_access_password(Some("replacement-password"))
+            .expect_err("legacy password must stay disabled after account initialization");
+
+        assert!(
+            error.contains("首次管理员迁移前"),
+            "unexpected error: {error}"
+        );
+        assert!(codexmanager_service::verify_web_access_password(
+            "migration-password"
+        ));
+        assert!(!codexmanager_service::verify_web_access_password(
+            "replacement-password"
+        ));
     });
 }
 
@@ -437,11 +592,11 @@ fn app_settings_allows_trial_account_mode_downgrade_before_lock() {
         .expect("enable account mode again");
         assert_eq!(snapshot["webAuthMode"], "accounts");
 
-        let snapshot = codexmanager_service::app_settings_set(Some(&json!({
+        let result = codexmanager_service::app_settings_set(Some(&json!({
             "webAuthMode": "password"
         })))
-        .expect("downgrade to password before formal use");
-        assert_eq!(snapshot["webAuthMode"], "password");
+        .expect_err("legacy password mode must remain unavailable");
+        assert!(result.contains("独立访问密码模式已废弃"));
     });
 }
 

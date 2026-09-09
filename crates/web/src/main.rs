@@ -20,7 +20,6 @@ use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
-use rand::RngCore;
 use tokio::sync::{watch, Mutex};
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -33,7 +32,6 @@ struct AppState {
     service_rpc_url: String,
     service_addr: String,
     rpc_token: String,
-    web_auth_session_key: String,
     shutdown_tx: watch::Sender<bool>,
     spawned_service: Arc<Mutex<bool>>,
     missing_ui_html: Arc<String>,
@@ -264,6 +262,91 @@ fn resolve_web_addr() -> String {
         .unwrap_or_else(codexmanager_service::default_web_listener_addr)
 }
 
+fn web_addr_is_loopback(addr: &str) -> bool {
+    let normalized = addr
+        .trim()
+        .strip_prefix("http://")
+        .or_else(|| addr.trim().strip_prefix("https://"))
+        .unwrap_or(addr.trim());
+    let host = if let Some(value) = normalized.strip_prefix('[') {
+        value.split(']').next().unwrap_or_default()
+    } else if let Some((value, port)) = normalized.rsplit_once(':') {
+        if port.parse::<u16>().is_ok() {
+            value
+        } else {
+            normalized
+        }
+    } else {
+        normalized
+    }
+    .trim_matches(&['[', ']'][..])
+    .trim();
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn web_bootstrap_is_configured(accounts_configured: bool, password_hash: Option<&str>) -> bool {
+    accounts_configured || password_hash.is_some_and(|value| !value.trim().is_empty())
+}
+
+fn public_https_origin(value: &str) -> Option<String> {
+    let uri = value.trim().parse::<axum::http::Uri>().ok()?;
+    if uri.scheme_str() != Some("https") {
+        return None;
+    }
+    let authority = uri.authority()?.as_str().trim();
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("https://{}", authority.to_ascii_lowercase()))
+}
+
+fn ensure_web_start_security(web_addr: &str) -> Result<(), String> {
+    let _ = codexmanager_service::bootstrap_web_access_password_if_missing()?;
+    if web_addr_is_loopback(web_addr) {
+        let accounts_configured = codexmanager_service::app_auth_status_value()
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("appUsersConfigured")
+                    .and_then(|item| item.as_bool())
+            })
+            .unwrap_or(false);
+        if accounts_configured || codexmanager_service::current_web_auth_mode() == "accounts" {
+            codexmanager_service::validate_web_totp_encryption_key()
+                .map_err(|err| format!("账号认证配置无效：{err}"))?;
+        }
+        return Ok(());
+    }
+    let public_base_url = read_env_trim("CODEXMANAGER_WEB_PUBLIC_BASE_URL").ok_or_else(|| {
+        "公网 Web 监听被拒绝：必须配置 CODEXMANAGER_WEB_PUBLIC_BASE_URL=https://...".to_string()
+    })?;
+    if public_https_origin(&public_base_url).is_none() {
+        return Err(
+            "公网 Web 监听被拒绝：CODEXMANAGER_WEB_PUBLIC_BASE_URL 必须是有效的 HTTPS 地址"
+                .to_string(),
+        );
+    }
+    let accounts_configured = codexmanager_service::app_auth_status_value()
+        .ok()
+        .and_then(|value| {
+            value
+                .get("appUsersConfigured")
+                .and_then(|item| item.as_bool())
+        })
+        .unwrap_or(false);
+    let password_hash = codexmanager_service::current_web_access_password_hash();
+    if !web_bootstrap_is_configured(accounts_configured, password_hash.as_deref()) {
+        return Err(
+            "公网 Web 监听被拒绝：请设置 CODEXMANAGER_WEB_BOOTSTRAP_PASSWORD（至少 8 位）完成首次账号迁移，或改回 loopback 监听"
+                .to_string(),
+        );
+    }
+    if let Err(err) = codexmanager_service::validate_web_totp_encryption_key() {
+        return Err(format!("公网账号认证配置无效：{err}"));
+    }
+    Ok(())
+}
+
 /// 函数 `resolve_web_root`
 ///
 /// 作者: gaohongshun
@@ -404,16 +487,19 @@ async fn serve_on_listener(
     app: Router,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> std::io::Result<()> {
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            while !*shutdown_rx.borrow() {
-                if shutdown_rx.changed().await.is_err() {
-                    break;
-                }
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        while !*shutdown_rx.borrow() {
+            if shutdown_rx.changed().await.is_err() {
+                break;
             }
-        })
-        .await
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
+        }
+    })
+    .await
+    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
 }
 
 /// 函数 `run_web_server`
@@ -473,6 +559,10 @@ async fn run_web_server(
 async fn async_main() {
     let service_addr = resolve_service_addr();
     let web_addr = resolve_web_addr();
+    if let Err(err) = ensure_web_start_security(&web_addr) {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
     let web_root = resolve_web_root();
     let index = web_root.join("index.html");
 
@@ -507,7 +597,6 @@ async fn async_main() {
         service_rpc_url: rpc_url,
         service_addr: service_addr.clone(),
         rpc_token,
-        web_auth_session_key: auth::generate_web_auth_session_key(),
         shutdown_tx,
         spawned_service: spawned_service.clone(),
         missing_ui_html,
@@ -516,9 +605,11 @@ async fn async_main() {
     let mut protected_app = Router::new()
         .route(
             "/api/rpc",
-            post(service_gateway::rpc_proxy).layer(DefaultBodyLimit::max(
-                codexmanager_service::RPC_BODY_LIMIT_BYTES,
-            )),
+            post(service_gateway::rpc_proxy)
+                .layer(DefaultBodyLimit::max(
+                    codexmanager_service::RPC_BODY_LIMIT_BYTES,
+                ))
+                .layer(axum::middleware::from_fn(auth::csrf_origin_middleware)),
         )
         .route(
             "/api/events/usage-refresh",
@@ -528,7 +619,11 @@ async fn async_main() {
             "/api/events/account-test",
             get(service_gateway::account_test_events),
         )
-        .route("/__quit", get(service_gateway::quit));
+        .route(
+            "/__quit",
+            post(service_gateway::quit)
+                .layer(axum::middleware::from_fn(auth::csrf_origin_middleware)),
+        );
 
     let disk_ok = ensure_index_file(&index);
     let using_explicit_root = read_env_trim("CODEXMANAGER_WEB_ROOT").is_some();
@@ -563,7 +658,7 @@ async fn async_main() {
         ));
     let app = Router::new()
         .route("/health", get(service_gateway::gateway_proxy))
-        .route("/metrics", get(service_gateway::gateway_proxy))
+        .route("/metrics", get(service_gateway::metrics))
         .route("/auth/callback", get(service_gateway::gateway_proxy))
         .route(
             "/auth/callback/{*path}",
@@ -588,10 +683,20 @@ async fn async_main() {
         .route("/api/runtime", get(runtime_info))
         .route("/api/author-content", get(service_gateway::author_content))
         .route("/__auth_status", get(auth::auth_status))
-        .route("/__login", get(auth::login_page).post(auth::login_submit))
-        .route("/__logout", get(auth::logout).post(auth::logout))
+        .route(
+            "/__login",
+            get(auth::login_page)
+                .post(auth::login_submit)
+                .layer(DefaultBodyLimit::max(16 * 1024))
+                .layer(axum::middleware::from_fn(auth::csrf_origin_middleware)),
+        )
+        .route(
+            "/__logout",
+            post(auth::logout).layer(axum::middleware::from_fn(auth::csrf_origin_middleware)),
+        )
         .merge(protected_app)
-        .with_state(state);
+        .with_state(state)
+        .layer(axum::middleware::from_fn(auth::security_headers_middleware));
 
     println!("codexmanager-web listening on {web_addr} (service={service_addr})");
 

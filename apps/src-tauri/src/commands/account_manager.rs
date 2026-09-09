@@ -39,6 +39,72 @@ pub async fn service_account_manager_password_change(
 }
 
 #[tauri::command]
+pub async fn service_account_manager_session_list(
+    addr: Option<String>,
+) -> Result<serde_json::Value, String> {
+    rpc_call_in_background("accountManager/session/list", addr, None).await
+}
+
+#[tauri::command]
+pub async fn service_account_manager_session_revoke(
+    addr: Option<String>,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
+    rpc_call_in_background(
+        "accountManager/session/revoke",
+        addr,
+        Some(serde_json::json!({ "sessionId": session_id })),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn service_account_manager_totp_status(
+    addr: Option<String>,
+) -> Result<serde_json::Value, String> {
+    rpc_call_in_background("accountManager/totp/status", addr, None).await
+}
+
+#[tauri::command]
+pub async fn service_account_manager_totp_setup_begin(
+    addr: Option<String>,
+    current_password: String,
+) -> Result<serde_json::Value, String> {
+    rpc_call_in_background(
+        "accountManager/totp/setup/begin",
+        addr,
+        Some(serde_json::json!({ "currentPassword": current_password })),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn service_account_manager_totp_setup_confirm(
+    addr: Option<String>,
+    target_user_id: String,
+    challenge_token: String,
+    code: String,
+) -> Result<serde_json::Value, String> {
+    rpc_call_in_background(
+        "accountManager/totp/setup/confirm",
+        addr,
+        Some(serde_json::json!({
+            "targetUserId": target_user_id,
+            "challengeToken": challenge_token,
+            "code": code,
+        })),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn service_account_manager_totp_disable(
+    addr: Option<String>,
+) -> Result<serde_json::Value, String> {
+    rpc_call_in_background("accountManager/totp/disable", addr, None).await
+}
+
+#[tauri::command]
 pub async fn service_account_manager_users_list(
     addr: Option<String>,
 ) -> Result<serde_json::Value, String> {
@@ -68,6 +134,19 @@ pub async fn service_account_manager_user_delete(
 ) -> Result<serde_json::Value, String> {
     let params = serde_json::json!({ "id": id });
     rpc_call_in_background("accountManager/users/delete", addr, Some(params)).await
+}
+
+#[tauri::command]
+pub async fn service_account_manager_user_totp_reset(
+    addr: Option<String>,
+    user_id: String,
+) -> Result<serde_json::Value, String> {
+    rpc_call_in_background(
+        "accountManager/users/totp/reset",
+        addr,
+        Some(serde_json::json!({ "userId": user_id })),
+    )
+    .await
 }
 
 #[tauri::command]

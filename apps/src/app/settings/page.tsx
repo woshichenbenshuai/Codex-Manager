@@ -103,7 +103,210 @@ import {
   stringifyNumber,
   type SettingsTab,
   type WorkerPreset,
-} from "@/app/settings/settings-page-helpers";function MemberSettingsPage() {
+ } from "@/app/settings/settings-page-helpers";
+
+function TotpSettingsCard() {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { data: session } = useAppSession();
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  const [totpSetup, setTotpSetup] = useState<{
+    secret: string;
+    otpauthUri: string;
+    challengeToken: string;
+  } | null>(null);
+
+  const totpStatusQuery = useQuery({
+    queryKey: ["account-manager", "totp-status"],
+    queryFn: () => appClient.getTotpStatus(),
+    enabled: Boolean(session?.currentUser),
+  });
+
+  const beginTotpSetup = useMutation({
+    mutationFn: () => appClient.beginTotpSetup(currentPassword),
+    onSuccess: (setup) => {
+      setTotpSetup({
+        secret: setup.secret,
+        otpauthUri: setup.otpauthUri,
+        challengeToken: setup.challengeToken,
+      });
+      setTotpCode("");
+    },
+    onError: (error: unknown) => toast.error(getAppErrorMessage(error)),
+  });
+
+  const confirmTotpSetup = useMutation({
+    mutationFn: () =>
+      appClient.confirmTotpSetup(
+        session?.currentUser?.id || "",
+        totpSetup?.challengeToken || "",
+        totpCode,
+      ),
+    onSuccess: async () => {
+      setTotpSetup(null);
+      setTotpCode("");
+      await queryClient.invalidateQueries({ queryKey: ["account-manager", "totp-status"] });
+      await queryClient.invalidateQueries({ queryKey: APP_SESSION_QUERY_KEY });
+      toast.success(t("验证器已启用"));
+    },
+    onError: (error: unknown) => toast.error(getAppErrorMessage(error)),
+  });
+
+  const disableTotp = useMutation({
+    mutationFn: () => appClient.disableTotp(),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["account-manager", "totp-status"] });
+      await queryClient.invalidateQueries({ queryKey: APP_SESSION_QUERY_KEY });
+      toast.success(t("验证器已关闭"));
+    },
+    onError: (error: unknown) => toast.error(getAppErrorMessage(error)),
+  });
+
+  if (!session?.currentUser) {
+    return null;
+  }
+
+  return (
+    <Card className="glass-card mission-panel shadow-sm">
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <LockKeyhole className="h-4 w-4 text-primary" />
+          <CardTitle className="text-base">{t("验证器二次验证")}</CardTitle>
+        </div>
+        <CardDescription>
+          {totpStatusQuery.data?.enabled
+            ? t("已启用动态验证码")
+            : t("管理员必须启用，成员可选启用")}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-2">
+          <Label>{t("当前密码")}</Label>
+          <Input
+            type="password"
+            value={currentPassword}
+            onChange={(event) => setCurrentPassword(event.target.value)}
+            autoComplete="current-password"
+          />
+        </div>
+        {!totpSetup ? (
+          <Button
+            variant="outline"
+            onClick={() => beginTotpSetup.mutate()}
+            disabled={
+              beginTotpSetup.isPending ||
+              !currentPassword.trim()
+            }
+          >
+            {totpStatusQuery.data?.enabled ? t("更换验证器") : t("绑定验证器")}
+          </Button>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              {t("将密钥添加到验证器应用，然后输入当前显示的 6 位验证码。")}
+            </p>
+            <code className="block break-all rounded-md bg-muted p-3 text-xs">
+              {totpSetup.secret}
+            </code>
+            <p className="break-all text-xs text-muted-foreground">{totpSetup.otpauthUri}</p>
+            <Input
+              value={totpCode}
+              onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+              inputMode="numeric"
+              placeholder={t("6 位动态验证码")}
+              autoComplete="one-time-code"
+            />
+            <div className="flex gap-2">
+              <Button
+                onClick={() => confirmTotpSetup.mutate()}
+                disabled={confirmTotpSetup.isPending || totpCode.length !== 6}
+              >
+                {t("确认绑定")}
+              </Button>
+              <Button variant="ghost" onClick={() => setTotpSetup(null)}>
+                {t("取消")}
+              </Button>
+            </div>
+          </div>
+        )}
+        {totpStatusQuery.data?.enabled && session?.currentUser?.role !== "admin" ? (
+          <Button
+            variant="ghost"
+            className="text-destructive"
+            onClick={() => {
+              if (window.confirm(t("关闭验证器会吊销当前账号会话，确定继续？"))) {
+                disableTotp.mutate();
+              }
+            }}
+            disabled={disableTotp.isPending}
+          >
+            {t("关闭验证器")}
+          </Button>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SessionSettingsCard() {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const { data: session } = useAppSession();
+  const sessionsQuery = useQuery({
+    queryKey: ["account-manager", "sessions"],
+    queryFn: () => appClient.listSessions(),
+    enabled: Boolean(session?.currentUser),
+  });
+  const revokeSession = useMutation({
+    mutationFn: (sessionId: string) => appClient.revokeSession(sessionId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["account-manager", "sessions"] });
+      toast.success(t("会话已吊销"));
+    },
+    onError: (error: unknown) => toast.error(getAppErrorMessage(error)),
+  });
+
+  if (!session?.currentUser) return null;
+  return (
+    <Card className="glass-card mission-panel shadow-sm">
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <LockKeyhole className="h-4 w-4 text-primary" />
+          <CardTitle className="text-base">{t("当前设备会话")}</CardTitle>
+        </div>
+        <CardDescription>{t("查看并吊销当前账号的其他登录会话")}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {sessionsQuery.data?.length ? (
+          sessionsQuery.data.map((item) => (
+            <div key={item.sessionId} className="flex items-center justify-between gap-3 rounded-md border p-3 text-sm">
+              <div>
+                <div className="font-medium">{item.current ? t("当前设备") : t("其他设备")}</div>
+                <div className="text-xs text-muted-foreground">
+                  {new Date((item.lastSeenAt || item.createdAt) * 1000).toLocaleString()}
+                </div>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-destructive"
+                disabled={revokeSession.isPending}
+                onClick={() => revokeSession.mutate(item.sessionId)}
+              >
+                {t("吊销")}
+              </Button>
+            </div>
+          ))
+        ) : (
+          <p className="text-sm text-muted-foreground">{t("暂无会话")}</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function MemberSettingsPage() {
   const { t } = useI18n();
   const { theme, setTheme } = useTheme();
   const queryClient = useQueryClient();
@@ -234,7 +437,11 @@ import {
             </Button>
           </CardContent>
         </Card>
+
+        <TotpSettingsCard />
       </div>
+
+      <SessionSettingsCard />
 
       <Card className="glass-card mission-panel shadow-sm">
         <CardHeader>
@@ -828,9 +1035,7 @@ function AdminSettingsPage() {
   const webAuthModeLabel =
     snapshot.webAuthMode === "accounts"
       ? "账号系统"
-      : snapshot.webAuthMode === "password"
-        ? "访问密码"
-        : "公开访问";
+      : "公开访问";
   const showAccessControlSettings = !isDesktopRuntime;
 
   const lastIntentThemeRef = useRef<string | null>(null);
@@ -1363,6 +1568,9 @@ function AdminSettingsPage() {
           {t("管理应用行为、网关策略及后台任务")}
         </p>
       </div>
+
+      <TotpSettingsCard />
+      <SessionSettingsCard />
 
       <Tabs
         value={activeTab}

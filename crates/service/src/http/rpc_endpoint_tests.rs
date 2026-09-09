@@ -191,3 +191,32 @@ async fn axum_rpc_rejects_unauthenticated_large_body_without_reading_it() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert!(!body_polled.load(Ordering::SeqCst));
 }
+
+#[tokio::test]
+async fn axum_rpc_rejects_partial_actor_headers_without_reading_the_body() {
+    let body_polled = Arc::new(AtomicBool::new(false));
+    let body_polled_for_stream = body_polled.clone();
+    let stream = futures_util::stream::once(async move {
+        body_polled_for_stream.store(true, Ordering::SeqCst);
+        Ok::<Bytes, Infallible>(Bytes::from_static(b"{}"))
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/rpc")
+        .header("content-type", HeaderValue::from_static("application/json"))
+        .header(
+            "x-codexmanager-rpc-token",
+            HeaderValue::from_str(crate::rpc_auth_token()).expect("rpc token header"),
+        )
+        .header(
+            "x-codexmanager-rpc-actor-role",
+            HeaderValue::from_static("admin"),
+        )
+        .body(Body::from_stream(stream))
+        .expect("RPC request");
+
+    let response = handle_rpc_http(request).await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(!body_polled.load(Ordering::SeqCst));
+}

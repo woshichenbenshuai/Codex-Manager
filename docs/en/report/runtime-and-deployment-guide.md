@@ -55,6 +55,7 @@ supports_websockets = true
 ```
 
 - If you changed the service port in Settings, update `base_url` accordingly.
+- In Docker/Web gateway mode, point ccswitch or Codex CLI to the public HTTPS Web origin plus `/v1`, for example `https://codex.example.com/v1`. Never use the container-only `localhost:48760` address or expose `48761` directly over public HTTP.
 - Restart Codex CLI after changing `auth.json` or `config.toml`.
 
 ## Import and export
@@ -93,6 +94,22 @@ You can still set `CODEXMANAGER_WEB_ROOT=/path/to/out` when you intentionally wa
 
 Docker images default to `TZ=Asia/Shanghai`, and compose examples use `TZ=${TZ:-Asia/Shanghai}`: if the deployment environment already sets `TZ`, compose passes it through; otherwise it falls back to `Asia/Shanghai`. If you deploy in another region, set `TZ` or change it under `environment` to your own IANA time zone, for example `Europe/London` or `America/Los_Angeles`.
 
+Before a public deployment, create a restricted `.env` file that is never committed to the repository:
+
+```dotenv
+CODEXMANAGER_WEB_PUBLIC_BASE_URL=https://codex.example.com
+CODEXMANAGER_WEB_BOOTSTRAP_PASSWORD=replace-with-a-strong-one-time-password
+CODEXMANAGER_WEB_TOTP_ENCRYPTION_KEY=replace-with-64-hex-characters
+# Optional; set a narrow CIDR only after confirming the proxy's peer address
+CODEXMANAGER_WEB_TRUSTED_PROXY_CIDRS=
+```
+
+- `CODEXMANAGER_WEB_PUBLIC_BASE_URL` must be the final public HTTPS origin and must exactly match the origin exposed by the reverse proxy.
+- The bootstrap password must contain at least eight characters. It is used only to create the first administrator or migrate an old global-password installation; it is not a normal login password.
+- Generate the TOTP encryption key with `openssl rand -hex 32`. Back it up permanently and keep it unchanged across upgrades; split service/web deployments must use the exact same value.
+- Public deployments must use an HTTPS reverse proxy such as Nginx or Caddy. Compose binds the Web port to host loopback by default and does not publish `48760`. For a remote proxy, set `CODEXMANAGER_WEB_PUBLISH_HOST` to one explicit private server address and allow only the proxy IP through the firewall; do not use `0.0.0.0`.
+- The root `docker-compose.yml` is the compatibility exception for existing NAS/server installations: it preserves the public `17000 -> 48761` mapping while keeping `48760` private. Protect that entrypoint with an external HTTPS load balancer/reverse proxy. Set `CODEXMANAGER_WEB_PUBLISH_HOST=127.0.0.1` if public reachability is not required.
+
 ### GitHub Packages / GHCR
 - After a Release is published, both `codexmanager-service` and `codexmanager-web` images are pushed to GitHub Packages (GHCR).
 - Stable releases update the versioned, `stable`, and `latest` tags. Prereleases only publish their versioned tag and never replace the floating tags.
@@ -106,7 +123,7 @@ Docker images default to `TZ=Asia/Shanghai`, and compose examples use `TZ=${TZ:-
 docker compose -f docker/docker-compose.yml up --build
 ```
 
-Then open: `http://localhost:48761/`
+After configuring the HTTPS reverse proxy, open the URL from `.env`, for example `https://codex.example.com/`.
 
 ### Method 2: build and run separately
 ```bash
@@ -114,29 +131,28 @@ Then open: `http://localhost:48761/`
 docker build -f docker/Dockerfile.service -t codexmanager-service .
 docker network create codexmanager-net
 
-docker run --rm --name codexmanager-service \
+docker run --rm -d --name codexmanager-service \
   --network codexmanager-net \
   --network-alias codexmanager-service \
-  -p 48760:48760 \
+  --env-file .env \
   -v codexmanager-data:/data \
   -e TZ=Asia/Shanghai \
-  -e CODEXMANAGER_RPC_TOKEN=replace_with_your_token \
   codexmanager-service
 
 # web (containers should talk over the Docker network, not the host-mapped port)
 docker build -f docker/Dockerfile.web -t codexmanager-web .
-docker run --rm --name codexmanager-web \
+docker run --rm -d --name codexmanager-web \
   --network codexmanager-net \
-  -p 48761:48761 \
+  -p 127.0.0.1:48761:48761 \
+  --env-file .env \
   -v codexmanager-data:/data \
   -e TZ=Asia/Shanghai \
   -e CODEXMANAGER_WEB_NO_SPAWN_SERVICE=1 \
   -e CODEXMANAGER_SERVICE_ADDR=codexmanager-service:48760 \
-  -e CODEXMANAGER_RPC_TOKEN=replace_with_your_token \
   codexmanager-web
 ```
 
-- If you want the Web password, settings, cached model list, and other runtime state to stay consistent with the service, `codexmanager-web` and `codexmanager-service` must share the same `/data` volume.
+- If you want account authentication, settings, cached model lists, and other runtime state to stay consistent with the service, `codexmanager-web` and `codexmanager-service` must share the same `/data` volume.
 - If you must reach the host-mapped port from the container, add `--add-host=host.docker.internal:host-gateway` on Linux; otherwise `host.docker.internal` often does not resolve.
 
 ## macOS first launch

@@ -1,5 +1,5 @@
 use super::{
-    refresh_all_chatgpt_auth_tokens, resolve_plan_type, resolve_plan_type_raw,
+    refresh_all_chatgpt_auth_tokens_with_storage, resolve_plan_type, resolve_plan_type_raw,
     resolve_refresh_target, set_current_auth_account_id,
 };
 use codexmanager_core::auth::parse_id_token_claims;
@@ -123,52 +123,35 @@ fn resolve_refresh_target_prefers_explicit_account_id_over_current_account() {
 
 #[test]
 fn refresh_all_chatgpt_auth_tokens_skips_accounts_without_refresh_token() {
-    let _guard = crate::test_env_guard();
-    let previous_db_path = std::env::var("CODEXMANAGER_DB_PATH").ok();
-    let db_path = std::env::temp_dir().join(format!(
-        "codexmanager-auth-refresh-all-{}-{}.sqlite",
-        std::process::id(),
-        now_ts()
-    ));
-    std::env::set_var("CODEXMANAGER_DB_PATH", &db_path);
+    let storage = Storage::open_in_memory().expect("open storage");
+    storage.init().expect("init storage");
+    storage
+        .insert_account(&build_account("missing-token", None, None))
+        .expect("insert missing token account");
+    storage
+        .insert_account(&build_account("missing-refresh", None, None))
+        .expect("insert missing refresh account");
+    storage
+        .insert_token(&build_refresh_token("missing-refresh", ""))
+        .expect("insert empty refresh token");
 
-    {
-        let storage = Storage::open(&db_path).expect("open storage");
-        storage.init().expect("init storage");
-        storage
-            .insert_account(&build_account("missing-token", None, None))
-            .expect("insert missing token account");
-        storage
-            .insert_account(&build_account("missing-refresh", None, None))
-            .expect("insert missing refresh account");
-        storage
-            .insert_token(&build_refresh_token("missing-refresh", ""))
-            .expect("insert empty refresh token");
+    let result = refresh_all_chatgpt_auth_tokens_with_storage(&storage).expect("refresh all");
 
-        let result = refresh_all_chatgpt_auth_tokens().expect("refresh all");
-
-        assert_eq!(result.requested, 0);
-        assert_eq!(result.succeeded, 0);
-        assert_eq!(result.failed, 0);
-        assert_eq!(result.skipped, 2);
-        assert_eq!(result.results.len(), 2);
-        assert!(result
-            .results
-            .iter()
-            .any(|item| item.account_id == "missing-token"
-                && item.message.as_deref() == Some("missing token")));
-        assert!(result
-            .results
-            .iter()
-            .any(|item| item.account_id == "missing-refresh"
-                && item.message.as_deref() == Some("missing refresh_token")));
-    }
-
-    match previous_db_path {
-        Some(value) => std::env::set_var("CODEXMANAGER_DB_PATH", value),
-        None => std::env::remove_var("CODEXMANAGER_DB_PATH"),
-    }
-    let _ = std::fs::remove_file(db_path);
+    assert_eq!(result.requested, 0);
+    assert_eq!(result.succeeded, 0);
+    assert_eq!(result.failed, 0);
+    assert_eq!(result.skipped, 2);
+    assert_eq!(result.results.len(), 2);
+    assert!(result
+        .results
+        .iter()
+        .any(|item| item.account_id == "missing-token"
+            && item.message.as_deref() == Some("missing token")));
+    assert!(result
+        .results
+        .iter()
+        .any(|item| item.account_id == "missing-refresh"
+            && item.message.as_deref() == Some("missing refresh_token")));
 }
 
 /// 函数 `resolve_plan_type_prefers_latest_access_token_claims`

@@ -59,7 +59,6 @@ export interface CurrentAccessTokenAccountReadResult {
 }
 
 export interface ChatgptAuthTokensRefreshResult {
-  accessToken: string;
   chatgptAccountId: string;
   chatgptPlanType: string | null;
   hasSubscription?: boolean | null;

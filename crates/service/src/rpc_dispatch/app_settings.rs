@@ -1,5 +1,7 @@
 use codexmanager_core::rpc::types::{JsonRpcRequest, JsonRpcResponse};
 
+use crate::RpcActor;
+
 /// 函数 `try_handle`
 ///
 /// 作者: gaohongshun
@@ -11,7 +13,21 @@ use codexmanager_core::rpc::types::{JsonRpcRequest, JsonRpcResponse};
 ///
 /// # 返回
 /// 返回函数执行结果
-pub(super) fn try_handle(req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
+pub(super) fn try_handle(req: &JsonRpcRequest, actor: &RpcActor) -> Option<JsonRpcResponse> {
+    if matches!(
+        req.method.as_str(),
+        "appSettings/get"
+            | "appSettings/set"
+            | "webAuth/status"
+            | "webAuth/password/set"
+            | "webAuth/password/clear"
+    ) && !actor.is_admin()
+    {
+        return Some(super::response(
+            req,
+            super::value_or_error::<()>(Err(format!("permission_denied: {}", req.method))),
+        ));
+    }
     let result = match req.method.as_str() {
         "appSettings/get" => super::value_or_error(crate::app_settings_get()),
         "appSettings/set" => super::value_or_error(crate::app_settings_set(req.params.as_ref())),

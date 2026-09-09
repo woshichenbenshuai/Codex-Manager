@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use rusqlite::{params, params_from_iter, OptionalExtension, Result, Row};
 
 use super::{
-    now_ts, ApiKeyOwner, AppProject, AppSessionUserWithWallet, AppUser, AppUserAccessSummary,
-    AppUserSession, AppWallet, AppWalletLedgerEntry, BillingRule, DashboardAppUserSummary,
-    PublicAppUserWithWallet, Storage,
+    now_ts, ApiKeyOwner, AppAuthThrottleState, AppLoginChallenge, AppProject,
+    AppSessionUserWithWallet, AppUser, AppUserAccessSummary, AppUserSession, AppUserTotpState,
+    AppWallet, AppWalletLedgerEntry, BillingRule, DashboardAppUserSummary, PublicAppUserWithWallet,
+    Storage,
 };
 use crate::storage::key_id_filters::{
     normalize_text_ids, text_id_in_clause, SQLITE_IN_CLAUSE_BATCH_SIZE,
@@ -337,6 +338,125 @@ fn update_app_user_password_hash_sql() -> &'static str {
     "UPDATE app_users SET password_hash = ?1, updated_at = ?2 WHERE id = ?3"
 }
 
+fn active_app_session_user_with_wallet_by_id_sql() -> &'static str {
+    "SELECT
+        s.id,
+        s.expires_at,
+        u.id,
+        u.username,
+        u.display_name,
+        u.role,
+        u.status,
+        u.created_at,
+        u.updated_at,
+        u.last_login_at,
+        w.id,
+        w.owner_kind,
+        w.owner_id,
+        w.balance_credit_micros,
+        w.frozen_credit_micros,
+        w.status,
+        w.created_at,
+        w.updated_at
+     FROM app_user_sessions s
+     INNER JOIN app_users u ON u.id = s.user_id
+     LEFT JOIN app_wallets w
+       ON u.role <> 'admin'
+      AND w.owner_kind = 'user'
+      AND w.owner_id = u.id
+     WHERE s.id = ?1
+       AND s.revoked_at IS NULL
+       AND s.expires_at > ?2
+       AND u.status = 'active'
+     LIMIT 1"
+}
+
+fn app_user_sessions_by_user_sql() -> &'static str {
+    "SELECT id, user_id, token_hash, expires_at, created_at, last_seen_at, revoked_at
+     FROM app_user_sessions
+     WHERE user_id = ?1 AND revoked_at IS NULL AND expires_at > ?2
+     ORDER BY COALESCE(last_seen_at, created_at) DESC"
+}
+
+fn revoke_app_user_session_sql() -> &'static str {
+    "UPDATE app_user_sessions
+     SET revoked_at = ?1
+     WHERE id = ?2 AND user_id = ?3 AND revoked_at IS NULL"
+}
+
+fn app_user_totp_state_sql() -> &'static str {
+    "SELECT id, totp_secret_ciphertext, totp_pending_secret_ciphertext, totp_enabled, totp_confirmed_at,
+            totp_last_used_step
+     FROM app_users WHERE id = ?1 LIMIT 1"
+}
+
+fn update_app_user_totp_sql() -> &'static str {
+    "UPDATE app_users
+     SET totp_secret_ciphertext = ?1,
+         totp_pending_secret_ciphertext = NULL,
+         totp_enabled = ?2,
+         totp_confirmed_at = ?3,
+         totp_last_used_step = ?4,
+         updated_at = ?5
+     WHERE id = ?6"
+}
+
+fn update_app_user_totp_pending_sql() -> &'static str {
+    "UPDATE app_users
+     SET totp_pending_secret_ciphertext = ?1, updated_at = ?2
+     WHERE id = ?3"
+}
+
+fn confirm_app_user_totp_sql() -> &'static str {
+    "UPDATE app_users
+     SET totp_secret_ciphertext = ?1,
+         totp_pending_secret_ciphertext = NULL,
+         totp_enabled = 1,
+         totp_confirmed_at = ?2,
+         totp_last_used_step = ?3,
+         updated_at = ?4
+     WHERE id = ?5"
+}
+
+fn consume_app_user_totp_step_sql() -> &'static str {
+    "UPDATE app_users
+     SET totp_last_used_step = ?1, updated_at = ?2
+     WHERE id = ?3
+       AND (totp_last_used_step IS NULL OR totp_last_used_step < ?1)"
+}
+
+fn insert_app_login_challenge_sql() -> &'static str {
+    "INSERT INTO app_login_challenges
+        (id, user_id, token_hash, purpose, expires_at, attempts, last_attempt_at, used_at, created_at,
+         setup_secret_ciphertext, initiated_by_user_id, target_user_id, locked_until)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+}
+
+fn active_app_login_challenge_sql() -> &'static str {
+    "SELECT id, user_id, token_hash, purpose, expires_at, attempts, last_attempt_at, used_at, created_at,
+            setup_secret_ciphertext, initiated_by_user_id, COALESCE(target_user_id, user_id), locked_until
+     FROM app_login_challenges
+     WHERE token_hash = ?1 AND expires_at > ?2 AND used_at IS NULL
+     LIMIT 1"
+}
+
+fn active_app_login_challenge_for_user_sql() -> &'static str {
+    "SELECT id, user_id, token_hash, purpose, expires_at, attempts, last_attempt_at, used_at, created_at,
+            setup_secret_ciphertext, initiated_by_user_id, COALESCE(target_user_id, user_id), locked_until
+     FROM app_login_challenges
+     WHERE COALESCE(target_user_id, user_id) = ?1 AND purpose = ?2 AND expires_at > ?3 AND used_at IS NULL
+     ORDER BY created_at DESC
+     LIMIT 1"
+}
+
+fn consume_app_login_challenge_sql() -> &'static str {
+    "UPDATE app_login_challenges SET used_at = ?1 WHERE id = ?2 AND used_at IS NULL"
+}
+
+fn delete_app_login_challenges_for_user_sql() -> &'static str {
+    "DELETE FROM app_login_challenges WHERE user_id = ?1"
+}
+
 fn billing_rule_select_columns() -> &'static str {
     "id, name, status, priority, multiplier_millis, model_pattern, service_tier,
      user_id, project_id, api_key_id, starts_at, ends_at, created_at, updated_at"
@@ -536,6 +656,35 @@ fn map_app_session(row: &Row<'_>) -> Result<AppUserSession> {
     })
 }
 
+fn map_app_user_totp_state(row: &Row<'_>) -> Result<AppUserTotpState> {
+    Ok(AppUserTotpState {
+        user_id: row.get(0)?,
+        secret_ciphertext: row.get(1)?,
+        pending_secret_ciphertext: row.get(2)?,
+        enabled: row.get::<_, i64>(3)? != 0,
+        confirmed_at: row.get(4)?,
+        last_used_step: row.get(5)?,
+    })
+}
+
+fn map_app_login_challenge(row: &Row<'_>) -> Result<AppLoginChallenge> {
+    Ok(AppLoginChallenge {
+        id: row.get(0)?,
+        user_id: row.get(1)?,
+        token_hash: row.get(2)?,
+        purpose: row.get(3)?,
+        expires_at: row.get(4)?,
+        attempts: row.get(5)?,
+        last_attempt_at: row.get(6)?,
+        used_at: row.get(7)?,
+        created_at: row.get(8)?,
+        setup_secret_ciphertext: row.get(9)?,
+        initiated_by_user_id: row.get(10)?,
+        target_user_id: row.get(11)?,
+        locked_until: row.get(12)?,
+    })
+}
+
 fn map_app_wallet(row: &Row<'_>) -> Result<AppWallet> {
     Ok(AppWallet {
         id: row.get(0)?,
@@ -617,6 +766,24 @@ impl Storage {
 
     pub fn delete_app_user(&self, user_id: &str) -> Result<usize> {
         let tx = self.conn.unchecked_transaction()?;
+        let current = tx
+            .query_row(
+                "SELECT role, status FROM app_users WHERE id = ?1",
+                [user_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((role, status)) = current else {
+            tx.commit()?;
+            return Ok(0);
+        };
+        if role == "admin" && status == "active" {
+            let admin_count: i64 = tx.query_row(active_admin_count_sql(), [], |row| row.get(0))?;
+            if admin_count <= 1 {
+                tx.commit()?;
+                return Ok(0);
+            }
+        }
         tx.execute(delete_api_key_owners_for_user_sql(), [user_id])?;
         tx.execute(delete_app_user_sessions_for_user_sql(), [user_id])?;
         tx.execute(delete_user_model_groups_for_user_sql(), [user_id])?;
@@ -789,6 +956,697 @@ impl Storage {
         Ok(())
     }
 
+    pub fn find_app_user_totp_state(&self, user_id: &str) -> Result<Option<AppUserTotpState>> {
+        self.conn
+            .query_row(
+                app_user_totp_state_sql(),
+                [user_id],
+                map_app_user_totp_state,
+            )
+            .optional()
+    }
+
+    pub fn list_enabled_app_user_totp_ciphertexts(&self) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT totp_secret_ciphertext FROM app_users
+             WHERE totp_enabled = 1 AND totp_secret_ciphertext IS NOT NULL",
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    pub fn update_app_user_totp(
+        &self,
+        user_id: &str,
+        secret_ciphertext: Option<&str>,
+        enabled: bool,
+        confirmed_at: Option<i64>,
+        last_used_step: Option<i64>,
+    ) -> Result<()> {
+        self.conn.execute(
+            update_app_user_totp_sql(),
+            (
+                secret_ciphertext,
+                if enabled { 1_i64 } else { 0_i64 },
+                confirmed_at,
+                last_used_step,
+                now_ts(),
+                user_id,
+            ),
+        )?;
+        Ok(())
+    }
+
+    pub fn update_app_user_totp_pending(
+        &self,
+        user_id: &str,
+        secret_ciphertext: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            update_app_user_totp_pending_sql(),
+            (secret_ciphertext, now_ts(), user_id),
+        )?;
+        Ok(())
+    }
+
+    pub fn confirm_app_user_totp(
+        &self,
+        user_id: &str,
+        secret_ciphertext: &str,
+        confirmed_at: i64,
+        last_used_step: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            confirm_app_user_totp_sql(),
+            (
+                secret_ciphertext,
+                confirmed_at,
+                last_used_step,
+                now_ts(),
+                user_id,
+            ),
+        )?;
+        Ok(())
+    }
+
+    pub fn consume_app_user_totp_step(&self, user_id: &str, step: i64) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute(consume_app_user_totp_step_sql(), (step, now_ts(), user_id))?
+            > 0)
+    }
+
+    pub fn insert_app_login_challenge(&self, challenge: &AppLoginChallenge) -> Result<()> {
+        self.conn.execute(
+            insert_app_login_challenge_sql(),
+            (
+                &challenge.id,
+                &challenge.user_id,
+                &challenge.token_hash,
+                &challenge.purpose,
+                challenge.expires_at,
+                challenge.attempts,
+                challenge.last_attempt_at,
+                challenge.used_at,
+                challenge.created_at,
+                &challenge.setup_secret_ciphertext,
+                &challenge.initiated_by_user_id,
+                &challenge.target_user_id,
+                challenge.locked_until,
+            ),
+        )?;
+        Ok(())
+    }
+
+    pub fn find_active_app_login_challenge(
+        &self,
+        token_hash: &str,
+        now: i64,
+    ) -> Result<Option<AppLoginChallenge>> {
+        self.conn
+            .query_row(
+                active_app_login_challenge_sql(),
+                (token_hash, now),
+                map_app_login_challenge,
+            )
+            .optional()
+    }
+
+    pub fn reserve_app_login_challenge_attempt(
+        &mut self,
+        token_hash: &str,
+        purpose: &str,
+        now: i64,
+    ) -> Result<Option<AppLoginChallenge>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let challenge = tx
+            .query_row(
+                active_app_login_challenge_sql(),
+                (token_hash, now),
+                map_app_login_challenge,
+            )
+            .optional()?;
+        let Some(mut challenge) = challenge else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        if challenge.purpose != purpose
+            || challenge.attempts >= 5
+            || challenge.locked_until.is_some_and(|until| until > now)
+        {
+            tx.commit()?;
+            return Ok(None);
+        }
+        let next_attempts = challenge.attempts.saturating_add(1);
+        let locked_until = (next_attempts >= 3).then_some(now.saturating_add(2));
+        let changed = tx.execute(
+            "UPDATE app_login_challenges
+             SET attempts = ?1, last_attempt_at = ?2, locked_until = ?3
+             WHERE id = ?4 AND used_at IS NULL AND expires_at > ?2 AND attempts = ?5",
+            params![
+                next_attempts,
+                now,
+                locked_until,
+                &challenge.id,
+                challenge.attempts
+            ],
+        )?;
+        if changed != 1 {
+            drop(tx);
+            return Ok(None);
+        }
+        challenge.attempts = next_attempts;
+        challenge.last_attempt_at = Some(now);
+        challenge.locked_until = locked_until;
+        tx.commit()?;
+        Ok(Some(challenge))
+    }
+
+    pub fn find_active_app_login_challenge_for_user(
+        &self,
+        user_id: &str,
+        purpose: &str,
+        now: i64,
+    ) -> Result<Option<AppLoginChallenge>> {
+        self.conn
+            .query_row(
+                active_app_login_challenge_for_user_sql(),
+                (user_id, purpose, now),
+                map_app_login_challenge,
+            )
+            .optional()
+    }
+
+    pub fn consume_app_login_challenge(&self, id: &str, ts: i64) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute(consume_app_login_challenge_sql(), (ts, id))?
+            > 0)
+    }
+
+    pub fn delete_app_login_challenges_for_user(&self, user_id: &str) -> Result<()> {
+        self.conn
+            .execute(delete_app_login_challenges_for_user_sql(), [user_id])?;
+        Ok(())
+    }
+
+    pub fn replace_app_login_challenge(&mut self, challenge: &AppLoginChallenge) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE app_login_challenges SET used_at = ?1
+             WHERE COALESCE(target_user_id, user_id) = ?2 AND purpose = ?3
+               AND used_at IS NULL",
+            params![
+                challenge.created_at,
+                &challenge.target_user_id,
+                &challenge.purpose
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM app_login_challenges
+             WHERE expires_at <= ?1 OR (used_at IS NOT NULL AND used_at < ?2)",
+            params![
+                challenge.created_at,
+                challenge.created_at.saturating_sub(86_400)
+            ],
+        )?;
+        tx.execute(
+            insert_app_login_challenge_sql(),
+            params![
+                &challenge.id,
+                &challenge.user_id,
+                &challenge.token_hash,
+                &challenge.purpose,
+                challenge.expires_at,
+                challenge.attempts,
+                challenge.last_attempt_at,
+                challenge.used_at,
+                challenge.created_at,
+                &challenge.setup_secret_ciphertext,
+                &challenge.initiated_by_user_id,
+                &challenge.target_user_id,
+                challenge.locked_until,
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM app_login_challenges WHERE id IN (
+                SELECT id FROM app_login_challenges ORDER BY created_at DESC LIMIT -1 OFFSET 10000
+             )",
+            [],
+        )?;
+        tx.commit()
+    }
+
+    pub fn claim_first_app_admin_with_challenge(
+        &mut self,
+        user: &AppUser,
+        challenge: &AppLoginChallenge,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let admin_count: i64 = tx.query_row(active_admin_count_sql(), [], |row| row.get(0))?;
+        if admin_count > 0 {
+            tx.commit()?;
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO app_users (
+                id, username, display_name, password_hash, role, status,
+                created_at, updated_at, last_login_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                &user.id,
+                &user.username,
+                &user.display_name,
+                &user.password_hash,
+                &user.role,
+                &user.status,
+                user.created_at,
+                user.updated_at,
+                user.last_login_at,
+            ],
+        )?;
+        tx.execute(
+            insert_app_login_challenge_sql(),
+            params![
+                &challenge.id,
+                &challenge.user_id,
+                &challenge.token_hash,
+                &challenge.purpose,
+                challenge.expires_at,
+                challenge.attempts,
+                challenge.last_attempt_at,
+                challenge.used_at,
+                challenge.created_at,
+                &challenge.setup_secret_ciphertext,
+                &challenge.initiated_by_user_id,
+                &challenge.target_user_id,
+                challenge.locked_until,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn complete_app_totp_login(
+        &mut self,
+        challenge_id: &str,
+        user_id: &str,
+        step: i64,
+        session: &AppUserSession,
+        now: i64,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let challenge_changed = tx.execute(
+            "UPDATE app_login_challenges SET used_at = ?1
+             WHERE id = ?2 AND user_id = ?3 AND purpose = 'login'
+               AND used_at IS NULL AND expires_at > ?1",
+            params![now, challenge_id, user_id],
+        )?;
+        let step_changed = tx.execute(
+            "UPDATE app_users SET totp_last_used_step = ?1, last_login_at = ?2, updated_at = ?2
+             WHERE id = ?3 AND status = 'active' AND totp_enabled = 1
+               AND (totp_last_used_step IS NULL OR totp_last_used_step < ?1)",
+            params![step, now, user_id],
+        )?;
+        if challenge_changed != 1 || step_changed != 1 {
+            drop(tx);
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO app_user_sessions (
+                id, user_id, token_hash, expires_at, created_at, last_seen_at, revoked_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                &session.id,
+                &session.user_id,
+                &session.token_hash,
+                session.expires_at,
+                session.created_at,
+                session.last_seen_at,
+                session.revoked_at
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn complete_app_totp_setup(
+        &mut self,
+        challenge: &AppLoginChallenge,
+        step: i64,
+        session: Option<&AppUserSession>,
+        current_session_id: Option<&str>,
+        bootstrap: bool,
+        now: i64,
+    ) -> Result<bool> {
+        let Some(secret_ciphertext) = challenge.setup_secret_ciphertext.as_deref() else {
+            return Ok(false);
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE app_login_challenges SET used_at = ?1
+             WHERE id = ?2 AND used_at IS NULL AND expires_at > ?1
+               AND purpose = ?3 AND COALESCE(target_user_id, user_id) = ?4",
+            params![
+                now,
+                &challenge.id,
+                &challenge.purpose,
+                &challenge.target_user_id
+            ],
+        )?;
+        if changed != 1 {
+            drop(tx);
+            return Ok(false);
+        }
+        let enabled = tx.execute(
+            "UPDATE app_users
+             SET totp_secret_ciphertext = ?1, totp_pending_secret_ciphertext = NULL,
+                 totp_enabled = 1, totp_confirmed_at = ?2, totp_last_used_step = ?3,
+                 last_login_at = CASE WHEN ?4 THEN ?2 ELSE last_login_at END, updated_at = ?2
+             WHERE id = ?5 AND status = 'active'",
+            params![
+                secret_ciphertext,
+                now,
+                step,
+                session.is_some(),
+                &challenge.target_user_id
+            ],
+        )?;
+        if enabled != 1 {
+            drop(tx);
+            return Ok(false);
+        }
+        if let Some(current_session_id) = current_session_id {
+            tx.execute(
+                "UPDATE app_user_sessions SET revoked_at = ?1
+                 WHERE user_id = ?2 AND id <> ?3 AND revoked_at IS NULL",
+                params![now, &challenge.target_user_id, current_session_id],
+            )?;
+        } else if session.is_none() {
+            tx.execute(
+                "UPDATE app_user_sessions SET revoked_at = ?1
+                 WHERE user_id = ?2 AND revoked_at IS NULL",
+                params![now, &challenge.target_user_id],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM app_login_challenges
+             WHERE COALESCE(target_user_id, user_id) = ?1 AND id <> ?2",
+            params![&challenge.target_user_id, &challenge.id],
+        )?;
+        if bootstrap {
+            tx.execute(
+                "INSERT INTO app_settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params!["web.auth.mode", "accounts", now],
+            )?;
+            tx.execute(
+                "INSERT INTO app_settings (key, value, updated_at) VALUES (?1, '', ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = '', updated_at = excluded.updated_at",
+                params!["web.auth.password_hash", now],
+            )?;
+        }
+        if let Some(session) = session {
+            tx.execute(
+                "INSERT INTO app_user_sessions (
+                    id, user_id, token_hash, expires_at, created_at, last_seen_at, revoked_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    &session.id,
+                    &session.user_id,
+                    &session.token_hash,
+                    session.expires_at,
+                    session.created_at,
+                    session.last_seen_at,
+                    session.revoked_at
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn auth_throttle_state(
+        &self,
+        scope: &str,
+        subject_hash: &str,
+    ) -> Result<Option<AppAuthThrottleState>> {
+        self.conn
+            .query_row(
+                "SELECT attempts, locked_until FROM app_auth_throttle_buckets
+                 WHERE scope = ?1 AND subject_hash = ?2",
+                params![scope, subject_hash],
+                |row| {
+                    Ok(AppAuthThrottleState {
+                        attempts: row.get(0)?,
+                        locked_until: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn reserve_auth_attempt(
+        &mut self,
+        scope: &str,
+        subject_hash: &str,
+        now: i64,
+        window_seconds: i64,
+        threshold: i64,
+        base_lock_seconds: i64,
+        max_lock_seconds: i64,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let current = tx
+            .query_row(
+                "SELECT attempts, window_started_at, locked_until
+                 FROM app_auth_throttle_buckets WHERE scope = ?1 AND subject_hash = ?2",
+                params![scope, subject_hash],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if current
+            .as_ref()
+            .and_then(|(_, _, locked_until)| *locked_until)
+            .is_some_and(|locked_until| locked_until > now)
+        {
+            tx.commit()?;
+            return Ok(false);
+        }
+        let (attempts, window_started_at) = match current {
+            Some((attempts, started, _)) if now.saturating_sub(started) < window_seconds => {
+                (attempts.saturating_add(1), started)
+            }
+            _ => (1, now),
+        };
+        let locked_until = if attempts >= threshold {
+            let exponent = u32::try_from((attempts - threshold).min(20)).unwrap_or(20);
+            let duration = base_lock_seconds.saturating_mul(2_i64.saturating_pow(exponent));
+            Some(now.saturating_add(duration.min(max_lock_seconds)))
+        } else {
+            None
+        };
+        tx.execute(
+            "INSERT INTO app_auth_throttle_buckets
+                (scope, subject_hash, attempts, window_started_at, locked_until, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(scope, subject_hash) DO UPDATE SET
+                attempts = excluded.attempts, window_started_at = excluded.window_started_at,
+                locked_until = excluded.locked_until, updated_at = excluded.updated_at",
+            params![
+                scope,
+                subject_hash,
+                attempts,
+                window_started_at,
+                locked_until,
+                now
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM app_auth_throttle_buckets WHERE updated_at < ?1
+             OR (scope, subject_hash) IN (
+                SELECT scope, subject_hash FROM app_auth_throttle_buckets
+                ORDER BY updated_at DESC LIMIT -1 OFFSET 10000
+             )",
+            params![now.saturating_sub(86_400)],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn clear_auth_throttle(&self, scope: &str, subject_hash: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM app_auth_throttle_buckets WHERE scope = ?1 AND subject_hash = ?2",
+            params![scope, subject_hash],
+        )?;
+        Ok(())
+    }
+
+    pub fn revoke_user_security_state(
+        &mut self,
+        user_id: &str,
+        keep_session_id: Option<&str>,
+        now: i64,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        if let Some(session_id) = keep_session_id {
+            tx.execute(
+                "UPDATE app_user_sessions SET revoked_at = ?1
+                 WHERE user_id = ?2 AND id <> ?3 AND revoked_at IS NULL",
+                params![now, user_id, session_id],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE app_user_sessions SET revoked_at = ?1
+                 WHERE user_id = ?2 AND revoked_at IS NULL",
+                params![now, user_id],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM app_login_challenges
+             WHERE COALESCE(target_user_id, user_id) = ?1 OR initiated_by_user_id = ?1",
+            [user_id],
+        )?;
+        tx.commit()
+    }
+
+    pub fn disable_totp_and_revoke_user(&mut self, user_id: &str, now: i64) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE app_users SET totp_secret_ciphertext = NULL,
+                 totp_pending_secret_ciphertext = NULL, totp_enabled = 0,
+                 totp_confirmed_at = NULL, totp_last_used_step = NULL, updated_at = ?1
+             WHERE id = ?2",
+            params![now, user_id],
+        )?;
+        if changed != 1 {
+            drop(tx);
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE app_user_sessions SET revoked_at = ?1
+             WHERE user_id = ?2 AND revoked_at IS NULL",
+            params![now, user_id],
+        )?;
+        tx.execute(
+            "DELETE FROM app_login_challenges
+             WHERE COALESCE(target_user_id, user_id) = ?1 OR initiated_by_user_id = ?1",
+            [user_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn update_password_and_revoke_other_sessions(
+        &mut self,
+        user_id: &str,
+        password_hash: &str,
+        keep_session_id: Option<&str>,
+        now: i64,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE app_users SET password_hash = ?1, updated_at = ?2 WHERE id = ?3",
+            params![password_hash, now, user_id],
+        )?;
+        if changed != 1 {
+            drop(tx);
+            return Ok(false);
+        }
+        if let Some(session_id) = keep_session_id {
+            tx.execute(
+                "UPDATE app_user_sessions SET revoked_at = ?1
+                 WHERE user_id = ?2 AND id <> ?3 AND revoked_at IS NULL",
+                params![now, user_id, session_id],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE app_user_sessions SET revoked_at = ?1
+                 WHERE user_id = ?2 AND revoked_at IS NULL",
+                params![now, user_id],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM app_login_challenges
+             WHERE COALESCE(target_user_id, user_id) = ?1 OR initiated_by_user_id = ?1",
+            [user_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn update_role_status_and_revoke_user(
+        &mut self,
+        user_id: &str,
+        role: &str,
+        status: &str,
+        now: i64,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let current = tx
+            .query_row(
+                "SELECT role, status, totp_enabled FROM app_users WHERE id = ?1",
+                [user_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)? != 0,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((current_role, current_status, totp_enabled)) = current else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        if current_role != "admin" && role == "admin" && !totp_enabled {
+            tx.commit()?;
+            return Ok(false);
+        }
+        if current_role == "admin"
+            && current_status == "active"
+            && (role != "admin" || status != "active")
+        {
+            let admin_count: i64 = tx.query_row(active_admin_count_sql(), [], |row| row.get(0))?;
+            if admin_count <= 1 {
+                tx.commit()?;
+                return Ok(false);
+            }
+        }
+        tx.execute(
+            "UPDATE app_users SET role = ?1, status = ?2, updated_at = ?3 WHERE id = ?4",
+            params![role, status, now, user_id],
+        )?;
+        tx.execute(
+            "UPDATE app_user_sessions SET revoked_at = ?1
+             WHERE user_id = ?2 AND revoked_at IS NULL",
+            params![now, user_id],
+        )?;
+        tx.execute(
+            "DELETE FROM app_login_challenges
+             WHERE COALESCE(target_user_id, user_id) = ?1 OR initiated_by_user_id = ?1",
+            [user_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn revoke_app_user_sessions_for_user(&self, user_id: &str, ts: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE app_user_sessions SET revoked_at = ?1
+             WHERE user_id = ?2 AND revoked_at IS NULL",
+            (ts, user_id),
+        )?;
+        Ok(())
+    }
+
     pub fn insert_app_user_session(&self, session: &AppUserSession) -> Result<()> {
         self.conn.execute(
             "INSERT INTO app_user_sessions (
@@ -835,6 +1693,20 @@ impl Storage {
             .optional()
     }
 
+    pub fn find_active_app_session_user_by_id(
+        &self,
+        session_id: &str,
+        now: i64,
+    ) -> Result<Option<AppSessionUserWithWallet>> {
+        self.conn
+            .query_row(
+                active_app_session_user_with_wallet_by_id_sql(),
+                (session_id, now),
+                map_app_session_user_with_wallet,
+            )
+            .optional()
+    }
+
     pub fn touch_app_user_session(&self, session_id: &str, ts: i64) -> Result<()> {
         self.conn
             .execute(touch_app_user_session_sql(), (ts, session_id))?;
@@ -847,6 +1719,24 @@ impl Storage {
             (ts, token_hash),
         )?;
         Ok(())
+    }
+
+    pub fn list_app_user_sessions(&self, user_id: &str) -> Result<Vec<AppUserSession>> {
+        let mut statement = self.conn.prepare(app_user_sessions_by_user_sql())?;
+        let rows = statement.query_map(params![user_id, now_ts()], map_app_session)?;
+        rows.collect()
+    }
+
+    pub fn revoke_app_user_session(
+        &self,
+        session_id: &str,
+        user_id: &str,
+        ts: i64,
+    ) -> Result<bool> {
+        Ok(self
+            .conn
+            .execute(revoke_app_user_session_sql(), (ts, session_id, user_id))?
+            > 0)
     }
 
     pub fn insert_app_project(&self, project: &AppProject) -> Result<()> {

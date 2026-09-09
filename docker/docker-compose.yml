@@ -9,14 +9,16 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       CODEXMANAGER_DB_PATH: /data/codexmanager.db
       CODEXMANAGER_RPC_TOKEN_FILE: /data/codexmanager.rpc-token
+      CODEXMANAGER_WEB_BOOTSTRAP_PASSWORD: ${CODEXMANAGER_WEB_BOOTSTRAP_PASSWORD:?Set a one-time bootstrap password}
+      CODEXMANAGER_WEB_TOTP_ENCRYPTION_KEY: ${CODEXMANAGER_WEB_TOTP_ENCRYPTION_KEY:?Set a stable 32-byte Base64 or 64-hex TOTP key}
       CODEXMANAGER_GATEWAY_TRACE_STDOUT: "1"
       CODEXMANAGER_GATEWAY_ERROR_STDOUT: "1"
       # Optional mitigation for same key/path/model head-of-line gate waits:
       # CODEXMANAGER_REQUEST_GATE_WAIT_TIMEOUT_MS: "5000"
     volumes:
       - codexmanager-data:/data
-    ports:
-      - "48760:48760"
+    expose:
+      - "48760"
 
   codexmanager-web:
     build:
@@ -28,11 +30,15 @@ services:
         condition: service_healthy
     environment:
       CODEXMANAGER_WEB_ADDR: 0.0.0.0:48761
+      CODEXMANAGER_WEB_PUBLIC_BASE_URL: ${CODEXMANAGER_WEB_PUBLIC_BASE_URL:?Set the public HTTPS URL, for example https://codex.example.com}
       CODEXMANAGER_WEB_NO_SPAWN_SERVICE: "1"
       CODEXMANAGER_SERVICE_ADDR: codexmanager-service:48760
       TZ: ${TZ:-Asia/Shanghai}
       CODEXMANAGER_DB_PATH: /data/codexmanager.db
       CODEXMANAGER_RPC_TOKEN_FILE: /data/codexmanager.rpc-token
+      CODEXMANAGER_WEB_BOOTSTRAP_PASSWORD: ${CODEXMANAGER_WEB_BOOTSTRAP_PASSWORD:?Set a one-time bootstrap password}
+      CODEXMANAGER_WEB_TOTP_ENCRYPTION_KEY: ${CODEXMANAGER_WEB_TOTP_ENCRYPTION_KEY:?Set a stable 32-byte Base64 or 64-hex TOTP key}
+      CODEXMANAGER_WEB_TRUSTED_PROXY_CIDRS: ${CODEXMANAGER_WEB_TRUSTED_PROXY_CIDRS:-}
       CODEXMANAGER_WEB_NO_OPEN: "1"
       CODEXMANAGER_GATEWAY_TRACE_STDOUT: "1"
       CODEXMANAGER_GATEWAY_ERROR_STDOUT: "1"
@@ -41,7 +47,7 @@ services:
     volumes:
       - codexmanager-data:/data
     ports:
-      - "48761:48761"
+      - "${CODEXMANAGER_WEB_PUBLISH_HOST:-127.0.0.1}:48761:48761"
 
 volumes:
   codexmanager-data:

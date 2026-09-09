@@ -1,28 +1,6 @@
 use super::*;
 use axum::body::to_bytes;
 
-/// 函数 `web_auth_cookie_is_scoped_by_process_session_key`
-///
-/// 作者: gaohongshun
-///
-/// 时间: 2026-04-02
-///
-/// # 参数
-/// 无
-///
-/// # 返回
-/// 无
-#[test]
-fn web_auth_cookie_is_scoped_by_process_session_key() {
-    let password_hash = "sha256$abc$def";
-    let rpc_token = "rpc-token";
-
-    let first = auth::build_web_auth_cookie_value(password_hash, rpc_token, "session-a");
-    let second = auth::build_web_auth_cookie_value(password_hash, rpc_token, "session-b");
-
-    assert_ne!(first, second);
-}
-
 /// 函数 `parse_cookie_value_returns_matching_cookie`
 ///
 /// 作者: gaohongshun
@@ -109,6 +87,34 @@ fn browser_open_addr_maps_all_interfaces_to_loopback() {
         browser_open_addr("192.168.1.8:48761").as_deref(),
         Some("192.168.1.8:48761")
     );
+}
+
+#[test]
+fn web_addr_loopback_detection_handles_ipv4_ipv6_and_public_hosts() {
+    assert!(web_addr_is_loopback("127.0.0.1:48760"));
+    assert!(web_addr_is_loopback("localhost:48760"));
+    assert!(web_addr_is_loopback("[::1]:48760"));
+    assert!(!web_addr_is_loopback("0.0.0.0:48760"));
+    assert!(!web_addr_is_loopback("192.168.1.8:48760"));
+}
+
+#[test]
+fn public_bootstrap_requires_an_admin_or_persisted_bootstrap_password() {
+    assert!(!web_bootstrap_is_configured(false, None));
+    assert!(!web_bootstrap_is_configured(false, Some("   ")));
+    assert!(web_bootstrap_is_configured(false, Some("sha256$stored")));
+    assert!(web_bootstrap_is_configured(true, None));
+}
+
+#[test]
+fn public_base_url_requires_a_parseable_https_origin() {
+    assert_eq!(
+        public_https_origin("https://Example.COM:8443/admin").as_deref(),
+        Some("https://example.com:8443")
+    );
+    assert!(public_https_origin("http://example.com").is_none());
+    assert!(public_https_origin("https:///missing-host").is_none());
+    assert!(public_https_origin("not-a-url").is_none());
 }
 
 /// 函数 `runtime_info_reports_web_gateway_capabilities`

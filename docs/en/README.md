@@ -180,7 +180,7 @@ If this project has helped you, donations are welcome!
 | First launch, deployment, Docker, or macOS allowlisting | [Runtime and Deployment Guide](report/runtime-and-deployment-guide.md) |
 | Configure Codex CLI / ccswitch, `auth.json`, and `config.toml` | [Runtime and Deployment Guide](report/runtime-and-deployment-guide.md#connect-through-ccswitch) |
 | Import an account from ChatGPT `/api/auth/session` without logging in through Codex | [Chinese guide: Import ChatGPT auth session](../zh-CN/report/不登陆Codex使用ChatGPT-auth-session导入账号.md) |
-| Configure ports, proxy, database, Web password, and environment variables | [Environment and Runtime Configuration](report/environment-and-runtime-config.md) |
+| Configure ports, proxy, database, account authentication, and environment variables | [Environment and Runtime Configuration](report/environment-and-runtime-config.md) |
 | Troubleshoot account routing, import failures, challenge interception, or request errors | [FAQ and Account Routing Rules](report/faq-and-account-routing-rules.md) |
 | Understand why background jobs skip, disable, or deactivate accounts | [Background Task Account Skip Notes](report/background-task-account-skip-notes.md) |
 | Manage models, pricing, routes, instructions policy, and local cache exports | [Chinese guide: Model Catalog V2 Management and Billing](../zh-CN/report/模型目录V2管理与计费说明.md) |

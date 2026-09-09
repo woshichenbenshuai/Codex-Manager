@@ -111,7 +111,6 @@ export function readChatgptAuthTokensRefreshResult(
   payload: unknown
 ): ChatgptAuthTokensRefreshResult {
   return {
-    accessToken: readStringField(payload, "accessToken"),
     chatgptAccountId: readStringField(payload, "chatgptAccountId"),
     chatgptPlanType: readNullableStringField(payload, "chatgptPlanType"),
     hasSubscription: readNullableBooleanField(payload, "hasSubscription"),

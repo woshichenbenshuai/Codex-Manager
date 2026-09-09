@@ -3279,12 +3279,7 @@ fn rpc_chatgpt_auth_tokens_refresh_updates_access_token() {
             .and_then(|value| value.as_i64()),
         Some(1_776_655_889)
     );
-    assert_eq!(
-        refresh_result
-            .get("accessToken")
-            .and_then(|value| value.as_str()),
-        Some(refreshed_access_token.as_str())
-    );
+    assert!(refresh_result.get("accessToken").is_none());
 
     let refresh_body = refresh_rx
         .recv_timeout(Duration::from_secs(2))
@@ -4212,6 +4207,10 @@ fn rpc_accepts_loopback_origin() {
 #[test]
 fn rpc_account_manager_assigns_key_and_bills_wallet() {
     let ctx = RpcTestContext::new("rpc-account-manager-billing");
+    let _totp_key = EnvGuard::set(
+        "CODEXMANAGER_WEB_TOTP_ENCRYPTION_KEY",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    );
 
     let call_rpc_response =
         |id: i64, method: &str, params: Option<serde_json::Value>| -> serde_json::Value {
@@ -4254,8 +4253,9 @@ fn rpc_account_manager_assigns_key_and_bills_wallet() {
             "role": "member"
         })),
     );
-    let user_id = user["id"].as_str().expect("user id").to_string();
-    assert_eq!(user["wallet"]["availableCreditMicros"], 0);
+    let user_id = user["user"]["id"].as_str().expect("user id").to_string();
+    assert_eq!(user["user"]["wallet"]["availableCreditMicros"], 0);
+    assert!(user["totpSetup"].is_null());
 
     let admin = call_rpc(
         206,
@@ -4267,8 +4267,9 @@ fn rpc_account_manager_assigns_key_and_bills_wallet() {
             "role": "admin"
         })),
     );
-    let admin_id = admin["id"].as_str().expect("admin id").to_string();
-    assert!(admin["wallet"].is_null());
+    let admin_id = admin["user"]["id"].as_str().expect("admin id").to_string();
+    assert!(admin["user"]["wallet"].is_null());
+    assert_eq!(admin["totpSetup"]["userId"], admin_id);
 
     let api_key = call_rpc(
         202,

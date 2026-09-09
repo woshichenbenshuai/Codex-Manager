@@ -87,7 +87,12 @@ import { useI18n } from "@/lib/i18n/provider";
 import { useAppStore } from "@/lib/store/useAppStore";
 import { cn } from "@/lib/utils";
 import { formatCompactNumber } from "@/lib/utils/usage";
-import type { AccountManagerStatus, AppUser, MemberDashboardSummary } from "@/types";
+import type {
+  AccountManagerStatus,
+  AppUser,
+  AppUserTotpSetup,
+  MemberDashboardSummary,
+} from "@/types";
 
 const ACCOUNT_MANAGER_QUERY_KEYS = {
   status: ["account-manager", "status"] as const,
@@ -198,7 +203,7 @@ function modeLabel(mode: string, t: (message: string) => string): string {
     case "accounts":
       return t("账号登录");
     case "password":
-      return t("共享密码");
+      return t("待迁移的旧密码模式");
     case "none":
       return t("未开启");
     default:
@@ -545,7 +550,10 @@ export default function AccountManagerPage() {
     password: "",
     role: "member",
     initialBalance: "0",
+    actorPassword: "",
   });
+  const [createdAdminTotp, setCreatedAdminTotp] = useState<AppUserTotpSetup | null>(null);
+  const [createdAdminTotpCode, setCreatedAdminTotpCode] = useState("");
   const [topUpDraft, setTopUpDraft] = useState({
     amount: "0",
     note: "",
@@ -623,6 +631,9 @@ export default function AccountManagerPage() {
       if (!username) throw new Error(t("请输入用户名"));
       if (!password) throw new Error(t("请输入初始密码"));
       const creatingAdmin = createDraft.role === "admin";
+      if (creatingAdmin && !createDraft.actorPassword) {
+        throw new Error(t("请输入当前管理员密码"));
+      }
       const initialBalanceCreditMicros = creatingAdmin
         ? null
         : parseCreditInput(createDraft.initialBalance);
@@ -635,15 +646,24 @@ export default function AccountManagerPage() {
         displayName: createDraft.displayName.trim() || null,
         role: createDraft.role,
         initialBalanceCreditMicros,
+        actorPassword: creatingAdmin ? createDraft.actorPassword : null,
       });
     },
-    onSuccess: async () => {
+    onSuccess: async (result) => {
+      if (result.totpSetup) {
+        setCreatedAdminTotp(result.totpSetup);
+        setCreatedAdminTotpCode("");
+        await refreshAll();
+        toast.success(t("管理员账号已创建，请立即完成验证器绑定"));
+        return;
+      }
       setCreateDraft({
         username: "",
         displayName: "",
         password: "",
         role: "member",
         initialBalance: "0",
+        actorPassword: "",
       });
       setCreateDialogOpen(false);
       await refreshAll();
@@ -721,6 +741,46 @@ export default function AccountManagerPage() {
     },
     onError: (error: unknown) => {
       toast.error(`${t("删除失败")}: ${getAppErrorMessage(error)}`);
+    },
+  });
+
+  const confirmCreatedAdminTotp = useMutation({
+    mutationFn: async () => {
+      if (!createdAdminTotp) throw new Error(t("绑定挑战已失效，请重新开始"));
+      await appClient.confirmTotpSetup(
+        createdAdminTotp.userId,
+        createdAdminTotp.challengeToken,
+        createdAdminTotpCode,
+      );
+    },
+    onSuccess: async () => {
+      setCreatedAdminTotp(null);
+      setCreatedAdminTotpCode("");
+      setCreateDraft({
+        username: "",
+        displayName: "",
+        password: "",
+        role: "member",
+        initialBalance: "0",
+        actorPassword: "",
+      });
+      setCreateDialogOpen(false);
+      await refreshAll();
+      toast.success(t("管理员验证器已启用"));
+    },
+    onError: (error: unknown) => {
+      toast.error(`${t("验证器绑定失败")}: ${getAppErrorMessage(error)}`);
+    },
+  });
+
+  const resetTotpMutation = useMutation({
+    mutationFn: (userId: string) => appClient.resetAppUserTotp(userId),
+    onSuccess: async () => {
+      await refreshAll();
+      toast.success(t("验证器已重置，目标账号的旧会话已失效"));
+    },
+    onError: (error: unknown) => {
+      toast.error(`${t("验证器重置失败")}: ${getAppErrorMessage(error)}`);
     },
   });
 
@@ -859,6 +919,8 @@ export default function AccountManagerPage() {
                 <TableHead className="px-4">{t("用户名")}</TableHead>
                 <TableHead>{t("角色")}</TableHead>
                 <TableHead>{t("状态")}</TableHead>
+                <TableHead>{t("验证器")}</TableHead>
+                <TableHead>{t("绑定时间")}</TableHead>
                 <TableHead>{t("可用额度")}</TableHead>
                 <TableHead>{t("最后登录")}</TableHead>
                 <TableHead>{t("账号 ID")}</TableHead>
@@ -868,14 +930,14 @@ export default function AccountManagerPage() {
             <TableBody>
               {usersQuery.isLoading ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="h-24 text-center">
+                  <TableCell colSpan={9} className="h-24 text-center">
                     {t("读取中...")}
                   </TableCell>
                 </TableRow>
               ) : users.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={7}
+                    colSpan={9}
                     className="h-24 text-center text-muted-foreground"
                   >
                     <Empty className="min-h-20 border-0 bg-transparent">
@@ -922,6 +984,12 @@ export default function AccountManagerPage() {
                       </Badge>
                     </TableCell>
                     <TableCell>{statusLabel(user.status, t)}</TableCell>
+                    <TableCell>
+                      <Badge variant={user.totpEnabled ? "default" : "outline"}>
+                        {user.totpEnabled ? t("已绑定") : t("未绑定")}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>{formatTime(user.totpConfirmedAt, t, locale)}</TableCell>
                     <TableCell>
                       {isAdminUser(user) ? (
                         <Badge variant="outline">{t("不参与分发")}</Badge>
@@ -975,6 +1043,20 @@ export default function AccountManagerPage() {
                         <Button
                           variant="ghost"
                           size="sm"
+                          className="gap-1"
+                          disabled={!canAccessManagementRpc || resetTotpMutation.isPending}
+                          onClick={() => {
+                            if (window.confirm(t("重置该账号验证器并吊销其全部会话？"))) {
+                              resetTotpMutation.mutate(user.id);
+                            }
+                          }}
+                        >
+                          <ShieldCheck className="h-3.5 w-3.5" />
+                          {t("重置验证器")}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
                           className="gap-1 text-destructive hover:text-destructive"
                           disabled={!canAccessManagementRpc}
                           onClick={() => setDeleteUserId(user.id)}
@@ -1001,6 +1083,41 @@ export default function AccountManagerPage() {
             </DialogDescription>
           </DialogHeader>
           <form className="grid gap-4" onSubmit={handleCreateUser}>
+            {createdAdminTotp ? (
+              <div className="grid gap-4 rounded-xl border bg-muted/30 p-4">
+                <div className="text-sm text-muted-foreground">
+                  {t("请将密钥添加到验证器应用；密钥仅在本次绑定流程显示。")}
+                </div>
+                <code className="break-all rounded-lg bg-background p-3 text-xs">
+                  {createdAdminTotp.secret}
+                </code>
+                <div className="break-all text-xs text-muted-foreground">
+                  {createdAdminTotp.otpauthUri}
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="created-admin-totp-code">{t("6 位动态验证码")}</Label>
+                  <Input
+                    id="created-admin-totp-code"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={createdAdminTotpCode}
+                    onChange={(event) => setCreatedAdminTotpCode(event.target.value.replace(/\D/g, ""))}
+                    placeholder="123456"
+                    autoFocus
+                  />
+                </div>
+                <DialogFooter>
+                  <Button
+                    type="button"
+                    onClick={() => confirmCreatedAdminTotp.mutate()}
+                    disabled={createdAdminTotpCode.length !== 6 || confirmCreatedAdminTotp.isPending}
+                  >
+                    {confirmCreatedAdminTotp.isPending ? t("验证中...") : t("完成验证器绑定")}
+                  </Button>
+                </DialogFooter>
+              </div>
+            ) : null}
+            <div className={cn("grid gap-4", createdAdminTotp && "hidden")}>
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="grid gap-1.5">
                 <Label htmlFor="app-user-username">{t("用户名")}</Label>
@@ -1046,6 +1163,23 @@ export default function AccountManagerPage() {
                 placeholder="password123"
               />
             </div>
+            {createDraft.role === "admin" ? (
+              <div className="grid gap-1.5">
+                <Label htmlFor="app-user-actor-password">{t("当前管理员密码")}</Label>
+                <Input
+                  id="app-user-actor-password"
+                  type="password"
+                  value={createDraft.actorPassword}
+                  onChange={(event) =>
+                    setCreateDraft((draft) => ({
+                      ...draft,
+                      actorPassword: event.target.value,
+                    }))
+                  }
+                  placeholder={t("用于授权创建管理员并发起验证器绑定")}
+                />
+              </div>
+            ) : null}
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="grid gap-1.5">
                 <Label>{t("角色")}</Label>
@@ -1107,6 +1241,7 @@ export default function AccountManagerPage() {
                 {createUser.isPending ? t("创建中...") : t("创建账号")}
               </Button>
             </DialogFooter>
+            </div>
           </form>
         </DialogContent>
       </Dialog>

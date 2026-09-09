@@ -1,11 +1,17 @@
+use argon2::{
+    password_hash::{rand_core::OsRng as PasswordOsRng, PasswordHash, PasswordHasher, SaltString},
+    Argon2, PasswordVerifier,
+};
 use codexmanager_core::storage::{
-    now_ts, ApiKeyOwner, AppUser, AppUserAccessSummary, AppUserSession, AppWallet,
-    AppWalletLedgerEntry, BillingRule, PublicAppUserWithWallet, Storage,
+    now_ts, ApiKeyOwner, AppLoginChallenge, AppUser, AppUserAccessSummary, AppUserSession,
+    AppWallet, AppWalletLedgerEntry, BillingRule, PublicAppUserWithWallet, Storage,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
 use crate::app_settings::{
     get_persisted_app_setting, normalize_optional_text, parse_bool_with_default,
@@ -19,6 +25,12 @@ pub const WEB_AUTH_MODE_NONE: &str = "none";
 pub const WEB_AUTH_MODE_PASSWORD: &str = "password";
 pub const WEB_AUTH_MODE_ACCOUNTS: &str = "accounts";
 const SESSION_TTL_SECONDS: i64 = 60 * 60 * 24 * 14;
+const LOGIN_CHALLENGE_PURPOSE: &str = "login";
+const SETUP_CHALLENGE_PURPOSE: &str = "totp_setup";
+const LOGIN_SETUP_CHALLENGE_PURPOSE: &str = "totp_login_setup";
+const BOOTSTRAP_SETUP_CHALLENGE_PURPOSE: &str = "bootstrap_totp_setup";
+const MAX_PASSWORD_BYTES: usize = 256;
+const AUTH_THROTTLED_ERROR: &str = "登录尝试过于频繁，请稍后再试";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +43,8 @@ pub struct AppUserPublicResult {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_login_at: Option<i64>,
+    pub totp_enabled: bool,
+    pub totp_confirmed_at: Option<i64>,
     pub wallet: Option<AppWalletResult>,
 }
 
@@ -56,12 +70,90 @@ pub struct AppLoginResult {
     pub user: AppUserPublicResult,
 }
 
+#[derive(Clone)]
+pub enum AppLoginAttempt {
+    Authenticated(AppLoginResult),
+    TotpChallenge {
+        challenge_token: String,
+        user: AppUserPublicResult,
+        error: Option<String>,
+    },
+    TotpSetup {
+        challenge_token: String,
+        setup: AppUserTotpSetupResult,
+    },
+}
+
+impl std::fmt::Debug for AppLoginAttempt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Authenticated(result) => f
+                .debug_tuple("Authenticated")
+                .field(&format_args!("user_id={}", result.user.id))
+                .finish(),
+            Self::TotpChallenge { user, error, .. } => f
+                .debug_struct("TotpChallenge")
+                .field("challenge_token", &"[REDACTED]")
+                .field("user_id", &user.id)
+                .field("error", error)
+                .finish(),
+            Self::TotpSetup { setup, .. } => f
+                .debug_struct("TotpSetup")
+                .field("challenge_token", &"[REDACTED]")
+                .field("user_id", &setup.user_id)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUserTotpSetupResult {
+    pub user_id: String,
+    pub username: String,
+    pub secret: String,
+    pub otpauth_uri: String,
+    pub challenge_token: Option<String>,
+}
+
+impl std::fmt::Debug for AppUserTotpSetupResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppUserTotpSetupResult")
+            .field("user_id", &self.user_id)
+            .field("username", &self.username)
+            .field("secret", &"[REDACTED]")
+            .field("otpauth_uri", &"[REDACTED]")
+            .field(
+                "challenge_token",
+                &self.challenge_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUserTotpStatusResult {
+    pub enabled: bool,
+    pub confirmed_at: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSessionUserResult {
     pub session_id: String,
     pub expires_at: i64,
     pub user: AppUserPublicResult,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUserSessionResult {
+    pub session_id: String,
+    pub created_at: i64,
+    pub last_seen_at: Option<i64>,
+    pub expires_at: i64,
+    pub current: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,6 +195,13 @@ pub struct AppUserCreateInput {
     pub initial_balance_credit_micros: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUserCreateResult {
+    pub user: AppUserPublicResult,
+    pub totp_setup: Option<AppUserTotpSetupResult>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppUserUpdateInput {
@@ -116,10 +215,19 @@ pub struct AppUserUpdateInput {
 pub fn current_web_auth_mode() -> String {
     if let Some(raw) = get_persisted_app_setting(APP_SETTING_WEB_AUTH_MODE_KEY) {
         let mode = normalize_web_auth_mode(Some(&raw));
+        // Once an active administrator exists, account authentication is the
+        // only valid Web authentication mode. This also protects upgraded
+        // databases whose persisted setting still says `none`.
+        if mode != WEB_AUTH_MODE_ACCOUNTS && active_admin_exists() {
+            return WEB_AUTH_MODE_ACCOUNTS.to_string();
+        }
         if mode == WEB_AUTH_MODE_PASSWORD && !super::web_access::web_access_password_configured() {
             return WEB_AUTH_MODE_NONE.to_string();
         }
         return mode.to_string();
+    }
+    if active_admin_exists() {
+        return WEB_AUTH_MODE_ACCOUNTS.to_string();
     }
     if super::web_access::web_access_password_configured() {
         WEB_AUTH_MODE_PASSWORD.to_string()
@@ -130,6 +238,9 @@ pub fn current_web_auth_mode() -> String {
 
 pub fn set_web_auth_mode(mode: &str) -> Result<String, String> {
     let normalized = normalize_web_auth_mode(Some(mode));
+    if normalized == WEB_AUTH_MODE_ACCOUNTS && active_admin_exists() {
+        super::totp::validate_encryption_key()?;
+    }
     let current = current_web_auth_mode();
     if current == WEB_AUTH_MODE_ACCOUNTS && normalized != WEB_AUTH_MODE_ACCOUNTS {
         let lock = billing_mode_lock_status()?;
@@ -137,9 +248,15 @@ pub fn set_web_auth_mode(mode: &str) -> Result<String, String> {
             return Err("account_billing_mode_locked".to_string());
         }
     }
+    if normalized != WEB_AUTH_MODE_ACCOUNTS && active_admin_exists() {
+        return Err("已有管理员账号，不能关闭账户登录模式".to_string());
+    }
     if normalized == WEB_AUTH_MODE_PASSWORD && !super::web_access::web_access_password_configured()
     {
         return Err("启用访问密码模式前需要先设置访问密码".to_string());
+    }
+    if normalized == WEB_AUTH_MODE_PASSWORD {
+        return Err("独立访问密码模式已废弃，请使用账户登录模式".to_string());
     }
     save_persisted_app_setting(APP_SETTING_WEB_AUTH_MODE_KEY, Some(normalized))?;
     Ok(normalized.to_string())
@@ -258,7 +375,6 @@ pub fn app_auth_status_value() -> Result<Value, String> {
         "mode": current_web_auth_mode(),
         "modeOptions": [
             WEB_AUTH_MODE_NONE,
-            WEB_AUTH_MODE_PASSWORD,
             WEB_AUTH_MODE_ACCOUNTS
         ],
         "passwordConfigured": super::web_access::web_access_password_configured(),
@@ -281,9 +397,16 @@ pub fn app_session_result(actor: &RpcActor) -> Result<AppSessionResult, String> 
                 .find_public_app_user_with_wallet_by_id(user_id)
                 .map_err(|err| format!("read app user failed: {err}"))?
                 .ok_or_else(|| "当前用户不存在".to_string())?;
-            Ok::<_, String>(public_user_with_wallet(user))
+            let mut result = public_user_with_wallet(user);
+            fill_totp_state(&storage, &mut result)?;
+            Ok::<_, String>(result)
         })
         .transpose()?;
+    let billing_mode_lock = if actor.is_admin() {
+        billing_mode_lock_status()?
+    } else {
+        BillingModeLockResult::default()
+    };
     Ok(AppSessionResult {
         mode: current_web_auth_mode(),
         current_user,
@@ -294,7 +417,7 @@ pub fn app_session_result(actor: &RpcActor) -> Result<AppSessionResult, String> 
             .map(str::to_string)
             .collect(),
         distribution_enabled: distribution_enabled(),
-        billing_mode_lock: billing_mode_lock_status()?,
+        billing_mode_lock,
     })
 }
 
@@ -303,41 +426,162 @@ pub fn bootstrap_app_admin(
     password: &str,
     display_name: Option<&str>,
 ) -> Result<AppLoginResult, String> {
-    crate::initialize_storage_if_needed()?;
-    let storage = open_storage_or_error()?;
-    let active_admin_count = storage
-        .active_admin_count()
-        .map_err(|err| format!("read app admins failed: {err}"))?;
-    if active_admin_count > 0 {
-        return Err("管理员已初始化".to_string());
-    }
-    let input = AppUserCreateInput {
-        username: username.to_string(),
-        password: password.to_string(),
-        display_name: display_name.map(str::to_string),
-        role: Some("admin".to_string()),
-        initial_balance_credit_micros: Some(0),
-    };
-    let public = create_app_user_with_storage(&storage, input)?;
-    let user = storage
-        .find_app_user_by_id(&public.id)
-        .map_err(|err| format!("read app user failed: {err}"))?
-        .ok_or_else(|| "管理员创建失败".to_string())?;
-    create_session_with_storage(&storage, user)
+    let _ = (username, password, display_name);
+    Err("管理员初始化必须完成验证器绑定，请使用 bootstrap_app_admin_with_totp".to_string())
 }
 
-pub fn login_app_user(username: &str, password: &str) -> Result<AppLoginResult, String> {
+pub fn login_app_user(
+    username: &str,
+    password: &str,
+    totp_code: Option<&str>,
+    challenge_token: Option<&str>,
+) -> Result<AppLoginAttempt, String> {
+    login_app_user_from_source(username, password, totp_code, challenge_token, None)
+}
+
+pub fn validate_web_totp_configuration() -> Result<(), String> {
+    super::totp::validate_encryption_key()?;
     crate::initialize_storage_if_needed()?;
     let storage = open_storage_or_error()?;
-    let username = normalize_username(username)?;
-    let Some(user) = storage
-        .find_app_user_by_username(&username)
-        .map_err(|err| format!("read app user failed: {err}"))?
-    else {
+    for ciphertext in storage
+        .list_enabled_app_user_totp_ciphertexts()
+        .map_err(|err| format!("read enabled authenticator keys failed: {err}"))?
+    {
+        super::totp::decrypt_secret(&ciphertext)?;
+    }
+    Ok(())
+}
+
+pub fn login_app_user_from_source(
+    username: &str,
+    password: &str,
+    totp_code: Option<&str>,
+    challenge_token: Option<&str>,
+    source_ip: Option<&str>,
+) -> Result<AppLoginAttempt, String> {
+    crate::initialize_storage_if_needed()?;
+    let mut storage = open_storage_or_error()?;
+    if let Some(challenge_token) = challenge_token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return complete_app_login_challenge_with_storage(&mut storage, challenge_token, totp_code);
+    }
+    let username_subject =
+        throttle_subject("username", username.trim().to_ascii_lowercase().as_bytes());
+    let source_subject = source_ip
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| throttle_subject("source-ip", value.as_bytes()));
+    if let Some(subject) = source_subject.as_deref() {
+        reserve_auth_attempt_or_throttled(
+            &mut storage,
+            "login_source_ip",
+            subject,
+            300,
+            30,
+            300,
+            300,
+        )?;
+    }
+    reserve_auth_attempt_or_throttled(
+        &mut storage,
+        "login_username",
+        &username_subject,
+        86_400,
+        5,
+        30,
+        900,
+    )?;
+
+    let normalized_username = normalize_username(username).ok();
+    let user = normalized_username
+        .as_deref()
+        .map(|normalized| {
+            storage
+                .find_app_user_by_username(normalized)
+                .map_err(|err| format!("read app user failed: {err}"))
+        })
+        .transpose()?
+        .flatten();
+    let password_valid_shape = password.as_bytes().len() <= MAX_PASSWORD_BYTES;
+    let password_matches = if let Some(user) = user
+        .as_ref()
+        .filter(|user| password_valid_shape && user.status == "active")
+    {
+        verify_password_hash_guarded(password, &user.password_hash)?
+    } else {
+        verify_dummy_password_guarded()?;
+        false
+    };
+    let Some(user) = user else {
         return Err("用户名或密码错误".to_string());
     };
-    if user.status != "active" || !verify_password_hash(password, &user.password_hash) {
+    if user.status != "active" || !password_matches {
         return Err("用户名或密码错误".to_string());
+    }
+    storage
+        .clear_auth_throttle("login_username", &username_subject)
+        .map_err(|err| format!("clear login throttle failed: {err}"))?;
+    if let Some(subject) = source_subject.as_deref() {
+        storage
+            .clear_auth_throttle("login_source_ip", subject)
+            .map_err(|err| format!("clear source login throttle failed: {err}"))?;
+    }
+    if !user.password_hash.starts_with("$argon2") {
+        let next_hash = hash_password_guarded(password)?;
+        storage
+            .update_app_user_password_hash(&user.id, &next_hash)
+            .map_err(|err| format!("upgrade app user password hash failed: {err}"))?;
+    }
+    let totp = storage
+        .find_app_user_totp_state(&user.id)
+        .map_err(|err| format!("read app user authenticator failed: {err}"))?
+        .ok_or_else(|| "用户认证配置缺失".to_string())?;
+    if user.role == "admin" && !totp.enabled {
+        let setup = begin_totp_setup_with_storage(
+            &mut storage,
+            &user,
+            &user.id,
+            LOGIN_SETUP_CHALLENGE_PURPOSE,
+        )?;
+        let challenge_token = setup.challenge_token.clone().unwrap_or_default();
+        return Ok(AppLoginAttempt::TotpSetup {
+            challenge_token,
+            setup,
+        });
+    }
+    if totp.enabled {
+        let challenge_token = create_login_challenge(
+            &mut storage,
+            &user.id,
+            &user.id,
+            LOGIN_CHALLENGE_PURPOSE,
+            None,
+        )?;
+        if totp_code
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+        {
+            return match complete_app_login_challenge_with_storage(
+                &mut storage,
+                &challenge_token,
+                totp_code,
+            ) {
+                Ok(attempt) => Ok(attempt),
+                Err(err) => Ok(AppLoginAttempt::TotpChallenge {
+                    challenge_token,
+                    user: public_user_with_totp_state(user, None, &totp),
+                    error: Some(err),
+                }),
+            };
+        } else {
+            return Ok(AppLoginAttempt::TotpChallenge {
+                challenge_token,
+                user: public_user_with_totp_state(user, None, &totp),
+                error: None,
+            });
+        }
     }
     let now = now_ts();
     storage
@@ -346,7 +590,589 @@ pub fn login_app_user(username: &str, password: &str) -> Result<AppLoginResult, 
     let mut next = user;
     next.last_login_at = Some(now);
     next.updated_at = now;
-    create_session_with_storage(&storage, next)
+    Ok(AppLoginAttempt::Authenticated(create_session_with_storage(
+        &storage, next,
+    )?))
+}
+
+fn active_admin_exists() -> bool {
+    crate::initialize_storage_if_needed()
+        .ok()
+        .and_then(|_| open_storage_or_error().ok())
+        .and_then(|storage| storage.active_admin_count().ok())
+        .is_some_and(|count| count > 0)
+}
+
+pub fn complete_app_login_challenge(
+    challenge_token: &str,
+    totp_code: &str,
+) -> Result<AppLoginResult, String> {
+    crate::initialize_storage_if_needed()?;
+    let mut storage = open_storage_or_error()?;
+    match complete_app_login_challenge_with_storage(&mut storage, challenge_token, Some(totp_code))?
+    {
+        AppLoginAttempt::Authenticated(result) => Ok(result),
+        _ => Err("登录挑战未完成".to_string()),
+    }
+}
+
+pub fn confirm_app_user_totp_setup(
+    actor: Option<&RpcActor>,
+    challenge_token: Option<&str>,
+    totp_code: &str,
+) -> Result<AppLoginResult, String> {
+    crate::initialize_storage_if_needed()?;
+    let mut storage = open_storage_or_error()?;
+    if let Some(token) = challenge_token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let purpose = find_setup_challenge_purpose(&storage, token)?;
+        if !matches!(
+            purpose.as_str(),
+            LOGIN_SETUP_CHALLENGE_PURPOSE | BOOTSTRAP_SETUP_CHALLENGE_PURPOSE
+        ) {
+            return Err("绑定挑战无效，请重新开始绑定".to_string());
+        }
+        let challenge = reserve_login_challenge(&mut storage, token, &purpose)?;
+        let mut user = storage
+            .find_app_user_by_id(&challenge.target_user_id)
+            .map_err(|err| format!("read app user failed: {err}"))?
+            .ok_or_else(|| "用户不存在".to_string())?;
+        if user.status != "active" {
+            return Err("绑定挑战已失效，请重新开始绑定".to_string());
+        }
+        let now = now_ts();
+        let (session_token, session) = new_session(&user, now);
+        let finalize_legacy_migration = purpose == BOOTSTRAP_SETUP_CHALLENGE_PURPOSE
+            || (purpose == LOGIN_SETUP_CHALLENGE_PURPOSE
+                && user.role == "admin"
+                && super::web_access::web_access_password_configured());
+        confirm_totp_setup_with_storage(
+            &mut storage,
+            &challenge,
+            &user,
+            totp_code,
+            Some(&session),
+            None,
+            finalize_legacy_migration,
+        )?;
+        user.last_login_at = Some(now);
+        user.updated_at = now;
+        return session_result_with_storage(&storage, user, session_token, &session);
+    }
+    let _ = actor;
+    Err("绑定挑战缺失，请重新开始绑定".to_string())
+}
+
+pub fn confirm_app_user_totp_setup_for_actor(
+    actor: &RpcActor,
+    target_user_id: &str,
+    challenge_token: &str,
+    totp_code: &str,
+) -> Result<AppUserTotpStatusResult, String> {
+    let actor_user_id = actor
+        .user_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "permission_denied: authenticator setup requires user session".to_string()
+        })?;
+    let challenge_token = challenge_token.trim();
+    if challenge_token.is_empty() {
+        return Err("绑定挑战缺失，请重新开始绑定".to_string());
+    }
+    crate::initialize_storage_if_needed()?;
+    let mut storage = open_storage_or_error()?;
+    let target_user_id = target_user_id.trim();
+    if target_user_id.is_empty() {
+        return Err("目标用户 ID 不能为空".to_string());
+    }
+    if target_user_id != actor_user_id && !actor.is_admin() {
+        return Err(
+            "permission_denied: only admins may confirm another user authenticator".to_string(),
+        );
+    }
+    let user = storage
+        .find_app_user_by_id(target_user_id)
+        .map_err(|err| format!("read app user failed: {err}"))?
+        .ok_or_else(|| "用户不存在".to_string())?;
+    if user.status != "active" {
+        return Err("当前账号不可用".to_string());
+    }
+    let challenge =
+        reserve_login_challenge(&mut storage, challenge_token, SETUP_CHALLENGE_PURPOSE)?;
+    if challenge.target_user_id != target_user_id
+        || challenge.initiated_by_user_id.as_deref() != Some(actor_user_id)
+    {
+        return Err("绑定挑战无效，请重新开始绑定".to_string());
+    }
+    confirm_totp_setup_with_storage(
+        &mut storage,
+        &challenge,
+        &user,
+        totp_code,
+        None,
+        (target_user_id == actor_user_id)
+            .then_some(actor.session_id.as_deref())
+            .flatten(),
+        false,
+    )?;
+    Ok(AppUserTotpStatusResult {
+        enabled: true,
+        confirmed_at: Some(now_ts()),
+    })
+}
+
+pub fn bootstrap_app_admin_with_totp(
+    bootstrap_password: &str,
+    username: &str,
+    password: &str,
+    display_name: Option<&str>,
+) -> Result<AppLoginAttempt, String> {
+    crate::initialize_storage_if_needed()?;
+    super::totp::validate_encryption_key()?;
+    let mut storage = open_storage_or_error()?;
+    if storage
+        .active_admin_count()
+        .map_err(|err| format!("read app admins failed: {err}"))?
+        > 0
+    {
+        return Err("管理员已初始化".to_string());
+    }
+    let bootstrap_subject = throttle_subject("bootstrap", b"first-admin");
+    reserve_auth_attempt_or_throttled(
+        &mut storage,
+        "bootstrap",
+        &bootstrap_subject,
+        300,
+        5,
+        30,
+        900,
+    )?;
+    if !super::web_access::web_access_password_configured()
+        || !super::web_access::verify_web_access_password(bootstrap_password)
+    {
+        return Err("旧访问密码错误".to_string());
+    }
+    storage
+        .clear_auth_throttle("bootstrap", &bootstrap_subject)
+        .map_err(|err| format!("clear bootstrap throttle failed: {err}"))?;
+    let username = normalize_username(username)?;
+    validate_password(password)?;
+    let now = now_ts();
+    let user = AppUser {
+        id: generate_id("usr", 8),
+        username,
+        display_name: normalize_optional_text(display_name),
+        password_hash: hash_password_guarded(password)?,
+        role: "admin".to_string(),
+        status: "active".to_string(),
+        created_at: now,
+        updated_at: now,
+        last_login_at: None,
+    };
+    let secret = super::totp::generate_secret();
+    let challenge_token = format!("cmc_{}", random_hex(32));
+    let challenge = AppLoginChallenge {
+        id: generate_id("challenge", 8),
+        user_id: user.id.clone(),
+        token_hash: token_hash(&challenge_token),
+        purpose: BOOTSTRAP_SETUP_CHALLENGE_PURPOSE.to_string(),
+        expires_at: now.saturating_add(300),
+        attempts: 0,
+        last_attempt_at: None,
+        used_at: None,
+        created_at: now,
+        setup_secret_ciphertext: Some(super::totp::encrypt_secret(&secret)?),
+        initiated_by_user_id: None,
+        target_user_id: user.id.clone(),
+        locked_until: None,
+    };
+    if !storage
+        .claim_first_app_admin_with_challenge(&user, &challenge)
+        .map_err(|err| format!("create first administrator failed: {err}"))?
+    {
+        return Err("管理员已初始化".to_string());
+    }
+    let setup = AppUserTotpSetupResult {
+        user_id: user.id.clone(),
+        username: user.username.clone(),
+        secret: secret.clone(),
+        otpauth_uri: super::totp::otpauth_uri(&user.username, &secret),
+        challenge_token: Some(challenge_token.clone()),
+    };
+    Ok(AppLoginAttempt::TotpSetup {
+        challenge_token,
+        setup,
+    })
+}
+
+pub fn list_app_user_sessions(actor: &RpcActor) -> Result<Vec<AppUserSessionResult>, String> {
+    let user_id = actor
+        .user_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "permission_denied: session list requires user session".to_string())?;
+    crate::initialize_storage_if_needed()?;
+    let storage = open_storage_or_error()?;
+    storage
+        .list_app_user_sessions(user_id)
+        .map_err(|err| format!("list app user sessions failed: {err}"))
+        .map(|sessions| {
+            sessions
+                .into_iter()
+                .filter(|session| session.revoked_at.is_none())
+                .map(|session| AppUserSessionResult {
+                    current: actor.session_id.as_deref() == Some(session.id.as_str()),
+                    session_id: session.id,
+                    created_at: session.created_at,
+                    last_seen_at: session.last_seen_at,
+                    expires_at: session.expires_at,
+                })
+                .collect()
+        })
+}
+
+pub fn revoke_app_user_session(actor: &RpcActor, session_id: &str) -> Result<(), String> {
+    let user_id = actor
+        .user_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "permission_denied: session revoke requires user session".to_string())?;
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Err("会话 ID 不能为空".to_string());
+    }
+    crate::initialize_storage_if_needed()?;
+    let storage = open_storage_or_error()?;
+    if !storage
+        .revoke_app_user_session(session_id, user_id, now_ts())
+        .map_err(|err| format!("revoke app user session failed: {err}"))?
+    {
+        return Err("会话不存在或已失效".to_string());
+    }
+    Ok(())
+}
+
+pub fn begin_app_user_totp_setup(
+    actor: &RpcActor,
+    target_user_id: Option<&str>,
+    current_password: Option<&str>,
+) -> Result<AppUserTotpSetupResult, String> {
+    let actor_user_id = actor
+        .user_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "permission_denied: authenticator setup requires user session".to_string()
+        })?;
+    let target_user_id = target_user_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(actor_user_id);
+    if target_user_id != actor_user_id && !actor.is_admin() {
+        return Err(
+            "permission_denied: only admins may set up another user authenticator".to_string(),
+        );
+    }
+    crate::initialize_storage_if_needed()?;
+    let mut storage = open_storage_or_error()?;
+    let actor_user = storage
+        .find_app_user_by_id(actor_user_id)
+        .map_err(|err| format!("read actor user failed: {err}"))?
+        .ok_or_else(|| "当前用户不存在".to_string())?;
+    let setup_password_subject = throttle_subject("totp-setup-password", actor_user_id.as_bytes());
+    reserve_auth_attempt_or_throttled(
+        &mut storage,
+        "totp_setup_password",
+        &setup_password_subject,
+        300,
+        5,
+        30,
+        300,
+    )?;
+    let current_password = current_password.unwrap_or("");
+    if current_password.as_bytes().len() > MAX_PASSWORD_BYTES
+        || !verify_password_hash_guarded(current_password, &actor_user.password_hash)?
+    {
+        return Err("当前密码不正确".to_string());
+    }
+    storage
+        .clear_auth_throttle("totp_setup_password", &setup_password_subject)
+        .map_err(|err| format!("clear setup password throttle failed: {err}"))?;
+    let user = storage
+        .find_app_user_by_id(target_user_id)
+        .map_err(|err| format!("read app user failed: {err}"))?
+        .ok_or_else(|| "用户不存在".to_string())?;
+    begin_totp_setup_with_storage(&mut storage, &user, actor_user_id, SETUP_CHALLENGE_PURPOSE)
+}
+
+pub fn disable_app_user_totp(actor: &RpcActor) -> Result<(), String> {
+    if actor.is_admin() {
+        return Err("管理员不能关闭验证器".to_string());
+    }
+    let user_id = actor
+        .user_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "permission_denied: authenticator disable requires user session".to_string()
+        })?;
+    crate::initialize_storage_if_needed()?;
+    let mut storage = open_storage_or_error()?;
+    if !storage
+        .disable_totp_and_revoke_user(user_id, now_ts())
+        .map_err(|err| format!("disable authenticator and revoke sessions failed: {err}"))?
+    {
+        return Err("当前用户不存在".to_string());
+    }
+    Ok(())
+}
+
+pub fn app_user_totp_status(actor: &RpcActor) -> Result<AppUserTotpStatusResult, String> {
+    let user_id = actor
+        .user_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "permission_denied: authenticator status requires user session".to_string()
+        })?;
+    crate::initialize_storage_if_needed()?;
+    let storage = open_storage_or_error()?;
+    let state = storage
+        .find_app_user_totp_state(user_id)
+        .map_err(|err| format!("read authenticator state failed: {err}"))?
+        .ok_or_else(|| "用户认证配置缺失".to_string())?;
+    Ok(AppUserTotpStatusResult {
+        enabled: state.enabled,
+        confirmed_at: state.confirmed_at,
+    })
+}
+
+pub fn reset_app_user_totp(actor: &RpcActor, user_id: &str) -> Result<(), String> {
+    if !actor.is_admin() {
+        return Err("permission_denied: only admins may reset authenticators".to_string());
+    }
+    let user_id = user_id.trim();
+    if user_id.is_empty() {
+        return Err("用户 ID 不能为空".to_string());
+    }
+    if actor.user_id.as_deref() == Some(user_id) {
+        return Err("管理员不能重置自身验证器".to_string());
+    }
+    crate::initialize_storage_if_needed()?;
+    let mut storage = open_storage_or_error()?;
+    storage
+        .find_app_user_by_id(user_id)
+        .map_err(|err| format!("read app user failed: {err}"))?
+        .ok_or_else(|| "用户不存在".to_string())?;
+    if !storage
+        .disable_totp_and_revoke_user(user_id, now_ts())
+        .map_err(|err| format!("reset authenticator and revoke sessions failed: {err}"))?
+    {
+        return Err("用户不存在".to_string());
+    }
+    Ok(())
+}
+
+fn begin_totp_setup_with_storage(
+    storage: &mut Storage,
+    user: &AppUser,
+    initiated_by_user_id: &str,
+    purpose: &str,
+) -> Result<AppUserTotpSetupResult, String> {
+    let secret = super::totp::generate_secret();
+    let ciphertext = super::totp::encrypt_secret(&secret)?;
+    let challenge_token = create_login_challenge(
+        storage,
+        &user.id,
+        initiated_by_user_id,
+        purpose,
+        Some(ciphertext),
+    )?;
+    Ok(AppUserTotpSetupResult {
+        user_id: user.id.clone(),
+        username: user.username.clone(),
+        otpauth_uri: super::totp::otpauth_uri(&user.username, &secret),
+        secret,
+        challenge_token: Some(challenge_token),
+    })
+}
+
+fn create_login_challenge(
+    storage: &mut Storage,
+    user_id: &str,
+    initiated_by_user_id: &str,
+    purpose: &str,
+    setup_secret_ciphertext: Option<String>,
+) -> Result<String, String> {
+    let token = format!("cmc_{}", random_hex(32));
+    let now = now_ts();
+    storage
+        .replace_app_login_challenge(&AppLoginChallenge {
+            id: generate_id("challenge", 8),
+            user_id: user_id.to_string(),
+            token_hash: token_hash(&token),
+            purpose: purpose.to_string(),
+            expires_at: now.saturating_add(300),
+            attempts: 0,
+            last_attempt_at: None,
+            used_at: None,
+            created_at: now,
+            setup_secret_ciphertext,
+            initiated_by_user_id: Some(initiated_by_user_id.to_string()),
+            target_user_id: user_id.to_string(),
+            locked_until: None,
+        })
+        .map_err(|err| format!("create login challenge failed: {err}"))?;
+    Ok(token)
+}
+
+fn reserve_login_challenge(
+    storage: &mut Storage,
+    token: &str,
+    purpose: &str,
+) -> Result<AppLoginChallenge, String> {
+    let challenge = storage
+        .reserve_app_login_challenge_attempt(&token_hash(token), purpose, now_ts())
+        .map_err(|err| format!("reserve login challenge attempt failed: {err}"))?;
+    challenge.ok_or_else(|| "登录挑战已过期、锁定或尝试次数过多，请重新开始".to_string())
+}
+
+fn find_setup_challenge_purpose(storage: &Storage, token: &str) -> Result<String, String> {
+    storage
+        .find_active_app_login_challenge(&token_hash(token), now_ts())
+        .map_err(|err| format!("read setup challenge failed: {err}"))?
+        .map(|challenge| challenge.purpose)
+        .ok_or_else(|| "绑定挑战已过期，请重新开始".to_string())
+}
+
+fn complete_app_login_challenge_with_storage(
+    storage: &mut Storage,
+    token: &str,
+    totp_code: Option<&str>,
+) -> Result<AppLoginAttempt, String> {
+    let code = totp_code
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "请输入验证器验证码".to_string())?;
+    let challenge = reserve_login_challenge(storage, token, LOGIN_CHALLENGE_PURPOSE)?;
+    let totp_subject = throttle_subject("totp-login", challenge.target_user_id.as_bytes());
+    let user = storage
+        .find_app_user_by_id(&challenge.user_id)
+        .map_err(|err| format!("read app user failed: {err}"))?
+        .ok_or_else(|| "用户名或密码错误".to_string())?;
+    if user.status != "active" {
+        return Err("登录挑战已失效，请重新登录".to_string());
+    }
+    let state = storage
+        .find_app_user_totp_state(&user.id)
+        .map_err(|err| format!("read authenticator state failed: {err}"))?
+        .ok_or_else(|| "用户认证配置缺失".to_string())?;
+    if !state.enabled {
+        return Err("请先完成验证器绑定".to_string());
+    }
+    reserve_auth_attempt_or_throttled(storage, "totp_login", &totp_subject, 300, 5, 30, 300)?;
+    let step = verify_user_totp(storage, &user.id, &state, code)?;
+    let now = now_ts();
+    let (session_token, session) = new_session(&user, now);
+    if !storage
+        .complete_app_totp_login(&challenge.id, &user.id, step, &session, now)
+        .map_err(|err| format!("complete TOTP login failed: {err}"))?
+    {
+        return Err("验证码已使用或登录挑战已失效，请重新登录".to_string());
+    }
+    storage
+        .clear_auth_throttle("totp_login", &totp_subject)
+        .map_err(|err| format!("clear TOTP login throttle failed: {err}"))?;
+    let mut next = user;
+    next.last_login_at = Some(now);
+    next.updated_at = now;
+    Ok(AppLoginAttempt::Authenticated(session_result_with_storage(
+        storage,
+        next,
+        session_token,
+        &session,
+    )?))
+}
+
+fn confirm_totp_setup_with_storage(
+    storage: &mut Storage,
+    challenge: &AppLoginChallenge,
+    user: &AppUser,
+    code: &str,
+    session: Option<&AppUserSession>,
+    current_session_id: Option<&str>,
+    bootstrap: bool,
+) -> Result<(), String> {
+    let throttle_subject = throttle_subject("totp-setup", challenge.target_user_id.as_bytes());
+    let secret_ciphertext = challenge
+        .setup_secret_ciphertext
+        .as_deref()
+        .ok_or_else(|| "验证器绑定已失效，请重新开始".to_string())?;
+    let secret = super::totp::decrypt_secret(secret_ciphertext)?;
+    reserve_auth_attempt_or_throttled(storage, "totp_setup", &throttle_subject, 300, 5, 30, 300)?;
+    let step = super::totp::verify_code(&secret, code, now_ts(), None)?;
+    if !storage
+        .complete_app_totp_setup(
+            challenge,
+            step,
+            session,
+            current_session_id,
+            bootstrap,
+            now_ts(),
+        )
+        .map_err(|err| format!("complete authenticator setup failed: {err}"))?
+    {
+        return Err("绑定挑战已失效，请重新开始".to_string());
+    }
+    storage
+        .clear_auth_throttle("totp_setup", &throttle_subject)
+        .map_err(|err| format!("clear TOTP setup throttle failed: {err}"))?;
+    let _ = user;
+    Ok(())
+}
+
+fn verify_user_totp(
+    storage: &Storage,
+    user_id: &str,
+    state: &codexmanager_core::storage::AppUserTotpState,
+    code: &str,
+) -> Result<i64, String> {
+    let ciphertext = state
+        .secret_ciphertext
+        .as_deref()
+        .ok_or_else(|| "验证器配置缺失".to_string())?;
+    let secret = super::totp::decrypt_secret(ciphertext)?;
+    let step = super::totp::verify_code(&secret, code, now_ts(), state.last_used_step)?;
+    let _ = user_id;
+    let _ = storage;
+    Ok(step)
+}
+
+fn app_session_user_result_from_storage(
+    storage: &Storage,
+    session: codexmanager_core::storage::AppSessionUserWithWallet,
+    now: i64,
+) -> Result<Option<AppSessionUserResult>, String> {
+    if session.user.role == "admin" {
+        let totp_enabled = storage
+            .find_app_user_totp_state(&session.user.id)
+            .map_err(|err| format!("read app user authenticator failed: {err}"))?
+            .is_some_and(|state| state.enabled);
+        if !totp_enabled {
+            return Ok(None);
+        }
+    }
+    let _ = storage.touch_app_user_session(&session.session_id, now);
+    let mut user = public_user_with_wallet(session.user);
+    fill_totp_state(&storage, &mut user)?;
+    Ok(Some(AppSessionUserResult {
+        session_id: session.session_id,
+        expires_at: session.expires_at,
+        user,
+    }))
 }
 
 pub fn resolve_app_user_session(token: &str) -> Result<Option<AppSessionUserResult>, String> {
@@ -364,12 +1190,26 @@ pub fn resolve_app_user_session(token: &str) -> Result<Option<AppSessionUserResu
     else {
         return Ok(None);
     };
-    let _ = storage.touch_app_user_session(&session.session_id, now);
-    Ok(Some(AppSessionUserResult {
-        session_id: session.session_id,
-        expires_at: session.expires_at,
-        user: public_user_with_wallet(session.user),
-    }))
+    app_session_user_result_from_storage(&storage, session, now)
+}
+
+pub(crate) fn resolve_app_user_session_by_id(
+    session_id: &str,
+) -> Result<Option<AppSessionUserResult>, String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Ok(None);
+    }
+    crate::initialize_storage_if_needed()?;
+    let storage = open_storage_or_error()?;
+    let now = now_ts();
+    let Some(session) = storage
+        .find_active_app_session_user_by_id(session_id, now)
+        .map_err(|err| format!("read app session failed: {err}"))?
+    else {
+        return Ok(None);
+    };
+    app_session_user_result_from_storage(&storage, session, now)
 }
 
 pub fn logout_app_user_session(token: &str) -> Result<(), String> {
@@ -394,17 +1234,21 @@ pub fn create_app_user(input: AppUserCreateInput) -> Result<AppUserPublicResult,
 pub fn list_app_users() -> Result<Vec<AppUserPublicResult>, String> {
     crate::initialize_storage_if_needed()?;
     let storage = open_storage_or_error()?;
-    Ok(storage
+    storage
         .list_public_app_users_with_wallets()
         .map_err(|err| format!("list app users failed: {err}"))?
         .into_iter()
-        .map(public_user_with_wallet)
-        .collect())
+        .map(|user| {
+            let mut result = public_user_with_wallet(user);
+            fill_totp_state(&storage, &mut result)?;
+            Ok(result)
+        })
+        .collect()
 }
 
 pub fn update_app_user(input: AppUserUpdateInput) -> Result<AppUserPublicResult, String> {
     crate::initialize_storage_if_needed()?;
-    let storage = open_storage_or_error()?;
+    let mut storage = open_storage_or_error()?;
     let user_id = input.id.trim();
     if user_id.is_empty() {
         return Err("用户 ID 不能为空".to_string());
@@ -426,6 +1270,16 @@ pub fn update_app_user(input: AppUserUpdateInput) -> Result<AppUserPublicResult,
         .transpose()?
         .unwrap_or_else(|| current.status.clone());
 
+    if current.role != "admin" && next_role == "admin" {
+        let totp = storage
+            .find_app_user_totp_state(user_id)
+            .map_err(|err| format!("read authenticator state failed: {err}"))?
+            .ok_or_else(|| "用户认证配置缺失".to_string())?;
+        if !totp.enabled {
+            return Err("晋升管理员前必须先绑定验证器".to_string());
+        }
+    }
+
     if current.role == "admin"
         && current.status == "active"
         && (next_role != "admin" || next_status != "active")
@@ -444,23 +1298,24 @@ pub fn update_app_user(input: AppUserUpdateInput) -> Result<AppUserPublicResult,
             normalize_optional_text(input.display_name.as_deref()),
         )
         .map_err(|err| format!("update app user display name failed: {err}"))?;
-    if current.role != next_role {
-        storage
-            .update_app_user_role(user_id, &next_role)
-            .map_err(|err| format!("update app user role failed: {err}"))?;
+    if (current.role != next_role || current.status != next_status)
+        && !storage
+            .update_role_status_and_revoke_user(user_id, &next_role, &next_status, now_ts())
+            .map_err(|err| format!("update app user role/status failed: {err}"))?
+    {
+        return Err("角色或状态更新被拒绝；请确认管理员验证器和最后管理员约束".to_string());
     }
-    if current.status != next_status {
-        storage
-            .update_app_user_status(user_id, &next_status)
-            .map_err(|err| format!("update app user status failed: {err}"))?;
+    let password_changed = normalize_optional_text(input.password.as_deref());
+    if let Some(password) = password_changed.as_deref() {
+        validate_password(password)?;
+        let password_hash = hash_password_guarded(password)?;
+        if !storage
+            .update_password_and_revoke_other_sessions(user_id, &password_hash, None, now_ts())
+            .map_err(|err| format!("update app user password failed: {err}"))?
+        {
+            return Err("用户不存在".to_string());
+        }
     }
-    if let Some(password) = normalize_optional_text(input.password.as_deref()) {
-        validate_password(&password)?;
-        storage
-            .update_app_user_password_hash(user_id, &hash_password(&password))
-            .map_err(|err| format!("update app user password failed: {err}"))?;
-    }
-
     let updated = storage
         .find_app_user_by_id(user_id)
         .map_err(|err| format!("read app user failed: {err}"))?
@@ -470,7 +1325,7 @@ pub fn update_app_user(input: AppUserUpdateInput) -> Result<AppUserPublicResult,
     } else {
         None
     };
-    Ok(public_user(updated, wallet))
+    public_user_with_storage(&storage, updated, wallet)
 }
 
 pub fn delete_app_user(user_id: &str) -> Result<(), String> {
@@ -561,7 +1416,9 @@ pub fn update_app_user_profile(
         .find_public_app_user_with_wallet_by_id(user_id)
         .map_err(|err| format!("read app user failed: {err}"))?
         .ok_or_else(|| "当前用户不存在".to_string())?;
-    Ok(public_user_with_wallet(user))
+    let mut result = public_user_with_wallet(user);
+    fill_totp_state(&storage, &mut result)?;
+    Ok(result)
 }
 
 pub fn change_app_user_password(
@@ -579,17 +1436,41 @@ pub fn change_app_user_password(
     };
     validate_password(new_password)?;
     crate::initialize_storage_if_needed()?;
-    let storage = open_storage_or_error()?;
+    let mut storage = open_storage_or_error()?;
     let user = storage
         .find_app_user_by_id(user_id)
         .map_err(|err| format!("read app user failed: {err}"))?
         .ok_or_else(|| "当前用户不存在".to_string())?;
-    if !verify_password_hash(current_password, &user.password_hash) {
+    let password_subject = throttle_subject("password-change", user_id.as_bytes());
+    reserve_auth_attempt_or_throttled(
+        &mut storage,
+        "password_change",
+        &password_subject,
+        300,
+        5,
+        30,
+        300,
+    )?;
+    if current_password.as_bytes().len() > MAX_PASSWORD_BYTES
+        || !verify_password_hash_guarded(current_password, &user.password_hash)?
+    {
         return Err("当前密码不正确".to_string());
     }
     storage
-        .update_app_user_password_hash(user_id, &hash_password(new_password))
-        .map_err(|err| format!("update app user password failed: {err}"))?;
+        .clear_auth_throttle("password_change", &password_subject)
+        .map_err(|err| format!("clear password change throttle failed: {err}"))?;
+    let password_hash = hash_password_guarded(new_password)?;
+    if !storage
+        .update_password_and_revoke_other_sessions(
+            user_id,
+            &password_hash,
+            actor.session_id.as_deref(),
+            now_ts(),
+        )
+        .map_err(|err| format!("update password and revoke old sessions failed: {err}"))?
+    {
+        return Err("当前用户不存在".to_string());
+    }
     Ok(())
 }
 
@@ -1055,7 +1936,7 @@ fn create_app_user_with_storage(
         id: generate_id("usr", 8),
         username,
         display_name: normalize_optional_text(input.display_name.as_deref()),
-        password_hash: hash_password(&input.password),
+        password_hash: hash_password_guarded(&input.password)?,
         role,
         status: "active".to_string(),
         created_at: now,
@@ -1105,11 +1986,76 @@ fn create_app_user_with_storage(
     } else {
         None
     };
-    Ok(public_user(user, wallet))
+    public_user_with_storage(storage, user, wallet)
+}
+
+pub fn create_app_user_for_actor(
+    actor: &RpcActor,
+    input: AppUserCreateInput,
+    actor_password: &str,
+) -> Result<AppUserCreateResult, String> {
+    if !actor.is_admin() {
+        return Err("permission_denied: only admins may create users".to_string());
+    }
+    crate::initialize_storage_if_needed()?;
+    let mut storage = open_storage_or_error()?;
+    let role = normalize_role(input.role.as_deref())?;
+    if role == "admin" {
+        super::totp::validate_encryption_key()?;
+        if let Some(actor_user_id) = actor.user_id.as_deref() {
+            let actor_user = storage
+                .find_app_user_by_id(actor_user_id)
+                .map_err(|err| format!("read actor user failed: {err}"))?
+                .ok_or_else(|| "当前管理员不存在".to_string())?;
+            let password_subject =
+                throttle_subject("admin-create-password", actor_user_id.as_bytes());
+            reserve_auth_attempt_or_throttled(
+                &mut storage,
+                "admin_create_password",
+                &password_subject,
+                300,
+                5,
+                30,
+                300,
+            )?;
+            if actor_password.as_bytes().len() > MAX_PASSWORD_BYTES
+                || !verify_password_hash_guarded(actor_password, &actor_user.password_hash)?
+            {
+                return Err("当前管理员密码不正确".to_string());
+            }
+            storage
+                .clear_auth_throttle("admin_create_password", &password_subject)
+                .map_err(|err| format!("clear administrator password throttle failed: {err}"))?;
+        }
+    }
+    let user = create_app_user_with_storage(&storage, input)?;
+    let totp_setup = if role == "admin" {
+        let target = storage
+            .find_app_user_by_id(&user.id)
+            .map_err(|err| format!("read new administrator failed: {err}"))?
+            .ok_or_else(|| "新管理员创建失败".to_string())?;
+        Some(begin_totp_setup_with_storage(
+            &mut storage,
+            &target,
+            actor.user_id.as_deref().unwrap_or(&target.id),
+            SETUP_CHALLENGE_PURPOSE,
+        )?)
+    } else {
+        None
+    };
+    Ok(AppUserCreateResult { user, totp_setup })
 }
 
 fn create_session_with_storage(storage: &Storage, user: AppUser) -> Result<AppLoginResult, String> {
     let now = now_ts();
+    let (token, session) = new_session(&user, now);
+    storage
+        .insert_app_user_session(&session)
+        .map_err(|err| format!("create app session failed: {err}"))?;
+    session_result_with_storage(storage, user, token, &session)
+}
+
+fn new_session(user: &AppUser, now: i64) -> (String, AppUserSession) {
     let token = generate_session_token();
     let session = AppUserSession {
         id: generate_id("sess", 8),
@@ -1120,9 +2066,15 @@ fn create_session_with_storage(storage: &Storage, user: AppUser) -> Result<AppLo
         last_seen_at: Some(now),
         revoked_at: None,
     };
-    storage
-        .insert_app_user_session(&session)
-        .map_err(|err| format!("create app session failed: {err}"))?;
+    (token, session)
+}
+
+fn session_result_with_storage(
+    storage: &Storage,
+    user: AppUser,
+    token: String,
+    session: &AppUserSession,
+) -> Result<AppLoginResult, String> {
     let wallet = if app_user_can_own_wallet(&user) {
         storage
             .find_wallet_by_owner("user", &user.id)
@@ -1130,10 +2082,11 @@ fn create_session_with_storage(storage: &Storage, user: AppUser) -> Result<AppLo
     } else {
         None
     };
+    let public_user = public_user_with_storage(storage, user, wallet)?;
     Ok(AppLoginResult {
         token,
         expires_at: session.expires_at,
-        user: public_user(user, wallet),
+        user: public_user,
     })
 }
 
@@ -1184,6 +2137,8 @@ fn public_user(user: AppUser, wallet: Option<AppWallet>) -> AppUserPublicResult 
         created_at: user.created_at,
         updated_at: user.updated_at,
         last_login_at: user.last_login_at,
+        totp_enabled: false,
+        totp_confirmed_at: None,
         wallet: if can_own_wallet {
             wallet.map(wallet_result)
         } else {
@@ -1203,6 +2158,8 @@ fn public_user_with_wallet(user: PublicAppUserWithWallet) -> AppUserPublicResult
         created_at: user.created_at,
         updated_at: user.updated_at,
         last_login_at: user.last_login_at,
+        totp_enabled: false,
+        totp_confirmed_at: None,
         wallet,
     }
 }
@@ -1319,18 +2276,155 @@ fn validate_password(password: &str) -> Result<(), String> {
     if password.len() < 8 {
         return Err("密码至少需要 8 位".to_string());
     }
+    if password.as_bytes().len() > MAX_PASSWORD_BYTES {
+        return Err("密码不能超过 256 字节".to_string());
+    }
     Ok(())
 }
 
-fn hash_password(password: &str) -> String {
-    let mut salt = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut salt);
-    let salt_hex = hex_encode(&salt);
-    let digest = hex_sha256(format!("{salt_hex}:{password}").as_bytes());
-    format!("sha256${salt_hex}${digest}")
+fn hash_password(password: &str) -> Result<String, String> {
+    let salt = SaltString::generate(&mut PasswordOsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|_| "密码哈希失败".to_string())
+}
+
+struct ArgonPermit;
+
+fn argon_gate() -> &'static (Mutex<usize>, Condvar) {
+    static GATE: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+    GATE.get_or_init(|| (Mutex::new(0), Condvar::new()))
+}
+
+fn acquire_argon_permit() -> Result<ArgonPermit, String> {
+    let (mutex, available) = argon_gate();
+    let active = mutex.lock().map_err(|_| AUTH_THROTTLED_ERROR.to_string())?;
+    let (mut active, timeout) = available
+        .wait_timeout_while(active, Duration::from_secs(3), |count| *count >= 2)
+        .map_err(|_| AUTH_THROTTLED_ERROR.to_string())?;
+    if timeout.timed_out() && *active >= 2 {
+        return Err(AUTH_THROTTLED_ERROR.to_string());
+    }
+    *active += 1;
+    Ok(ArgonPermit)
+}
+
+impl Drop for ArgonPermit {
+    fn drop(&mut self) {
+        let (mutex, available) = argon_gate();
+        if let Ok(mut active) = mutex.lock() {
+            *active = active.saturating_sub(1);
+            available.notify_one();
+        }
+    }
+}
+
+fn hash_password_guarded(password: &str) -> Result<String, String> {
+    let _permit = acquire_argon_permit()?;
+    hash_password(password)
+}
+
+fn verify_password_hash_guarded(password: &str, stored_hash: &str) -> Result<bool, String> {
+    let _permit = acquire_argon_permit()?;
+    if !stored_hash.starts_with("$argon2") {
+        let hash = dummy_argon_hash();
+        let _ = verify_password_hash("invalid-login-password", hash);
+    }
+    Ok(verify_password_hash(password, stored_hash))
+}
+
+fn verify_dummy_password_guarded() -> Result<(), String> {
+    let _permit = acquire_argon_permit()?;
+    let _ = verify_password_hash("invalid-login-password", dummy_argon_hash());
+    Ok(())
+}
+
+fn dummy_argon_hash() -> &'static str {
+    static DUMMY_HASH: OnceLock<String> = OnceLock::new();
+    DUMMY_HASH
+        .get_or_init(|| {
+            hash_password("CodexManager-dummy-password-never-valid")
+                .expect("dummy Argon2id hash must be constructible")
+        })
+        .as_str()
+}
+
+fn throttle_subject(scope: &str, value: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"codexmanager-auth-throttle:");
+    hasher.update(scope.as_bytes());
+    hasher.update(b":");
+    hasher.update(value);
+    hex_encode(hasher.finalize().as_slice())
+}
+
+fn reserve_auth_attempt_or_throttled(
+    storage: &mut Storage,
+    scope: &str,
+    subject_hash: &str,
+    window_seconds: i64,
+    threshold: i64,
+    base_lock_seconds: i64,
+    max_lock_seconds: i64,
+) -> Result<(), String> {
+    let reserved = storage
+        .reserve_auth_attempt(
+            scope,
+            subject_hash,
+            now_ts(),
+            window_seconds,
+            threshold,
+            base_lock_seconds,
+            max_lock_seconds,
+        )
+        .map_err(|err| format!("reserve authentication attempt failed: {err}"))?;
+    if !reserved {
+        return Err(AUTH_THROTTLED_ERROR.to_string());
+    }
+    Ok(())
+}
+
+fn public_user_with_storage(
+    storage: &Storage,
+    user: AppUser,
+    wallet: Option<AppWallet>,
+) -> Result<AppUserPublicResult, String> {
+    let mut result = public_user(user, wallet);
+    fill_totp_state(storage, &mut result)?;
+    Ok(result)
+}
+
+fn public_user_with_totp_state(
+    user: AppUser,
+    wallet: Option<AppWallet>,
+    state: &codexmanager_core::storage::AppUserTotpState,
+) -> AppUserPublicResult {
+    let mut result = public_user(user, wallet);
+    result.totp_enabled = state.enabled;
+    result.totp_confirmed_at = state.confirmed_at;
+    result
+}
+
+fn fill_totp_state(storage: &Storage, result: &mut AppUserPublicResult) -> Result<(), String> {
+    if let Some(state) = storage
+        .find_app_user_totp_state(&result.id)
+        .map_err(|err| format!("read authenticator state failed: {err}"))?
+    {
+        result.totp_enabled = state.enabled;
+        result.totp_confirmed_at = state.confirmed_at;
+    }
+    Ok(())
 }
 
 fn verify_password_hash(password: &str, stored_hash: &str) -> bool {
+    if stored_hash.starts_with("$argon2") {
+        return PasswordHash::new(stored_hash).ok().is_some_and(|parsed| {
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok()
+        });
+    }
     let mut parts = stored_hash.split('$');
     let Some(kind) = parts.next() else {
         return false;

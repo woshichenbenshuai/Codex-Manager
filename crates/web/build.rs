@@ -185,6 +185,13 @@ fn compile_windows_icon(manifest_dir: &Path) {
     }
 
     let mut res = winres::WindowsResource::new();
+    println!("cargo:rerun-if-env-changed=WindowsSdkVerBinPath");
+    if let Ok(toolkit_path) = std::env::var("WindowsSdkVerBinPath") {
+        let toolkit_path = toolkit_path.trim_end_matches(['\\', '/']);
+        if !toolkit_path.is_empty() {
+            res.set_toolkit_path(toolkit_path);
+        }
+    }
     res.set_icon(icon_path.to_string_lossy().as_ref());
     res.compile()
         .expect("failed to compile Windows resources (icon)");

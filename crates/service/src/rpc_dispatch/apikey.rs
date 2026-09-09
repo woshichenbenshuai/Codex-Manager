@@ -26,6 +26,40 @@ fn ensure_api_key_access(actor: &RpcActor, key_id: &str) -> Result<(), String> {
     Err("permission_denied: apikey".to_string())
 }
 
+fn ensure_api_key_model_access(
+    actor: &RpcActor,
+    key_id: &str,
+    model_slug: Option<&str>,
+) -> Result<(), String> {
+    if actor.is_admin() {
+        return Ok(());
+    }
+    let Some(model_slug) = model_slug.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let storage =
+        crate::storage_helpers::open_storage().ok_or_else(|| "storage unavailable".to_string())?;
+    crate::resolve_api_key_model_group_access(&storage, key_id, model_slug).map(|_| ())
+}
+
+fn ensure_new_api_key_model_access(
+    actor: &RpcActor,
+    model_slug: Option<&str>,
+) -> Result<(), String> {
+    if actor.is_admin() {
+        return Ok(());
+    }
+    let Some(model_slug) = model_slug.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let catalog_slug = crate::models_v2::policy_catalog_slug(model_slug);
+    let allowed = allowed_model_slugs_for_actor(actor)?.unwrap_or_default();
+    if allowed.contains(catalog_slug) {
+        return Ok(());
+    }
+    Err(format!("model_not_allowed: {model_slug}"))
+}
+
 fn allowed_model_slugs_for_actor(
     actor: &RpcActor,
 ) -> Result<Option<std::collections::HashSet<String>>, String> {
@@ -154,36 +188,39 @@ pub(super) fn try_handle(req: &JsonRpcRequest, actor: &RpcActor) -> Option<JsonR
             };
             let quota_limit_tokens = super::i64_param(req, "quotaLimitTokens");
             let custom_key = super::string_param(req, "customKey");
-            let created = apikey_create::create_api_key(
-                name,
-                model_slug,
-                reasoning_effort,
-                service_tier,
-                protocol_type,
-                upstream_base_url,
-                static_headers_json,
-                rotation_strategy,
-                aggregate_api_id,
-                account_plan_filter,
-                account_group_filter,
-                quota_limit_tokens,
-                custom_key,
-            )
-            .and_then(|result| {
-                if actor.is_admin() {
-                    return Ok(result);
-                }
-                let user_id = actor
-                    .user_id
-                    .as_deref()
-                    .ok_or_else(|| "permission_denied: apikey requires user session".to_string())?;
-                if let Err(err) = crate::set_api_key_owner(&result.id, "user", Some(user_id), None)
-                {
-                    let _ = apikey_delete::delete_api_key(&result.id);
-                    return Err(err);
-                }
-                Ok(result)
-            });
+            let created = ensure_new_api_key_model_access(actor, model_slug.as_deref())
+                .and_then(|_| {
+                    apikey_create::create_api_key(
+                        name,
+                        model_slug,
+                        reasoning_effort,
+                        service_tier,
+                        protocol_type,
+                        upstream_base_url,
+                        static_headers_json,
+                        rotation_strategy,
+                        aggregate_api_id,
+                        account_plan_filter,
+                        account_group_filter,
+                        quota_limit_tokens,
+                        custom_key,
+                    )
+                })
+                .and_then(|result| {
+                    if actor.is_admin() {
+                        return Ok(result);
+                    }
+                    let user_id = actor.user_id.as_deref().ok_or_else(|| {
+                        "permission_denied: apikey requires user session".to_string()
+                    })?;
+                    if let Err(err) =
+                        crate::set_api_key_owner(&result.id, "user", Some(user_id), None)
+                    {
+                        let _ = apikey_delete::delete_api_key(&result.id);
+                        return Err(err);
+                    }
+                    Ok(result)
+                });
             super::value_or_error(created)
         }
         "apikey/readSecret" => {
@@ -345,6 +382,9 @@ pub(super) fn try_handle(req: &JsonRpcRequest, actor: &RpcActor) -> Option<JsonR
                 && params.is_some_and(|params| params.contains_key("accountGroupFilter"));
             let quota_limit_tokens = super::i64_param(req, "quotaLimitTokens");
             super::ok_or_error(ensure_api_key_access(actor, key_id).and_then(|_| {
+                if update_model_config {
+                    ensure_api_key_model_access(actor, key_id, model_slug.as_deref())?;
+                }
                 apikey_update_model::update_api_key_model(
                     key_id,
                     name,

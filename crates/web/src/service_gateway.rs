@@ -305,15 +305,20 @@ pub(super) async fn rpc_proxy(
     if !is_json_content_type(&headers) {
         return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "{}").into_response();
     }
+    let session = auth::current_app_session_from_headers(&headers);
+    if rpc_proxy_requires_authenticated_session(auth::accounts_mode(), session.is_some()) {
+        return (StatusCode::UNAUTHORIZED, "{}").into_response();
+    }
     let mut request = state
         .client
         .post(&state.service_rpc_url)
         .header("content-type", "application/json")
         .header("x-codexmanager-rpc-token", &state.rpc_token);
-    if let Some(session) = auth::current_app_session_from_headers(&headers) {
+    if let Some(session) = session {
         request = request
             .header("x-codexmanager-rpc-actor-role", session.user.role)
-            .header("x-codexmanager-rpc-actor-user-id", session.user.id);
+            .header("x-codexmanager-rpc-actor-user-id", session.user.id)
+            .header("x-codexmanager-rpc-actor-session-id", session.session_id);
     }
     let resp = request.body(body).send().await;
     let resp = match resp {
@@ -339,6 +344,10 @@ pub(super) async fn rpc_proxy(
         axum::http::HeaderValue::from_static("application/json"),
     );
     out
+}
+
+fn rpc_proxy_requires_authenticated_session(accounts_mode: bool, session_present: bool) -> bool {
+    accounts_mode && !session_present
 }
 
 pub(super) async fn author_content(State(state): State<Arc<AppState>>) -> Response {
@@ -404,7 +413,32 @@ pub(super) async fn author_content(State(state): State<Arc<AppState>>) -> Respon
     out
 }
 
-pub(super) async fn usage_refresh_events(State(state): State<Arc<AppState>>) -> Response {
+fn administrative_auth_required() -> bool {
+    auth::accounts_mode() || codexmanager_service::current_web_auth_mode() != "none"
+}
+
+fn administrative_observability_role_allowed(
+    authentication_required: bool,
+    role: Option<&str>,
+) -> bool {
+    !authentication_required
+        || matches!(
+            role,
+            Some(codexmanager_service::ROLE_ADMIN | codexmanager_service::ROLE_SYSTEM_ADMIN)
+        )
+}
+
+pub(super) async fn usage_refresh_events(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let session = auth::current_app_session_from_headers(&headers);
+    if !administrative_observability_role_allowed(
+        administrative_auth_required(),
+        session.as_ref().map(|session| session.user.role.as_str()),
+    ) {
+        return (StatusCode::FORBIDDEN, "{}").into_response();
+    }
     let target_url = format!("http://{}/events/usage-refresh", state.service_addr.trim());
     let resp = state
         .client
@@ -448,23 +482,14 @@ fn account_test_events_target_url(service_addr: &str, uri: &axum::http::Uri) -> 
     target_url
 }
 
-fn account_test_events_role_allowed(web_auth_mode: &str, role: Option<&str>) -> bool {
-    web_auth_mode != "accounts"
-        || matches!(
-            role,
-            Some(codexmanager_service::ROLE_ADMIN | codexmanager_service::ROLE_SYSTEM_ADMIN)
-        )
-}
-
 pub(super) async fn account_test_events(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     uri: axum::http::Uri,
 ) -> Response {
-    let web_auth_mode = codexmanager_service::current_web_auth_mode();
     let session = auth::current_app_session_from_headers(&headers);
-    if !account_test_events_role_allowed(
-        &web_auth_mode,
+    if !administrative_observability_role_allowed(
+        administrative_auth_required(),
         session.as_ref().map(|session| session.user.role.as_str()),
     ) {
         return (StatusCode::FORBIDDEN, "{}").into_response();
@@ -704,7 +729,33 @@ fn format_upstream_error_message(service_addr: &str, err: impl std::fmt::Display
 ///
 /// # 返回
 /// 返回函数执行结果
-pub(super) async fn quit(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+fn quit_role_allowed(authentication_required: bool, role: Option<&str>) -> bool {
+    administrative_observability_role_allowed(authentication_required, role)
+}
+
+pub(super) async fn metrics(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    let session = auth::current_app_session_from_headers(&headers);
+    if !administrative_observability_role_allowed(
+        administrative_auth_required(),
+        session.as_ref().map(|session| session.user.role.as_str()),
+    ) {
+        return (StatusCode::FORBIDDEN, "{}").into_response();
+    }
+    gateway_proxy(State(state), request).await
+}
+
+pub(super) async fn quit(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let session = auth::current_app_session_from_headers(&headers);
+    if !quit_role_allowed(
+        administrative_auth_required(),
+        session.as_ref().map(|session| session.user.role.as_str()),
+    ) {
+        return (StatusCode::FORBIDDEN, "{}").into_response();
+    }
     if *state.spawned_service.lock().await {
         let addr = state.service_addr.clone();
         let _ = tokio::task::spawn_blocking(move || {
@@ -713,7 +764,7 @@ pub(super) async fn quit(State(state): State<Arc<AppState>>) -> impl IntoRespons
         .await;
     }
     let _ = state.shutdown_tx.send(true);
-    Html("<html><body>OK</body></html>")
+    Html("<html><body>OK</body></html>").into_response()
 }
 
 #[cfg(test)]

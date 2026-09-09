@@ -16,7 +16,11 @@ pub(crate) fn read_api_keys_for_actor(actor: &RpcActor) -> Result<Vec<ApiKeySumm
     let keys = storage
         .list_api_key_summaries_for_user(user_id)
         .map_err(|err| format!("list user api key summaries failed: {err}"))?;
-    Ok(keys.into_iter().map(map_api_key_list_summary).collect())
+    Ok(keys
+        .into_iter()
+        .map(map_api_key_list_summary)
+        .map(redact_member_api_key_summary)
+        .collect())
 }
 
 pub(crate) fn read_api_keys_with_storage(storage: &Storage) -> Result<Vec<ApiKeySummary>, String> {
@@ -33,7 +37,21 @@ pub(crate) fn read_api_keys_for_ids_with_storage(
     let keys = storage
         .list_api_key_summaries_for_ids(key_ids)
         .map_err(|err| format!("list api key summaries failed: {err}"))?;
-    Ok(keys.into_iter().map(map_api_key_list_summary).collect())
+    Ok(keys
+        .into_iter()
+        .map(map_api_key_list_summary)
+        .map(redact_member_api_key_summary)
+        .collect())
+}
+
+fn redact_member_api_key_summary(mut key: ApiKeySummary) -> ApiKeySummary {
+    key.aggregate_api_id = None;
+    key.account_plan_filter = None;
+    key.account_group_filter = None;
+    key.aggregate_api_url = None;
+    key.upstream_base_url = None;
+    key.static_headers_json = None;
+    key
 }
 
 fn map_api_key_list_summary(key: ApiKeyListSummary) -> ApiKeySummary {

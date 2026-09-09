@@ -152,7 +152,30 @@ export interface AppUser {
   createdAt: number;
   updatedAt: number;
   lastLoginAt?: number | null;
+  totpEnabled: boolean;
+  totpConfirmedAt?: number | null;
   wallet?: AppWallet | null;
+}
+
+export interface AppUserTotpSetup {
+  userId: string;
+  username: string;
+  secret: string;
+  otpauthUri: string;
+  challengeToken: string;
+}
+
+export interface AppUserTotpStatus {
+  enabled: boolean;
+  confirmedAt: number | null;
+}
+
+export interface AppUserSession {
+  sessionId: string;
+  createdAt: number;
+  lastSeenAt: number | null;
+  expiresAt: number;
+  current: boolean;
 }
 
 export interface ApiKeyOwner {

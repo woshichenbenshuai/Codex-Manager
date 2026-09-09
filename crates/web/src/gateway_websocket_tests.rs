@@ -47,7 +47,6 @@ fn test_app_state(service_addr: String) -> Arc<crate::AppState> {
         service_rpc_url: format!("http://{service_addr}/rpc"),
         service_addr,
         rpc_token: "rpc_test_token".to_string(),
-        web_auth_session_key: "web_test_session".to_string(),
         shutdown_tx,
         spawned_service: Arc::new(tokio::sync::Mutex::new(false)),
         missing_ui_html: Arc::new(String::new()),

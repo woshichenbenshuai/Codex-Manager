@@ -26,7 +26,7 @@ pub(super) fn builtin_missing_ui_html(detail: &str) -> String {
       h1 {{ margin: 0 0 8px; font-size: 20px; }}
       p {{ margin: 10px 0; color: #374151; }}
       code {{ background: #111827; color: #f9fafb; padding: 2px 6px; border-radius: 6px; }}
-      a {{ color: #2563eb; }}
+      button {{ border: 0; padding: 0; color: #2563eb; background: transparent; cursor: pointer; font: inherit; }}
     </style>
   </head>
   <body>
@@ -37,7 +37,7 @@ pub(super) fn builtin_missing_ui_html(detail: &str) -> String {
       <p>解决方式：</p>
       <p>1) 使用官方发行物（已内置前端资源）；或</p>
       <p>2) 从源码运行：先执行 <code>pnpm -C apps run build:desktop</code>，再设置 <code>CODEXMANAGER_WEB_ROOT=.../apps/out</code> 启动。</p>
-      <p>关闭：访问 <a href="/__quit">/__quit</a>。</p>
+      <form method="post" action="/__quit"><p>关闭：<button type="submit">停止 CodexManager Web</button>。</p></form>
     </div>
   </body>
 </html>

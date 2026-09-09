@@ -7,6 +7,9 @@ import {
   AppRole,
   AppPermission,
   AppUser,
+  AppUserTotpSetup,
+  AppUserTotpStatus,
+  AppUserSession,
   AppWallet,
   CodexLatestVersionInfo,
   ModelGroup,
@@ -77,7 +80,39 @@ function readAppUser(value: unknown): AppUser {
     createdAt: asNumber(source.createdAt),
     updatedAt: asNumber(source.updatedAt),
     lastLoginAt: asNumber(source.lastLoginAt) || null,
+    totpEnabled: asBoolean(source.totpEnabled),
+    totpConfirmedAt: asNumber(source.totpConfirmedAt) || null,
     wallet: readWallet(source.wallet),
+  };
+}
+
+function readTotpSetup(value: unknown): AppUserTotpSetup {
+  const source = asRecord(value);
+  return {
+    userId: asString(source.userId),
+    username: asString(source.username),
+    secret: asString(source.secret),
+    otpauthUri: asString(source.otpauthUri),
+    challengeToken: asString(source.challengeToken),
+  };
+}
+
+function readTotpStatus(value: unknown): AppUserTotpStatus {
+  const source = asRecord(value);
+  return {
+    enabled: asBoolean(source.enabled),
+    confirmedAt: asNumber(source.confirmedAt) || null,
+  };
+}
+
+function readAppUserSession(value: unknown): AppUserSession {
+  const source = asRecord(value);
+  return {
+    sessionId: asString(source.sessionId),
+    createdAt: asNumber(source.createdAt),
+    lastSeenAt: asNumber(source.lastSeenAt) || null,
+    expiresAt: asNumber(source.expiresAt),
+    current: asBoolean(source.current),
   };
 }
 
@@ -150,7 +185,7 @@ function readAccountManagerStatus(value: unknown): AccountManagerStatus {
     mode: asString(source.mode) || "none",
     modeOptions: Array.isArray(source.modeOptions)
       ? source.modeOptions.map((item) => asString(item)).filter(Boolean)
-      : ["none", "password", "accounts"],
+      : ["none", "accounts"],
     passwordConfigured: asBoolean(source.passwordConfigured),
     appUsersConfigured: asBoolean(source.appUsersConfigured),
     appUserCount: asNumber(source.appUserCount),
@@ -165,7 +200,7 @@ function readAppRole(value: unknown): AppRole {
   if (role === "admin" || role === "member" || role === "system_admin") {
     return role;
   }
-  return "system_admin";
+  return "member";
 }
 
 function readPermissions(value: unknown): AppPermission[] {
@@ -225,17 +260,59 @@ export const appClient = {
     );
     return readAppSession(result);
   },
+  async listSessions(): Promise<AppUserSession[]> {
+    const result = await invoke<unknown>(
+      "service_account_manager_session_list",
+      withAddr(),
+    );
+    return Array.isArray(result) ? result.map(readAppUserSession) : [];
+  },
+  async revokeSession(sessionId: string): Promise<void> {
+    await invoke<unknown>(
+      "service_account_manager_session_revoke",
+      withAddr({ sessionId }),
+    );
+  },
   async updateProfile(payload: {
     displayName?: string | null;
   }): Promise<AppUser> {
-    const result = await invoke<unknown>("service_account_manager_profile_update", payload);
+    const result = await invoke<unknown>(
+      "service_account_manager_profile_update",
+      withAddr(payload),
+    );
     return readAppUser(result);
   },
   async changePassword(payload: {
     currentPassword: string;
     newPassword: string;
   }): Promise<void> {
-    await invoke<unknown>("service_account_manager_password_change", payload);
+    await invoke<unknown>(
+      "service_account_manager_password_change",
+      withAddr(payload),
+    );
+  },
+  async getTotpStatus(): Promise<AppUserTotpStatus> {
+    const result = await invoke<unknown>(
+      "service_account_manager_totp_status",
+      withAddr(),
+    );
+    return readTotpStatus(result);
+  },
+  async beginTotpSetup(currentPassword: string): Promise<AppUserTotpSetup> {
+    const result = await invoke<unknown>(
+      "service_account_manager_totp_setup_begin",
+      withAddr({ currentPassword }),
+    );
+    return readTotpSetup(result);
+  },
+  async confirmTotpSetup(targetUserId: string, challengeToken: string, code: string): Promise<void> {
+    await invoke<unknown>(
+      "service_account_manager_totp_setup_confirm",
+      withAddr({ targetUserId, challengeToken, code }),
+    );
+  },
+  async disableTotp(): Promise<void> {
+    await invoke<unknown>("service_account_manager_totp_disable", withAddr());
   },
   async listAppUsers(addr?: string | null): Promise<AppUser[]> {
     const result = await invoke<unknown>(
@@ -250,11 +327,17 @@ export const appClient = {
     displayName?: string | null;
     role?: string | null;
     initialBalanceCreditMicros?: number | null;
-  }): Promise<AppUser> {
-    const result = await invoke<unknown>("service_account_manager_user_create", {
-      payload,
-    });
-    return readAppUser(result);
+    actorPassword?: string | null;
+  }): Promise<{ user: AppUser; totpSetup: AppUserTotpSetup | null }> {
+    const result = await invoke<unknown>(
+      "service_account_manager_user_create",
+      withAddr({ payload }),
+    );
+    const source = asRecord(result);
+    return {
+      user: readAppUser(source.user),
+      totpSetup: source.totpSetup ? readTotpSetup(source.totpSetup) : null,
+    };
   },
   async updateAppUser(payload: {
     id: string;
@@ -263,13 +346,23 @@ export const appClient = {
     status?: string | null;
     password?: string | null;
   }): Promise<AppUser> {
-    const result = await invoke<unknown>("service_account_manager_user_update", {
-      payload,
-    });
+    const result = await invoke<unknown>(
+      "service_account_manager_user_update",
+      withAddr({ payload }),
+    );
     return readAppUser(result);
   },
   async deleteAppUser(id: string): Promise<void> {
-    await invoke<unknown>("service_account_manager_user_delete", { id });
+    await invoke<unknown>(
+      "service_account_manager_user_delete",
+      withAddr({ id }),
+    );
+  },
+  async resetAppUserTotp(userId: string): Promise<void> {
+    await invoke<unknown>(
+      "service_account_manager_user_totp_reset",
+      withAddr({ userId }),
+    );
   },
   async topUpWallet(payload: {
     ownerKind: string;
@@ -277,7 +370,10 @@ export const appClient = {
     amountCreditMicros: number;
     note?: string | null;
   }): Promise<AppWallet | null> {
-    const result = await invoke<unknown>("service_account_manager_wallet_top_up", payload);
+    const result = await invoke<unknown>(
+      "service_account_manager_wallet_top_up",
+      withAddr(payload),
+    );
     return readWallet(result);
   },
   async setWalletAvailable(payload: {
@@ -288,7 +384,7 @@ export const appClient = {
   }): Promise<AppWallet | null> {
     const result = await invoke<unknown>(
       "service_account_manager_wallet_set_available",
-      payload
+      withAddr(payload),
     );
     return readWallet(result);
   },

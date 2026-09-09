@@ -39,6 +39,10 @@ pub fn start_one_shot_server() -> std::io::Result<ServerHandle> {
     crate::gateway::reload_runtime_config_from_env();
     crate::storage_helpers::initialize_storage()
         .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    if crate::current_web_auth_mode() == "accounts" {
+        crate::validate_web_totp_encryption_key()
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    }
     crate::sync_runtime_settings_from_storage();
     let server = tiny_http::Server::http("127.0.0.1:0")
         .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
@@ -71,6 +75,10 @@ pub fn start_server(addr: &str) -> std::io::Result<()> {
     crate::gateway::reload_runtime_config_from_env();
     crate::storage_helpers::initialize_storage()
         .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    if crate::current_web_auth_mode() == "accounts" {
+        crate::validate_web_totp_encryption_key()
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    }
     crate::sync_runtime_settings_from_storage();
     crate::app_settings::ensure_codex_latest_version_sync();
     crate::usage_refresh::ensure_usage_polling();

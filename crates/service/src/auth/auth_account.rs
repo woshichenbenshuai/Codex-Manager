@@ -53,7 +53,6 @@ pub(crate) struct CurrentAuthAccount {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChatgptAuthTokensRefreshResponse {
-    pub(crate) access_token: String,
     pub(crate) chatgpt_account_id: String,
     pub(crate) chatgpt_plan_type: Option<String>,
     pub(crate) has_subscription: Option<bool>,
@@ -386,7 +385,6 @@ pub(crate) fn refresh_current_chatgpt_auth_tokens(
     });
 
     Ok(ChatgptAuthTokensRefreshResponse {
-        access_token: token.access_token,
         chatgpt_account_id,
         chatgpt_plan_type,
         has_subscription: Some(subscription.has_subscription),
@@ -410,6 +408,12 @@ pub(crate) fn refresh_current_chatgpt_auth_tokens(
 pub(crate) fn refresh_all_chatgpt_auth_tokens(
 ) -> Result<ChatgptAuthTokensRefreshAllResponse, String> {
     let storage = open_storage().ok_or_else(|| "storage unavailable".to_string())?;
+    refresh_all_chatgpt_auth_tokens_with_storage(&storage)
+}
+
+fn refresh_all_chatgpt_auth_tokens_with_storage(
+    storage: &Storage,
+) -> Result<ChatgptAuthTokensRefreshAllResponse, String> {
     let accounts = storage
         .list_account_auth_refresh_targets()
         .map_err(|err| err.to_string())?;
@@ -460,7 +464,7 @@ pub(crate) fn refresh_all_chatgpt_auth_tokens(
         requested = requested.saturating_add(1);
         let issuer = refresh_target_issuer(&account, &default_issuer);
         match refresh_and_persist_access_token(
-            &storage,
+            storage,
             &mut token,
             issuer,
             &client_id,
@@ -477,7 +481,7 @@ pub(crate) fn refresh_all_chatgpt_auth_tokens(
             }
             Err(err) => {
                 failed = failed.saturating_add(1);
-                let _ = mark_account_unavailable_for_auth_error(&storage, &account.id, &err);
+                let _ = mark_account_unavailable_for_auth_error(storage, &account.id, &err);
                 results.push(ChatgptAuthTokensRefreshAllItem {
                     account_id: account.id,
                     account_name,

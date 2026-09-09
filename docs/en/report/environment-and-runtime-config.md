@@ -77,6 +77,7 @@
 
 - `CODEXMANAGER_SERVICE_ADDR`：service 地址，默认 `localhost:48760`
 - `CODEXMANAGER_WEB_ADDR`：web 地址，默认 `localhost:48761`
+- `CODEXMANAGER_WEB_PUBLISH_HOST`: host address used only by Docker Compose when publishing the Web port. Compose files under `docker/` default to `127.0.0.1`; the root NAS/server Compose defaults to `0.0.0.0` to preserve its public port `17000`. That public entrypoint must sit behind an HTTPS load balancer or reverse proxy and be restricted at the firewall.
 - `CODEXMANAGER_WEB_ROOT`：web 静态资源目录
 - `CODEXMANAGER_LOGIN_ADDR`：本地 OAuth 回调监听地址
 
@@ -131,7 +132,10 @@ Notes:
 
 补充说明：
 
-- Web 访问密码当前由设置页写入 `app_settings` 的 `web.auth.password_hash`，不是公开环境变量。
+- Web account login uses a username, password, and the account's TOTP policy. The legacy `web.auth.password_hash` is accepted only during one-time migration and is not a formal login credential afterwards.
+- A non-loopback Web listener requires `CODEXMANAGER_WEB_PUBLIC_BASE_URL` to be the final public `https://` origin. It is used for Secure cookies and Origin/Referer checks; `X-Forwarded-Proto` is not trusted for this decision.
+- `CODEXMANAGER_WEB_TRUSTED_PROXY_CIDRS` is an optional comma-separated CIDR allowlist. `X-Forwarded-For` is honored only when the TCP peer belongs to this list.
+- Compose files under `docker/` bind the Web port to host loopback by default. The root Compose preserves the existing public `17000 -> 48761` mapping for server/NAS deployments. Neither form publishes service port `48760`; publishing it still requires an explicit override and independent access controls. Protect the root public entrypoint with HTTPS termination and firewall rules.
 
 ### 后台任务与并发
 
