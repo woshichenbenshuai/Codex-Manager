@@ -1,13 +1,17 @@
+use sqlx::pool::PoolConnection;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
-use sqlx::{Column, Row as SqlxRow, SqlitePool, TypeInfo};
+use sqlx::{Column, Row as SqlxRow, Sqlite, SqlitePool, TypeInfo};
 use std::cell::Cell;
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::thread::{self, ThreadId};
 use std::time::Duration;
 use tokio::runtime::{Builder, Runtime};
+use tokio::sync::Mutex as AsyncMutex;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -57,6 +61,13 @@ pub struct Connection {
     rt: Arc<Runtime>,
     pool: SqlitePool,
     path: Option<PathBuf>,
+    active_transaction: Arc<StdMutex<Option<ActiveTransaction>>>,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveTransaction {
+    owner: ThreadId,
+    connection: Arc<AsyncMutex<PoolConnection<Sqlite>>>,
 }
 
 impl Connection {
@@ -74,6 +85,7 @@ impl Connection {
             rt,
             pool,
             path: Some(path),
+            active_transaction: Arc::new(StdMutex::new(None)),
         })
     }
 
@@ -93,6 +105,7 @@ impl Connection {
             rt,
             pool,
             path: None,
+            active_transaction: Arc::new(StdMutex::new(None)),
         })
     }
 
@@ -108,22 +121,25 @@ impl Connection {
     }
 
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> Result<usize> {
-        self.block_on(execute_on_pool(
-            &self.pool,
-            sql,
-            Params::into_params(params),
-        ))
+        self.execute_params(sql, Params::into_params(params))
     }
 
     pub fn execute_batch(&self, sql: &str) -> Result<()> {
-        self.block_on(async {
-            for statement in split_sql_batch(sql) {
-                if !statement.trim().is_empty() {
-                    sqlx::query(statement).execute(&self.pool).await?;
+        if let Some(connection) = self.active_connection_for_current_thread() {
+            self.block_on(async {
+                let mut connection = connection.lock().await;
+                execute_batch_on_connection(&mut connection, sql).await
+            })
+        } else {
+            self.block_on(async {
+                for statement in split_sql_batch(sql) {
+                    if !statement.trim().is_empty() {
+                        sqlx::query(statement).execute(&self.pool).await?;
+                    }
                 }
-            }
-            Ok(())
-        })
+                Ok(())
+            })
+        }
     }
 
     pub fn query_row<P, F, T>(&self, sql: &str, params: P, f: F) -> Result<T>
@@ -139,21 +155,73 @@ impl Connection {
     }
 
     pub fn unchecked_transaction(&self) -> Result<Transaction<'_>> {
-        self.execute_batch("BEGIN IMMEDIATE")?;
+        if self.active_connection_for_current_thread().is_some() {
+            return Err(Error::SqliteFailure(
+                (),
+                Some("transaction already active on this thread".into()),
+            ));
+        }
+        let mut connection = self.block_on(self.pool.acquire())?;
+        let begin = self.block_on(async {
+            sqlx::query("BEGIN IMMEDIATE")
+                .execute(connection.as_mut())
+                .await
+        });
+        if let Err(error) = begin {
+            let _ = self.block_on(async move {
+                drop(connection);
+            });
+            return Err(error.into());
+        }
+        let connection = Arc::new(AsyncMutex::new(connection));
+        let owner = thread::current().id();
+        {
+            let mut active = self
+                .active_transaction
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if active.is_some() {
+                let _ = self.block_on(async move {
+                    let connection = connection.lock().await;
+                    drop(connection);
+                });
+                return Err(Error::SqliteFailure(
+                    (),
+                    Some("transaction already active".into()),
+                ));
+            }
+            *active = Some(ActiveTransaction {
+                owner,
+                connection: connection.clone(),
+            });
+        }
         Ok(Transaction {
             conn: self,
+            connection: Some(connection),
+            owner,
+            active_transaction: self.active_transaction.clone(),
             active: Cell::new(true),
             last_insert_rowid: Cell::new(0),
         })
     }
 
     pub fn last_insert_rowid(&self) -> i64 {
-        self.block_on(async {
-            sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-                .fetch_one(&self.pool)
-                .await
-                .unwrap_or(0)
-        })
+        if let Some(connection) = self.active_connection_for_current_thread() {
+            self.block_on(async {
+                let mut connection = connection.lock().await;
+                sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
+                    .fetch_one(connection.as_mut())
+                    .await
+                    .unwrap_or(0)
+            })
+        } else {
+            self.block_on(async {
+                sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
+                    .fetch_one(&self.pool)
+                    .await
+                    .unwrap_or(0)
+            })
+        }
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -166,6 +234,40 @@ impl Connection {
         F::Output: Send,
     {
         block_on_runtime(&self.rt, future)
+    }
+
+    fn active_connection_for_current_thread(
+        &self,
+    ) -> Option<Arc<AsyncMutex<PoolConnection<Sqlite>>>> {
+        let active = self
+            .active_transaction
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.as_ref().and_then(|transaction| {
+            (transaction.owner == thread::current().id()).then(|| transaction.connection.clone())
+        })
+    }
+
+    fn execute_params(&self, sql: &str, params: Vec<types::Value>) -> Result<usize> {
+        if let Some(connection) = self.active_connection_for_current_thread() {
+            self.block_on(async {
+                let mut connection = connection.lock().await;
+                execute_on_connection(&mut connection, sql, params).await
+            })
+        } else {
+            self.block_on(execute_on_pool(&self.pool, sql, params))
+        }
+    }
+
+    fn fetch_rows(&self, sql: &str, params: Vec<types::Value>) -> Result<Vec<Row<'static>>> {
+        if let Some(connection) = self.active_connection_for_current_thread() {
+            self.block_on(async {
+                let mut connection = connection.lock().await;
+                fetch_rows_on_connection(&mut connection, sql, params).await
+            })
+        } else {
+            self.block_on(fetch_rows_on_pool(&self.pool, sql, params))
+        }
     }
 }
 
@@ -190,7 +292,13 @@ where
     F: Future + Send,
     F::Output: Send,
 {
-    if tokio::runtime::Handle::try_current().is_ok() {
+    if tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    {
+        // Release the async executor while the legacy synchronous database
+        // facade waits on its shared SQLx runtime. No per-query thread.
+        tokio::task::block_in_place(|| rt.block_on(future))
+    } else if tokio::runtime::Handle::try_current().is_ok() {
         std::thread::scope(|scope| {
             scope
                 .spawn(|| rt.block_on(future))
@@ -217,11 +325,9 @@ pub struct Statement<'c> {
 
 impl<'c> Statement<'c> {
     pub fn query<P: Params>(&mut self, params: P) -> Result<Rows<'_>> {
-        let rows = self.conn.block_on(fetch_rows_on_pool(
-            &self.conn.pool,
-            &self.sql,
-            Params::into_params(params),
-        ))?;
+        let rows = self
+            .conn
+            .fetch_rows(&self.sql, Params::into_params(params))?;
         Ok(Rows {
             rows,
             index: 0,
@@ -257,11 +363,8 @@ impl<'c> Statement<'c> {
     }
 
     pub fn execute<P: Params>(&mut self, params: P) -> Result<usize> {
-        self.conn.block_on(execute_on_pool(
-            &self.conn.pool,
-            &self.sql,
-            Params::into_params(params),
-        ))
+        self.conn
+            .execute_params(&self.sql, Params::into_params(params))
     }
 }
 
@@ -688,20 +791,37 @@ impl<T> OptionalExtension<T> for Result<T> {
 #[derive(Debug)]
 pub struct Transaction<'c> {
     conn: &'c Connection,
+    connection: Option<Arc<AsyncMutex<PoolConnection<Sqlite>>>>,
+    owner: ThreadId,
+    active_transaction: Arc<StdMutex<Option<ActiveTransaction>>>,
     active: Cell<bool>,
     last_insert_rowid: Cell<i64>,
 }
 
 impl<'c> Transaction<'c> {
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> Result<usize> {
-        let affected = self.conn.execute(sql, params)?;
-        let rowid = self.conn.last_insert_rowid();
+        let sql = sql.to_string();
+        let params = Params::into_params(params);
+        let affected = self.with_connection(|connection| {
+            Box::pin(async move { execute_on_connection(connection, &sql, params).await })
+        })?;
+        let rowid = self.with_connection(|connection| {
+            Box::pin(async move {
+                sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
+                    .fetch_one(&mut **connection)
+                    .await
+                    .map_err(Error::from)
+            })
+        })?;
         self.last_insert_rowid.set(rowid);
         Ok(affected)
     }
 
     pub fn execute_batch(&self, sql: &str) -> Result<()> {
-        self.conn.execute_batch(sql)
+        let sql = sql.to_string();
+        self.with_connection(|connection| {
+            Box::pin(async move { execute_batch_on_connection(connection, &sql).await })
+        })
     }
 
     pub fn query_row<P, F, T>(&self, sql: &str, params: P, f: F) -> Result<T>
@@ -709,7 +829,15 @@ impl<'c> Transaction<'c> {
         P: Params,
         F: FnOnce(&Row<'_>) -> Result<T>,
     {
-        self.conn.query_row(sql, params, f)
+        let sql = sql.to_string();
+        let params = Params::into_params(params);
+        let rows = self.with_connection(|connection| {
+            Box::pin(async move { fetch_rows_on_connection(connection, &sql, params).await })
+        })?;
+        match rows.into_iter().next() {
+            Some(row) => f(&row),
+            None => Err(Error::QueryReturnedNoRows),
+        }
     }
 
     pub fn prepare<'t>(&'t self, sql: &str) -> Result<TransactionStatement<'t, 'c>> {
@@ -723,19 +851,101 @@ impl<'c> Transaction<'c> {
         self.last_insert_rowid.get()
     }
 
-    pub fn commit(self) -> Result<()> {
-        if self.active.replace(false) {
-            self.conn.execute_batch("COMMIT")?;
+    pub fn commit(mut self) -> Result<()> {
+        if self.active.get() {
+            let result = self.with_connection(|connection| {
+                Box::pin(async move {
+                    sqlx::query("COMMIT")
+                        .execute(&mut **connection)
+                        .await
+                        .map(|_| ())
+                        .map_err(Error::from)
+                })
+            });
+            if result.is_err() {
+                let _ = self.with_connection(|connection| {
+                    Box::pin(async move {
+                        sqlx::query("ROLLBACK")
+                            .execute(&mut **connection)
+                            .await
+                            .map(|_| ())
+                            .map_err(Error::from)
+                    })
+                });
+            }
+            self.active.set(false);
+            self.clear_active_transaction();
+            self.release_connection();
+            result
+        } else {
+            self.release_connection();
+            Ok(())
         }
-        Ok(())
+    }
+
+    fn clear_active_transaction(&self) {
+        let mut active = self
+            .active_transaction
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.as_ref().is_some_and(|transaction| {
+            transaction.owner == self.owner
+                && self
+                    .connection
+                    .as_ref()
+                    .is_some_and(|connection| Arc::ptr_eq(&transaction.connection, connection))
+        }) {
+            *active = None;
+        }
+    }
+
+    fn release_connection(&mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        let _ = self.conn.block_on(async move {
+            let connection = connection.lock().await;
+            drop(connection);
+        });
+    }
+
+    fn with_connection<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send,
+        F: Send
+            + for<'a> FnOnce(
+                &'a mut PoolConnection<Sqlite>,
+            ) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>,
+    {
+        let connection = self
+            .connection
+            .as_ref()
+            .ok_or_else(|| {
+                Error::SqliteFailure((), Some("transaction connection unavailable".to_string()))
+            })?
+            .clone();
+        self.conn.block_on(async move {
+            let mut connection = connection.lock().await;
+            operation(&mut connection).await
+        })
     }
 }
 
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
         if self.active.replace(false) {
-            let _ = self.conn.execute_batch("ROLLBACK");
+            let _ = self.with_connection(|connection| {
+                Box::pin(async move {
+                    sqlx::query("ROLLBACK")
+                        .execute(connection.as_mut())
+                        .await
+                        .map(|_| ())
+                        .map_err(Error::from)
+                })
+            });
+            self.clear_active_transaction();
         }
+        self.release_connection();
     }
 }
 
@@ -890,12 +1100,121 @@ pub mod backup {
     }
 }
 
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn transaction_keeps_shared_handle_out_until_commit() {
+        let connection = Connection::open_in_memory().expect("open database");
+        connection
+            .execute_batch("CREATE TABLE entries(value TEXT NOT NULL);")
+            .expect("create table");
+        let shared = connection.clone();
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("begin transaction");
+        transaction
+            .execute("INSERT INTO entries(value) VALUES (?)", ["transaction"])
+            .expect("write transaction row");
+
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = shared.execute("INSERT INTO entries(value) VALUES (?)", ["shared"]);
+            sender.send(result).expect("send worker result");
+        });
+
+        assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        transaction.commit().expect("commit transaction");
+        worker.join().expect("join worker");
+        receiver
+            .recv()
+            .expect("receive worker result")
+            .expect("write shared row");
+
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .expect("count rows");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn transaction_rolls_back_and_keeps_last_insert_rowid_on_owned_connection() {
+        let connection = Connection::open_in_memory().expect("open database");
+        connection
+            .execute_batch("CREATE TABLE entries(id INTEGER PRIMARY KEY, value TEXT NOT NULL);")
+            .expect("create table");
+        {
+            let transaction = connection
+                .unchecked_transaction()
+                .expect("begin transaction");
+            transaction
+                .execute("INSERT INTO entries(value) VALUES (?)", ["rolled-back"])
+                .expect("write transaction row");
+            assert_eq!(transaction.last_insert_rowid(), 1);
+        }
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .expect("count rows");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn connection_methods_reuse_the_active_transaction_on_the_owner_thread() {
+        let connection = Connection::open_in_memory().expect("open database");
+        connection
+            .execute_batch("CREATE TABLE entries(value TEXT NOT NULL);")
+            .expect("create table");
+        let transaction = connection
+            .unchecked_transaction()
+            .expect("begin transaction");
+        connection
+            .execute("INSERT INTO entries(value) VALUES (?)", ["routed"])
+            .expect("write through connection route");
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .expect("read through connection route");
+        assert_eq!(count, 1);
+        drop(transaction);
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .expect("count rolled back rows");
+        assert_eq!(count, 0);
+    }
+}
+
 async fn execute_on_pool(pool: &SqlitePool, sql: &str, params: Vec<types::Value>) -> Result<usize> {
     let (sql, params) = normalize_sql_and_params(sql, params)?;
     let result = bind_values(sqlx::query(&sql), &params)
         .execute(pool)
         .await?;
     Ok(result.rows_affected() as usize)
+}
+
+async fn execute_on_connection(
+    connection: &mut PoolConnection<Sqlite>,
+    sql: &str,
+    params: Vec<types::Value>,
+) -> Result<usize> {
+    let (sql, params) = normalize_sql_and_params(sql, params)?;
+    let result = bind_values(sqlx::query(&sql), &params)
+        .execute(connection.as_mut())
+        .await?;
+    Ok(result.rows_affected() as usize)
+}
+
+async fn execute_batch_on_connection(
+    connection: &mut PoolConnection<Sqlite>,
+    sql: &str,
+) -> Result<()> {
+    for statement in split_sql_batch(sql) {
+        if !statement.trim().is_empty() {
+            sqlx::query(statement).execute(connection.as_mut()).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn fetch_rows_on_pool(
@@ -906,6 +1225,18 @@ async fn fetch_rows_on_pool(
     let (sql, params) = normalize_sql_and_params(sql, params)?;
     let rows = bind_values(sqlx::query(&sql), &params)
         .fetch_all(pool)
+        .await?;
+    rows.into_iter().map(row_from_sqlx).collect()
+}
+
+async fn fetch_rows_on_connection(
+    connection: &mut PoolConnection<Sqlite>,
+    sql: &str,
+    params: Vec<types::Value>,
+) -> Result<Vec<Row<'static>>> {
+    let (sql, params) = normalize_sql_and_params(sql, params)?;
+    let rows = bind_values(sqlx::query(&sql), &params)
+        .fetch_all(connection.as_mut())
         .await?;
     rows.into_iter().map(row_from_sqlx).collect()
 }
