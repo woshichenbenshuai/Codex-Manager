@@ -4,6 +4,8 @@ use super::{
 };
 use std::collections::HashMap;
 
+use codexmanager_core::storage::{now_ts, Account, Event, Storage};
+
 /// 函数 `usage_refresh_error_class_groups_by_status_code`
 ///
 /// 作者: gaohongshun
@@ -167,4 +169,44 @@ fn failure_event_throttle_isolated_by_error_class() {
         110,
         60
     ));
+}
+
+#[test]
+fn refresh_failure_preserves_confirmed_usage_limit_reason() {
+    let storage = Storage::open_in_memory().expect("open storage");
+    storage.init().expect("init storage");
+    let now = now_ts();
+    let account_id = format!("usage-limited-{}", std::process::id());
+    storage
+        .insert_account(&Account {
+            id: account_id.clone(),
+            label: "limited".to_string(),
+            issuer: "issuer".to_string(),
+            chatgpt_account_id: None,
+            workspace_id: None,
+            group_name: None,
+            sort: 0,
+            status: "limited".to_string(),
+            created_at: now,
+            updated_at: now,
+        })
+        .expect("insert account");
+    storage
+        .insert_event(&Event {
+            account_id: Some(account_id.clone()),
+            event_type: "account_status_update".to_string(),
+            message: "status=limited reason=usage_limit_exhausted".to_string(),
+            created_at: now,
+        })
+        .expect("insert confirmed limit event");
+
+    super::record_usage_refresh_failure(&storage, &account_id, "connection reset by peer");
+
+    let reasons = storage
+        .latest_account_status_reasons(&[account_id.clone()])
+        .expect("load status reason");
+    assert_eq!(
+        reasons.get(&account_id).map(String::as_str),
+        Some("usage_limit_exhausted")
+    );
 }

@@ -6,8 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use crossbeam_channel::{bounded, Receiver, SendTimeoutError, Sender};
-use tiny_http::Request;
-use tiny_http::Server;
+use tiny_http::{Request, Response, Server};
 
 const HTTP_WORKER_FACTOR: usize = 4;
 const HTTP_WORKER_MIN: usize = 8;
@@ -362,9 +361,18 @@ fn run_backend_server(server: Server) {
     spawn_request_workers(stream_worker_count, stream_rx, true);
 
     for request in server.incoming_requests() {
-        if crate::shutdown_requested() || request.url() == "/__shutdown" {
+        if crate::shutdown_requested() {
             let _ = request.respond(tiny_http::Response::from_string("shutdown"));
             break;
+        }
+        if request.url() == "/__shutdown" {
+            if shutdown_request_authorized(&request) {
+                crate::request_shutdown("");
+                let _ = request.respond(Response::from_string("shutdown"));
+                break;
+            }
+            let _ = request.respond(Response::from_string("{}").with_status_code(401));
+            continue;
         }
         if should_bypass_queue(request.url()) {
             handle_backend_request_safely(request);
@@ -379,6 +387,37 @@ fn run_backend_server(server: Server) {
             }
         }
     }
+}
+
+fn request_header_value<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.as_str().as_str().eq_ignore_ascii_case(name))
+        .map(|header| header.value.as_str().trim())
+        .filter(|value| !value.is_empty())
+}
+
+fn shutdown_token_matches(candidate: Option<&str>) -> bool {
+    candidate.is_some_and(crate::rpc_auth_token_matches)
+}
+
+fn shutdown_request_authorized(request: &Request) -> bool {
+    shutdown_token_matches(request_header_value(request, "X-CodexManager-Rpc-Token"))
+}
+
+fn shutdown_request_bytes(addr: &str) -> Option<Vec<u8>> {
+    let token = crate::rpc_auth_token();
+    if token.is_empty() || token.bytes().any(|byte| byte <= 0x20 || byte >= 0x7f) {
+        log::error!("event=backend_shutdown_invalid_rpc_token");
+        return None;
+    }
+    Some(
+        format!(
+            "GET /__shutdown HTTP/1.1\r\nHost: {addr}\r\nX-CodexManager-Rpc-Token: {token}\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes(),
+    )
 }
 
 /// 函数 `should_bypass_queue`
@@ -438,8 +477,10 @@ pub(crate) fn wake_backend_shutdown(addr: &str) {
     let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
 
-    let request = format!("GET /__shutdown HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    let _ = stream.write_all(request.as_bytes());
+    let Some(request) = shutdown_request_bytes(addr) else {
+        return;
+    };
+    let _ = stream.write_all(&request);
 }
 
 #[cfg(test)]

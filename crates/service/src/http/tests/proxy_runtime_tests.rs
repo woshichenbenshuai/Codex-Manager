@@ -38,6 +38,63 @@ const TEST_ZSTD_MAX_BODY_BYTES: usize = 256 * 1024 * 1024;
 const TEST_LARGE_RESPONSES_WS_FRAME_BYTES: usize = 17 * 1024 * 1024;
 const TEST_IMAGE_CONTEXT_RESPONSES_WS_FRAME_BYTES: usize = 34 * 1024 * 1024;
 
+async fn assert_normal_client_close(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) {
+    use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+    socket
+        .close(Some(CloseFrame {
+            code: CloseCode::Normal,
+            reason: "fixture complete".into(),
+        }))
+        .await
+        .expect("send normal close");
+    let reply = tokio::time::timeout(Duration::from_secs(3), socket.next())
+        .await
+        .expect("close acknowledgement timeout")
+        .expect("close acknowledgement frame")
+        .expect("normal close must not reset the TCP connection");
+    let Message::Close(Some(frame)) = reply else {
+        panic!("expected close acknowledgement, got {reply:?}");
+    };
+    assert_eq!(frame.code, CloseCode::Normal);
+    assert_eq!(frame.reason, "fixture complete");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_acknowledges_close_before_initial_request() {
+    let _guard = crate::test_env_guard();
+    let db_path = new_test_db_path("codexmanager-ws-close-initial");
+    let storage = init_test_storage(&db_path);
+    let _db_guard = EnvGuard::set("CODEXMANAGER_DB_PATH", db_path.to_string_lossy().as_ref());
+    insert_api_key_record(
+        &storage,
+        "platform_key_ws_close_initial",
+        crate::apikey_profile::ROTATION_ACCOUNT,
+        Some("http://127.0.0.1:1/chatgpt.com/backend-api/codex".into()),
+    );
+    let (addr, shutdown, server) = start_front_proxy_test_server(ProxyState {
+        backend_base_url: "http://127.0.0.1:1".into(),
+        client: Client::new(),
+    })
+    .await;
+    let (mut socket, _) = connect_async(build_ws_request(
+        &format!("ws://{addr}/v1/responses"),
+        "platform_key_ws_close_initial",
+        &[],
+    ))
+    .await
+    .expect("websocket upgrade");
+    assert_normal_client_close(&mut socket).await;
+    shutdown.send(()).expect("request shutdown");
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("server shutdown timeout")
+        .expect("join server");
+}
+
 fn test_upstream_ws_config() -> WebSocketConfig {
     let mut config = WebSocketConfig::default()
         .max_message_size(Some(

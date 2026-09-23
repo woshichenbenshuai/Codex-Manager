@@ -34,7 +34,16 @@ $appsRoot = Join-Path $root "apps"
 $frontendRoot = $appsRoot
 $tauriDir = Join-Path $appsRoot "src-tauri"
 $rootTarget = Join-Path $root "target"
-$tauriTarget = Join-Path $tauriDir "target"
+$targetDir = if ($env:CARGO_TARGET_DIR) {
+  if ([IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+    $env:CARGO_TARGET_DIR
+  } else {
+    Join-Path $root $env:CARGO_TARGET_DIR
+  }
+} else {
+  # Cargo inherits the repository .cargo/config.toml from apps/src-tauri.
+  $rootTarget
+}
 $distDir = Join-Path $frontendRoot "out"
 $tauriConfig = Join-Path $tauriDir "tauri.conf.json"
 
@@ -47,7 +56,7 @@ $portableRoot = if ($PortableDir) { $PortableDir } else { Join-Path $root "porta
 $portableExe = Join-Path $portableRoot "$appName-portable.exe"
 $legacyPortableExe = Join-Path $portableRoot "$appName.exe"
 $legacyPortableMarker = Join-Path $portableRoot ".codexmanager-portable"
-$appExe = Join-Path $tauriDir "target\\release\\$appName.exe"
+$appExe = Join-Path $targetDir "release\\$appName.exe"
 $artifactsRoot = if ($ArtifactsDir) { $ArtifactsDir } else { Join-Path $root "artifacts" }
 
 <#
@@ -83,18 +92,37 @@ function Write-Step {
 #>
 function Remove-Dir {
   param([string]$Path)
-  if (-not (Test-Path $Path)) {
-    Write-Step "skip: $Path not found"
+  $workspacePath = [IO.Path]::GetFullPath($root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+  $candidatePath = [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+  $configuredTarget = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($targetDir).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) } else { $null }
+  $isExplicitExternalTarget = $null -ne $configuredTarget -and $candidatePath -eq $configuredTarget
+  $separator = [IO.Path]::DirectorySeparatorChar
+  $workspacePrefix = "$workspacePath$separator"
+  $candidatePrefix = "$candidatePath$separator"
+  $candidateIsInsideWorkspace = $candidatePath.Equals($workspacePath, [StringComparison]::OrdinalIgnoreCase) -or
+    $candidatePath.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase)
+  $candidateIsAncestor = $workspacePath.Equals($candidatePath, [StringComparison]::OrdinalIgnoreCase) -or
+    $workspacePath.StartsWith($candidatePrefix, [StringComparison]::OrdinalIgnoreCase)
+  $candidateIsFilesystemRoot = [string]::Equals($candidatePath, [IO.Path]::GetPathRoot($candidatePath).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)
+  if ($candidateIsFilesystemRoot -or $candidateIsAncestor -or
+      (-not $isExplicitExternalTarget -and -not $candidateIsInsideWorkspace)) {
+    throw "refusing to recursively remove a path outside the repository build tree: $candidatePath"
+  }
+  if (Test-Path -LiteralPath $candidatePath) {
+    $item = Get-Item -LiteralPath $candidatePath -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "refusing to recursively remove a reparse point: $candidatePath"
+    }
+  }
+  if (-not (Test-Path -LiteralPath $candidatePath)) {
+    Write-Step "skip: $candidatePath not found"
     return
   }
   if ($DryRun) {
-    Write-Step "DRY RUN: remove $Path"
+    Write-Step "DRY RUN: remove $candidatePath"
     return
   }
-  & cmd /c "rmdir /s /q `"$Path`""
-  if ($LASTEXITCODE -ne 0) {
-    throw "failed to remove $Path"
-  }
+  Remove-Item -LiteralPath $candidatePath -Recurse -Force
 }
 
 <#
@@ -277,8 +305,7 @@ function Invoke-LocalWindowsBuild {
 
   Push-Location $root
   try {
-    Remove-Dir $rootTarget
-    Remove-Dir $tauriTarget
+    Remove-Dir $targetDir
     if ($CleanDist) {
       Remove-Dir $distDir
     }

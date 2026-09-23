@@ -932,6 +932,7 @@ async fn run_responses_websocket_session(mut socket: WebSocket, context: WsReque
                         .await;
                     }
                     Ok(Message::Close(_)) => {
+                        acknowledge_client_close(&mut socket).await;
                         let _ = upstream.stream.close(None).await;
                         break;
                     }
@@ -1589,7 +1590,10 @@ async fn receive_initial_request(socket: &mut WebSocket) -> Result<Option<String
                 let _ = socket.send(Message::Pong(payload)).await;
             }
             Ok(Message::Pong(_)) => {}
-            Ok(Message::Close(_)) => return Ok(None),
+            Ok(Message::Close(_)) => {
+                acknowledge_client_close(socket).await;
+                return Ok(None);
+            }
             Ok(Message::Binary(_)) => {
                 return Err(WsSessionError::bad_request_bilingual(
                     "首个 WebSocket 帧必须是 response.create 文本帧",
@@ -1605,6 +1609,12 @@ async fn receive_initial_request(socket: &mut WebSocket) -> Result<Option<String
             }
         }
     }
+}
+
+async fn acknowledge_client_close(socket: &mut WebSocket) {
+    // Receiving Close queues the protocol reply. Flush it before dropping the
+    // socket so a normal close is not reported to the client as code 1006.
+    let _ = tokio::time::timeout(Duration::from_secs(3), socket.flush()).await;
 }
 
 fn responses_ws_heartbeat_interval() -> tokio::time::Interval {
@@ -2780,8 +2790,17 @@ fn try_refresh_websocket_bearer(
     )?;
 
     if token.api_key_access_token == previous_api_key_access_token {
+        let expected = token.clone();
         token.api_key_access_token = None;
-        storage.insert_token(token).map_err(|err| err.to_string())?;
+        if !storage
+            .compare_and_swap_token(&expected, token)
+            .map_err(|err| err.to_string())?
+        {
+            *token = storage
+                .find_token_by_account_id(&token.account_id)
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| "websocket token was removed during refresh".to_string())?;
+        }
     }
 
     let bearer = crate::gateway::gateway_resolve_openai_bearer_token(storage, account, token)?;

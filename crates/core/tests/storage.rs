@@ -1067,6 +1067,10 @@ fn storage_login_session_terminal_transitions_are_guarded_and_clear_verifier() {
     assert!(storage
         .update_login_session_code_verifier_if_pending("login-completing", "device-verifier")
         .expect("store verifier while pending"));
+    let expected_completion = storage
+        .get_login_session("login-completing")
+        .expect("load expected completion")
+        .expect("expected completion exists");
     assert!(storage
         .claim_login_session_for_completion("login-completing")
         .expect("claim pending session"));
@@ -1076,9 +1080,14 @@ fn storage_login_session_terminal_transitions_are_guarded_and_clear_verifier() {
     assert!(!storage
         .fail_pending_login_session("login-completing", Some("late callback failure"))
         .expect("completion owner wins callback failure race"));
+    let mut stale_completion = expected_completion.clone();
+    stale_completion.code_verifier = "stale-verifier".to_string();
+    assert!(!storage
+        .finish_claimed_login_session(&stale_completion, "success", None)
+        .expect("stale completion is rejected"));
     assert!(storage
-        .finish_login_session("login-completing", "success", None)
-        .expect("finish claimed session"));
+        .finish_claimed_login_session(&expected_completion, "success", None)
+        .expect("finish exact claimed session"));
     assert!(!storage
         .finish_login_session("login-completing", "failed", Some("late failure"))
         .expect("terminal status cannot be overwritten"));

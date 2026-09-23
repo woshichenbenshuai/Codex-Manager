@@ -39,18 +39,18 @@ pub(crate) fn refresh_and_persist_access_token(
         .lock()
         .map_err(|_| "token refresh lock poisoned".to_string())?;
 
-    if let Some(latest) = storage
+    let latest = storage
         .find_token_by_account_id(&token.account_id)
         .map_err(|err| err.to_string())?
+        .ok_or_else(|| "token was removed before refresh could start".to_string())?;
+    if latest.access_token != original_access_token
+        || latest.refresh_token != original_refresh_token
     {
-        if latest.access_token != original_access_token
-            || latest.refresh_token != original_refresh_token
-        {
-            *token = latest;
-            return Ok(());
-        }
         *token = latest;
+        return Ok(());
     }
+    *token = latest;
+    let expected = token.clone();
 
     let refresh_client_id = token_refresh_client_id(token, client_id);
     let proxy_mode = crate::account_proxy::resolve_account_proxy_mode(token.account_id.as_str());
@@ -95,24 +95,50 @@ pub(crate) fn refresh_and_persist_access_token(
         token.refresh_token = refresh_token;
     }
 
-    if let Some(id_token) = refreshed.id_token {
+    let refreshed_id_token = refreshed.id_token;
+    if let Some(id_token) = &refreshed_id_token {
         token.id_token = id_token.clone();
-        // The refresh grant uses the access-token client id, while the API-key
-        // exchange uses the newly issued ID token as its subject.  Keep the
-        // two client-id rules separate so an access-token audience cannot
-        // cause an ID-token exchange to be rejected.
-        let exchange_client_id =
-            crate::gateway::api_key_exchange_client_id(token, refresh_client_id.as_str());
-        if let Ok(api_key) = obtain_api_key(issuer, &exchange_client_id, &id_token) {
-            token.api_key_access_token = Some(api_key);
-        }
     }
 
     token.last_refresh = now_ts();
-    storage.insert_token(token).map_err(|err| err.to_string())?;
+    if !storage
+        .compare_and_swap_token(&expected, token)
+        .map_err(|err| err.to_string())?
+    {
+        *token = storage
+            .find_token_by_account_id(&expected.account_id)
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| {
+                "token was removed before refreshed credentials could be persisted".to_string()
+            })?;
+        return Ok(());
+    }
     let access_exp = extract_token_exp(&token.access_token);
     let next_refresh_at = next_refresh_at_from_token(token, refresh_ahead_secs);
     let _ = storage.update_token_refresh_schedule(&token.account_id, access_exp, next_refresh_at);
+
+    if let Some(id_token) = refreshed_id_token {
+        // Persist the rotated refresh grant before this optional second HTTP
+        // request. Its result may only update the exact grant it was based on.
+        let exchange_client_id =
+            crate::gateway::api_key_exchange_client_id(token, refresh_client_id.as_str());
+        if let Ok(api_key) = obtain_api_key(issuer, &exchange_client_id, &id_token) {
+            let granted = token.clone();
+            token.api_key_access_token = Some(api_key);
+            if !storage
+                .compare_and_swap_token(&granted, token)
+                .map_err(|err| err.to_string())?
+            {
+                *token = storage
+                    .find_token_by_account_id(&granted.account_id)
+                    .map_err(|err| err.to_string())?
+                    .ok_or_else(|| {
+                        "token was removed before API key credentials could be persisted"
+                            .to_string()
+                    })?;
+            }
+        }
+    }
     Ok(())
 }
 

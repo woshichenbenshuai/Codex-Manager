@@ -27,6 +27,92 @@ fn sample_token(account_id: &str, now: i64) -> Token {
     }
 }
 
+#[test]
+fn token_compare_and_swap_rejects_stale_or_deleted_credentials() {
+    use std::sync::{Arc, Barrier};
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let db_path = std::env::temp_dir().join(format!(
+        "codexmanager-token-cas-{}-{unique}.db",
+        std::process::id()
+    ));
+    let storage = Storage::open(&db_path).expect("open");
+    storage.init().expect("init");
+    let expected = sample_token("token-cas", now_ts());
+    storage
+        .insert_account(&sample_account(&expected.account_id, now_ts()))
+        .expect("insert account");
+    storage.insert_token(&expected).expect("insert token");
+
+    let first = Token {
+        access_token: "access-first".into(),
+        refresh_token: "refresh-first".into(),
+        ..expected.clone()
+    };
+    let second = Token {
+        access_token: "access-second".into(),
+        refresh_token: "refresh-second".into(),
+        ..expected.clone()
+    };
+    let barrier = Arc::new(Barrier::new(3));
+    let spawn = |next: Token| {
+        let db_path = db_path.clone();
+        let expected = expected.clone();
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            let storage = Storage::open(db_path).expect("open worker storage");
+            barrier.wait();
+            storage
+                .compare_and_swap_token(&expected, &next)
+                .expect("compare and swap")
+        })
+    };
+    let left = spawn(first.clone());
+    let right = spawn(second.clone());
+    barrier.wait();
+    let first_won = left.join().expect("join first");
+    assert_ne!(first_won, right.join().expect("join second"));
+
+    let winner = if first_won { first } else { second };
+    let stored = storage
+        .find_token_by_account_id(&expected.account_id)
+        .expect("load winner")
+        .expect("winner exists");
+    assert_eq!(stored.access_token, winner.access_token);
+    assert_eq!(stored.refresh_token, winner.refresh_token);
+
+    let exchanged = Token {
+        api_key_access_token: Some("api-key-new".into()),
+        ..winner.clone()
+    };
+    assert!(storage
+        .compare_and_swap_token(&winner, &exchanged)
+        .expect("exchange api key"));
+    assert!(!storage
+        .compare_and_swap_token(&winner, &expected)
+        .expect("reject stale credentials"));
+
+    storage
+        .conn
+        .execute(
+            "DELETE FROM tokens WHERE account_id = ?1",
+            [&expected.account_id],
+        )
+        .expect("delete token");
+    assert!(!storage
+        .compare_and_swap_token(&exchanged, &expected)
+        .expect("deleted token stays deleted"));
+    assert!(storage
+        .find_token_by_account_id(&expected.account_id)
+        .expect("load deleted token")
+        .is_none());
+    drop(storage);
+    let _ = std::fs::remove_file(db_path);
+}
+
 fn collect_query_plan(storage: &Storage, sql: &str) -> String {
     let mut stmt = storage.conn.prepare(sql).expect("prepare explain");
     let mut rows = stmt.query([]).expect("query explain");

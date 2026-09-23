@@ -1340,6 +1340,18 @@ pub(crate) fn complete_login_with_redirect(
             &tokens.access_token,
         )?;
 
+        let current = storage
+            .get_login_session(state)
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| "login session disappeared before completion".to_string())?;
+        if current.status != "completing"
+            || current.state != session.state
+            || current.code_verifier != session.code_verifier
+            || current.created_at != session.created_at
+        {
+            return Err("login session terminal state changed before completion".to_string());
+        }
+
         let subject_account_id = claims.sub.clone();
         let label = claims
             .email
@@ -1446,7 +1458,9 @@ pub(crate) fn complete_login_with_redirect(
     let account_key = match completion {
         Ok(account_key) => account_key,
         Err(err) => {
-            if let Err(status_err) = storage.finish_login_session(state, "failed", Some(&err)) {
+            if let Err(status_err) =
+                storage.finish_claimed_login_session(&session, "failed", Some(&err))
+            {
                 log::warn!(
                     "failed to mark login session failed: login_id={} error={}",
                     state,
@@ -1458,7 +1472,7 @@ pub(crate) fn complete_login_with_redirect(
     };
 
     if !storage
-        .finish_login_session(state, "success", None)
+        .finish_claimed_login_session(&session, "success", None)
         .map_err(|err| err.to_string())?
     {
         return Err("login session terminal state changed before completion".to_string());

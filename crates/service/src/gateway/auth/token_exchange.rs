@@ -142,14 +142,37 @@ fn exchange_and_persist_api_key_access_token(
     let Some(subject_token) = api_key_exchange_subject_token(token) else {
         return Err("id_token is unavailable for API key token exchange".to_string());
     };
+    let expected = token.clone();
     match auth_tokens::obtain_api_key(issuer, client_id, &subject_token) {
         Ok(exchanged) => {
-            token.api_key_access_token = Some(exchanged.clone());
-            let _ = storage.insert_token(token);
-            Ok(exchanged)
+            let mut next = expected.clone();
+            next.api_key_access_token = Some(exchanged);
+            *token = persist_token_if_current(storage, &expected, &next)?;
+            token
+                .api_key_access_token
+                .as_deref()
+                .and_then(usable_api_key_access_token)
+                .ok_or_else(|| "account credentials changed during API token exchange".to_string())
         }
         Err(err) => Err(err),
     }
+}
+
+fn persist_token_if_current(
+    storage: &Storage,
+    expected: &Token,
+    next: &Token,
+) -> Result<Token, String> {
+    if storage
+        .compare_and_swap_token(expected, next)
+        .map_err(|err| err.to_string())?
+    {
+        return Ok(next.clone());
+    }
+    storage
+        .find_token_by_account_id(&expected.account_id)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "account credentials disappeared during token exchange".to_string())
 }
 
 fn api_key_exchange_subject_token(token: &Token) -> Option<String> {
@@ -294,14 +317,16 @@ pub(super) fn resolve_openai_bearer_token(
                 };
                 match refresh_result {
                     Ok(refreshed) => {
-                        token.access_token = refreshed.access_token;
+                        let expected = token.clone();
+                        let mut next = expected.clone();
+                        next.access_token = refreshed.access_token;
                         if let Some(refresh_token) = refreshed.refresh_token {
-                            token.refresh_token = refresh_token;
+                            next.refresh_token = refresh_token;
                         }
                         if let Some(id_token) = refreshed.id_token {
-                            token.id_token = id_token;
+                            next.id_token = id_token;
                         }
-                        let _ = storage.insert_token(token);
+                        *token = persist_token_if_current(storage, &expected, &next)?;
 
                         if !token.id_token.trim().is_empty() {
                             let refreshed_client_id = api_key_exchange_client_id(token, &client_id);

@@ -740,7 +740,7 @@ fn main() {
 
     // 先关 web，再关 service。
     simple_get_best_effort(&web_addr, "/__quit");
-    simple_get_best_effort(&service_addr, "/__shutdown");
+    codexmanager_service::request_shutdown(&service_addr);
 
     // 最后兜底：短等后强杀
     let deadline = std::time::Instant::now() + Duration::from_secs(3);

@@ -2619,6 +2619,31 @@ impl Storage {
         Ok(changed == 1)
     }
 
+    /// Finish only the worker that still owns this exact PKCE login snapshot.
+    /// A stale callback cannot clear or complete a replaced session.
+    pub fn finish_claimed_login_session(
+        &self,
+        expected: &LoginSession,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE login_sessions SET status = ?1, error = ?2, code_verifier = '', updated_at = ?3
+             WHERE login_id = ?4 AND status = 'completing' AND state = ?5
+               AND code_verifier = ?6 AND created_at = ?7",
+            (
+                status,
+                error,
+                now_ts(),
+                expected.login_id.as_str(),
+                expected.state.as_str(),
+                expected.code_verifier.as_str(),
+                expected.created_at,
+            ),
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Fails a session only before a completion worker has claimed ownership.
     ///
     /// OAuth error callbacks use this narrower transition so a second browser

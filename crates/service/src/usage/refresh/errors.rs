@@ -47,6 +47,12 @@ pub(super) fn record_usage_refresh_failure(storage: &Storage, account_id: &str, 
         created_at,
     });
     if let Some(reason) = status_reason_for_refresh_failure(&error_class) {
+        // A gateway usage-limit response is authoritative for the request that
+        // observed it. A best-effort refresh failure must not immediately
+        // replace that terminal state with an active/connection status.
+        if preserve_confirmed_usage_limit_reason(storage, account_id) {
+            return;
+        }
         let _ = storage.insert_event(&Event {
             account_id: Some(account_id.to_string()),
             event_type: "account_status_update".to_string(),
@@ -54,6 +60,20 @@ pub(super) fn record_usage_refresh_failure(storage: &Storage, account_id: &str, 
             created_at,
         });
     }
+}
+
+fn preserve_confirmed_usage_limit_reason(storage: &Storage, account_id: &str) -> bool {
+    let Ok(Some(account)) = storage.find_account_by_id(account_id) else {
+        return false;
+    };
+    if !account.status.trim().eq_ignore_ascii_case("limited") {
+        return false;
+    }
+    storage
+        .latest_account_status_reasons(&[account_id.to_string()])
+        .ok()
+        .and_then(|reasons| reasons.get(account_id).cloned())
+        .is_some_and(|reason| reason == "usage_limit_exhausted")
 }
 
 /// 函数 `mark_usage_unreachable_if_needed`

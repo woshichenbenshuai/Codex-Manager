@@ -1,7 +1,8 @@
 use super::{
     http_queue_size, http_stream_queue_size, http_stream_worker_count, http_worker_count,
-    panic_payload_message, send_with_timeout, should_bypass_queue, HTTP_QUEUE_MIN,
-    HTTP_STREAM_QUEUE_MIN, HTTP_STREAM_WORKER_MIN, HTTP_WORKER_MIN,
+    panic_payload_message, send_with_timeout, should_bypass_queue, shutdown_request_bytes,
+    shutdown_token_matches, HTTP_QUEUE_MIN, HTTP_STREAM_QUEUE_MIN, HTTP_STREAM_WORKER_MIN,
+    HTTP_WORKER_MIN,
 };
 use crossbeam_channel::bounded;
 use std::time::{Duration, Instant};
@@ -117,4 +118,16 @@ fn bypass_queue_covers_health_and_metrics() {
     assert!(should_bypass_queue("/health"));
     assert!(should_bypass_queue("/metrics"));
     assert!(!should_bypass_queue("/rpc"));
+}
+
+#[test]
+fn shutdown_requires_internal_rpc_token() {
+    assert!(!shutdown_token_matches(None));
+    assert!(!shutdown_token_matches(Some("invalid-token")));
+    assert!(shutdown_token_matches(Some(crate::rpc_auth_token())));
+
+    let request = shutdown_request_bytes("127.0.0.1:48760").expect("build shutdown request");
+    let request = String::from_utf8(request).expect("request is utf8");
+    assert!(request.contains("X-CodexManager-Rpc-Token: "));
+    assert!(!request.contains("X-CodexManager-Rpc-Actor-Role"));
 }
