@@ -33,7 +33,7 @@ mod responses_from_anthropic;
 pub(crate) use anthropic::AnthropicSseReader;
 pub(crate) use chat_completions::ChatCompletionsFromResponsesSseReader;
 use common::{
-    classify_upstream_stream_read_error, mark_first_response_ms,
+    classify_upstream_stream_read_error, client_stream_read_error_message, mark_first_response_ms,
     should_emit_keepalive_after_first_frame, stream_idle_timed_out, stream_idle_timeout_message,
     stream_reader_disconnected_message, stream_wait_timeout,
     upstream_hint_or_stream_incomplete_message,

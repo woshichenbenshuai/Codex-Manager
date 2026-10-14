@@ -112,7 +112,15 @@ fn resolve_chatgpt_account_header<'a>(
     account
         .chatgpt_account_id
         .as_deref()
-        .or(account.workspace_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            account
+                .workspace_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
 }
 
 /// 函数 `try_openai_fallback`
@@ -174,7 +182,15 @@ pub(super) fn try_openai_fallback(
     let account_id = account
         .chatgpt_account_id
         .as_deref()
-        .or_else(|| account.workspace_id.as_deref());
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            account
+                .workspace_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        });
     super::session_affinity::log_outgoing_session_affinity(
         request_path,
         account_id,

@@ -109,19 +109,15 @@ fn classify_terminal_event_name(
     if protocol == PassthroughSseProtocol::AnthropicNative && normalized == "message_stop" {
         return Some(SseTerminal::Ok);
     }
-    if normalized == "done"
-        || is_response_completed_event_name(normalized.as_str())
-        || normalized.ends_with(".completed")
-    {
+    if normalized == "done" || is_response_completed_event_name(normalized.as_str()) {
         return Some(SseTerminal::Ok);
     }
     if normalized == "error"
         || normalized == "response.failed"
-        || normalized.ends_with(".failed")
-        || normalized.ends_with(".error")
-        || normalized.ends_with(".canceled")
-        || normalized.ends_with(".cancelled")
-        || normalized.ends_with(".incomplete")
+        || normalized == "response.error"
+        || normalized == "response.canceled"
+        || normalized == "response.cancelled"
+        || normalized == "response.incomplete"
     {
         return Some(SseTerminal::Err(normalized));
     }
@@ -208,7 +204,6 @@ pub(in super::super) fn inspect_sse_frame_for_protocol(
     }
 
     if let Some(name) = event_name.as_deref() {
-        inspection.terminal = classify_terminal_event_name(name, protocol);
         inspection.last_event_type = Some(name.to_string());
     }
 
@@ -217,6 +212,15 @@ pub(in super::super) fn inspect_sse_frame_for_protocol(
     }
 
     let data = data_lines.join("\n");
+    if data.trim().is_empty() {
+        return inspection;
+    }
+    // Only a dispatched payload can complete an event. A malformed failure
+    // payload may still explain an error, but a success header alone cannot.
+    inspection.terminal = event_name
+        .as_deref()
+        .and_then(|kind| classify_terminal_event_name(kind, protocol))
+        .filter(|terminal| matches!(terminal, SseTerminal::Err(_)));
     if data.trim() == "[DONE]" {
         inspection.terminal = Some(SseTerminal::Ok);
         inspection.last_event_type = Some("[DONE]".to_string());
@@ -224,6 +228,9 @@ pub(in super::super) fn inspect_sse_frame_for_protocol(
     }
 
     if let Ok(value) = serde_json::from_str::<Value>(&data) {
+        if !value.is_object() {
+            return inspection;
+        }
         if inspection.last_event_type.is_none() {
             inspection.last_event_type = value
                 .get("type")
@@ -232,13 +239,60 @@ pub(in super::super) fn inspect_sse_frame_for_protocol(
                 .filter(|kind| !kind.is_empty())
                 .map(str::to_string);
         }
-        if let Some(message) = extract_error_message_from_json(&value) {
+        let kind = event_name
+            .as_deref()
+            .filter(|kind| !kind.eq_ignore_ascii_case("message"))
+            .or_else(|| value.get("type").and_then(Value::as_str));
+        let payload_failure = value
+            .get("type")
+            .and_then(Value::as_str)
+            .and_then(|kind| classify_terminal_event_name(kind, protocol))
+            .filter(|terminal| matches!(terminal, SseTerminal::Err(_)));
+        let terminal = payload_failure
+            .or_else(|| kind.and_then(|kind| classify_terminal_event_name(kind, protocol)));
+        // Tool/MCP errors are item-local. Only response-level lifecycle/errors
+        // may terminate the response, including an error inside a completion.
+        let response_envelope_error = value.get("response").and_then(|response| {
+            extract_error_message_from_json(response).or_else(|| {
+                response
+                    .get("status_details")
+                    .and_then(extract_error_message_from_json)
+            })
+        });
+        let failed_status = value
+            .pointer("/response/status")
+            .and_then(Value::as_str)
+            .map(|status| status.trim().to_ascii_lowercase())
+            .filter(|status| {
+                matches!(
+                    status.as_str(),
+                    "failed" | "incomplete" | "canceled" | "cancelled"
+                )
+            });
+        let lifecycle = kind.is_some_and(|kind| {
+            matches!(
+                kind.trim().to_ascii_lowercase().as_str(),
+                "response.created"
+                    | "response.queued"
+                    | "response.in_progress"
+                    | "response.completed"
+                    | "response.done"
+            )
+        });
+        let response_error =
+            kind.is_none() || lifecycle || matches!(&terminal, Some(SseTerminal::Err(_)));
+        let message = response_envelope_error.or_else(|| {
+            response_error
+                .then(|| extract_error_message_from_json(&value))
+                .flatten()
+        });
+        if let Some(message) = message.or_else(|| {
+            failed_status.map(|status| format!("上游响应未成功完成（status={status}）"))
+        }) {
             inspection.terminal = Some(SseTerminal::Err(message));
-        } else if let Some(kind) = value.get("type").and_then(Value::as_str) {
-            if let Some(terminal) = classify_terminal_event_name(kind, protocol) {
-                inspection.terminal = Some(terminal);
-            }
-        } else if is_chat_completion_terminal_chunk(&value) {
+        } else if let Some(terminal) = terminal {
+            inspection.terminal = Some(terminal);
+        } else if kind.is_none() && is_chat_completion_terminal_chunk(&value) {
             inspection.terminal = Some(SseTerminal::Ok);
         }
 

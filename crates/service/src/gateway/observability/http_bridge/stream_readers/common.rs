@@ -73,6 +73,8 @@ impl SseKeepAliveFrame {
 
 #[derive(Debug)]
 pub(crate) enum UpstreamSseFramePumpItem {
+    // Includes an unterminated EOF tail for legacy consumers. Protocol
+    // converters must check the final blank line before dispatching it.
     Frame(Vec<String>),
     Eof,
     Error(String),
@@ -297,6 +299,17 @@ pub(super) fn classify_upstream_stream_read_error(raw: &str) -> String {
         return STREAM_INCOMPLETE_FALLBACK_MESSAGE.to_string();
     }
     trimmed.to_string()
+}
+
+// Transport errors may include internal URLs or diagnostics. Only expose our
+// recognized classifications; upstream API error envelopes are handled separately.
+pub(super) fn client_stream_read_error_message(raw: &str) -> String {
+    let message = classify_upstream_stream_read_error(raw);
+    if message == raw.trim() {
+        STREAM_READ_FAILED_FALLBACK_MESSAGE.to_string()
+    } else {
+        message
+    }
 }
 
 #[cfg(test)]

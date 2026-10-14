@@ -76,10 +76,7 @@ impl Connection {
         let rt = sqlite_runtime()?;
         let options = sqlite_options_for_path(&path)?;
         let pool = block_on_runtime(&rt, async {
-            SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect_with(options)
-                .await
+            single_handle_pool_options().connect_with(options).await
         })?;
         Ok(Self {
             rt,
@@ -92,8 +89,7 @@ impl Connection {
     pub fn open_in_memory() -> Result<Self> {
         let rt = sqlite_runtime()?;
         let pool = block_on_runtime(&rt, async {
-            SqlitePoolOptions::new()
-                .max_connections(1)
+            single_handle_pool_options()
                 .connect_with(
                     SqliteConnectOptions::from_str("sqlite::memory:")?
                         .create_if_missing(true)
@@ -308,6 +304,15 @@ where
     } else {
         rt.block_on(future)
     }
+}
+
+// A rusqlite-style Connection must keep its physical handle, including its
+// in-memory data and connection-local PRAGMAs, for the whole connection lifetime.
+fn single_handle_pool_options() -> SqlitePoolOptions {
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .max_lifetime(None)
+        .idle_timeout(None)
 }
 
 fn sqlite_options_for_path(path: &Path) -> Result<SqliteConnectOptions> {

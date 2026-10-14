@@ -6,7 +6,9 @@ use super::output_text::{
     collect_response_output_text, extract_error_message_from_json, merge_usage,
     parse_usage_from_json, UpstreamResponseUsage,
 };
-use super::{parse_sse_frame_json, SseTerminal};
+use super::{
+    inspect_sse_frame_for_protocol, parse_sse_frame_json, PassthroughSseProtocol, SseTerminal,
+};
 
 const STREAM_INCOMPLETE_FALLBACK_MESSAGE: &str = "连接中断（可能是网络波动或客户端主动取消）";
 const STREAM_IDLE_TIMEOUT_FALLBACK_MESSAGE: &str = "上游流式空闲超时";
@@ -75,20 +77,30 @@ pub(in super::super) struct OpenAIResponsesEvent {
 impl OpenAIResponsesEvent {
     pub(in super::super) fn parse(lines: &[String]) -> Option<Self> {
         let value = parse_sse_frame_json(lines)?;
+        let inspection = inspect_sse_frame_for_protocol(lines, PassthroughSseProtocol::Generic);
         let event_type = value
             .get("type")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|kind: &&str| !kind.is_empty())
-            .map(str::to_string);
+            .map(str::to_string)
+            .or(inspection.last_event_type);
         let kind = event_type
             .as_deref()
             .map(OpenAIResponsesEventKind::from_type)
             .unwrap_or(OpenAIResponsesEventKind::Other);
 
-        let upstream_error_hint = extract_error_message_from_json(&value);
-        let terminal =
-            terminal_for_event(kind, event_type.as_deref(), upstream_error_hint.as_deref());
+        let upstream_error_hint = matches!(&inspection.terminal, Some(SseTerminal::Err(_)))
+            .then(|| extract_error_message_from_json(&value))
+            .flatten();
+        let terminal = match inspection.terminal {
+            Some(SseTerminal::Err(message)) => {
+                terminal_for_event(kind, event_type.as_deref(), upstream_error_hint.as_deref())
+                    .filter(|terminal| matches!(terminal, SseTerminal::Err(_)))
+                    .or_else(|| Some(SseTerminal::Err(normalize_terminal_error_hint(&message))))
+            }
+            terminal => terminal,
+        };
 
         let mut usage = parse_usage_from_json(&value);
         usage.output_text = None;

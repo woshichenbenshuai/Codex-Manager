@@ -222,7 +222,15 @@ fn official_chatgpt_account_id<'a>(account: &'a Account, upstream_base: &str) ->
     account
         .chatgpt_account_id
         .as_deref()
-        .or(account.workspace_id.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            account
+                .workspace_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
 }
 
 fn official_catalog_cache_path(api_key_id: &str) -> PathBuf {

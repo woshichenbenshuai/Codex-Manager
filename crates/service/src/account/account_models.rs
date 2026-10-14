@@ -243,9 +243,15 @@ pub(crate) fn fetch_account_models(account_id: &str) -> Result<AccountFetchModel
     if let Some(chatgpt_account_id) = account
         .chatgpt_account_id
         .as_deref()
-        .or(account.workspace_id.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .or_else(|| {
+            account
+                .workspace_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
     {
         request = request.header("ChatGPT-Account-ID", chatgpt_account_id);
     }

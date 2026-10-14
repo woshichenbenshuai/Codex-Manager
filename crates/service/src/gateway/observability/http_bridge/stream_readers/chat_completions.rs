@@ -1,11 +1,13 @@
 use super::{
-    chat_image_payload, classify_upstream_stream_read_error, collect_image_generation_data_urls,
+    chat_image_payload, client_stream_read_error_message, collect_image_generation_data_urls,
     collect_output_text_from_event_fields, collect_response_output_text,
-    collect_response_reasoning_summary_text, mark_first_response_ms, merge_usage,
+    collect_response_reasoning_summary_text, inspect_sse_frame_for_protocol, mark_first_response_ms,
+    merge_usage,
     should_emit_keepalive_after_first_frame, stream_idle_timed_out, stream_idle_timeout_message,
     stream_reader_disconnected_message, stream_wait_timeout,
-    upstream_hint_or_stream_incomplete_message, Arc, Cursor, Mutex, PassthroughSseCollector, Read,
-    SseKeepAliveFrame, UpstreamSseFramePump, UpstreamSseFramePumpItem,
+    upstream_hint_or_stream_incomplete_message, Arc, Cursor, Mutex, PassthroughSseCollector,
+    PassthroughSseProtocol, Read, SseKeepAliveFrame, SseTerminal, UpstreamSseFramePump,
+    UpstreamSseFramePumpItem,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -37,8 +39,19 @@ impl ChatCompletionsFromResponsesSseReader {
         usage_collector: Arc<Mutex<PassthroughSseCollector>>,
         request_started_at: Instant,
     ) -> Self {
+        Self::from_reader(upstream, usage_collector, request_started_at)
+    }
+
+    pub(crate) fn from_reader<R>(
+        upstream: R,
+        usage_collector: Arc<Mutex<PassthroughSseCollector>>,
+        request_started_at: Instant,
+    ) -> Self
+    where
+        R: Read + Send + 'static,
+    {
         Self {
-            upstream: UpstreamSseFramePump::new(upstream),
+            upstream: UpstreamSseFramePump::from_reader(upstream),
             out_cursor: Cursor::new(Vec::new()),
             usage_collector,
             request_started_at,
@@ -80,7 +93,7 @@ impl ChatCompletionsFromResponsesSseReader {
             let trimmed = line.trim_end_matches(['\r', '\n']).trim_start();
             if let Some(rest) = trimmed.strip_prefix("event:") {
                 let event = rest.trim();
-                if !event.is_empty() {
+                if !event.is_empty() && !event.eq_ignore_ascii_case("message") {
                     return Some(event.to_string());
                 }
             }
@@ -387,13 +400,65 @@ impl ChatCompletionsFromResponsesSseReader {
     }
 
     fn handle_frame(&mut self, lines: &[String]) -> Option<Vec<u8>> {
-        let value = Self::data_json(lines)?;
+        // The shared pump also yields unterminated EOF tails for legacy
+        // adapters/diagnostics. Such a tail is not a dispatched SSE event:
+        // never turn its JSON, text, tools, usage or terminal into Chat output.
+        if !matches!(lines.last().map(String::as_str), Some("\n" | "\r\n")) {
+            return None;
+        }
+        let value = Self::data_json(lines).unwrap_or(Value::Null);
         self.remember_meta(&value);
         let event_type = Self::event_type(lines, &value);
-        let is_terminal_event = matches!(
-            event_type.as_deref(),
-            Some("response.completed") | Some("response.done")
-        );
+        let inspection = inspect_sse_frame_for_protocol(lines, PassthroughSseProtocol::Generic);
+        if let Ok(mut collector) = self.usage_collector.lock() {
+            collector.last_event_type = inspection.last_event_type;
+        }
+        if let Some(SseTerminal::Err(_)) = inspection.terminal {
+            // Forward only scalar error contract fields, not response output,
+            // arbitrary nested bodies, or transport diagnostics.
+            let error = value
+                .pointer("/response/error")
+                .filter(|error| !error.is_null())
+                .or_else(|| {
+                    value
+                        .pointer("/response/status_details/error")
+                        .filter(|error| !error.is_null())
+                })
+                .or_else(|| value.get("error").filter(|error| !error.is_null()))
+                .unwrap_or(&value);
+            let field = |name: &str| error.get(name).and_then(Value::as_str);
+            let code = if event_type.as_deref() == Some("response.incomplete")
+                || value.pointer("/response/status").and_then(Value::as_str)
+                    == Some("incomplete")
+            {
+                "upstream_response_incomplete"
+            } else {
+                "upstream_response_failed"
+            };
+            let message = field("message")
+                .or_else(|| error.as_str())
+                .or_else(|| {
+                    value
+                        .pointer("/response/incomplete_details/reason")
+                        .and_then(Value::as_str)
+                })
+                .unwrap_or(code);
+            let payload = serde_json::json!({
+                "type": field("type").filter(|kind| *kind != "error").unwrap_or("upstream_error"),
+                "code": field("code").unwrap_or(code),
+                "message": message,
+                "param": field("param"),
+            });
+            return Some(self.error_chunk(payload, true));
+        }
+        if value.is_null() {
+            return None;
+        }
+        let is_terminal_event = matches!(inspection.terminal, Some(SseTerminal::Ok))
+            && matches!(
+                event_type.as_deref(),
+                Some("response.completed") | Some("response.done")
+            );
         if !is_terminal_event
             && (Self::is_reasoning_delta_event(event_type.as_deref()) || !self.emitted_reasoning)
         {
@@ -432,10 +497,7 @@ impl ChatCompletionsFromResponsesSseReader {
             }
             _ => {}
         }
-        if matches!(
-            event_type.as_deref(),
-            Some("response.completed") | Some("response.done")
-        ) {
+        if is_terminal_event {
             let mut out = Vec::new();
             if !self.emitted_text {
                 if let Some(response) = value.get("response") {
@@ -511,6 +573,28 @@ impl ChatCompletionsFromResponsesSseReader {
         None
     }
 
+    fn error_chunk(&mut self, error: Value, saw_terminal: bool) -> Vec<u8> {
+        self.finished = true;
+        if let Ok(mut collector) = self.usage_collector.lock() {
+            collector.saw_terminal |= saw_terminal;
+            if let Some(message) = error.get("message").and_then(Value::as_str) {
+                collector
+                    .terminal_error
+                    .get_or_insert_with(|| message.to_string());
+            }
+        }
+        format!("data: {}\n\n", serde_json::json!({ "error": error })).into_bytes()
+    }
+
+    fn transport_error_chunk(&mut self, code: &str, message: String) -> Vec<u8> {
+        self.error_chunk(
+            serde_json::json!({
+                "type": "upstream_error", "code": code, "message": message, "param": null
+            }),
+            false,
+        )
+    }
+
     fn next_chunk(&mut self) -> std::io::Result<Vec<u8>> {
         loop {
             match self
@@ -527,35 +611,21 @@ impl ChatCompletionsFromResponsesSseReader {
                     continue;
                 }
                 Ok(UpstreamSseFramePumpItem::Eof) => {
-                    if let Ok(mut collector) = self.usage_collector.lock() {
-                        if !collector.saw_terminal {
-                            let hint = collector.upstream_error_hint.clone();
-                            collector.terminal_error.get_or_insert_with(|| {
-                                upstream_hint_or_stream_incomplete_message(hint.as_deref())
-                            });
-                        }
-                    }
-                    self.finished = true;
-                    return Ok(Vec::new());
+                    return Ok(self.transport_error_chunk(
+                        "upstream_stream_incomplete",
+                        upstream_hint_or_stream_incomplete_message(None),
+                    ));
                 }
                 Ok(UpstreamSseFramePumpItem::Error(err)) => {
-                    if let Ok(mut collector) = self.usage_collector.lock() {
-                        collector
-                            .terminal_error
-                            .get_or_insert_with(|| classify_upstream_stream_read_error(&err));
-                    }
-                    self.finished = true;
-                    return Ok(Vec::new());
+                    let message = client_stream_read_error_message(&err);
+                    return Ok(self.transport_error_chunk("upstream_stream_read_error", message));
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     if stream_idle_timed_out(self.last_upstream_activity) {
-                        if let Ok(mut collector) = self.usage_collector.lock() {
-                            collector
-                                .terminal_error
-                                .get_or_insert_with(stream_idle_timeout_message);
-                        }
-                        self.finished = true;
-                        return Ok(Vec::new());
+                        return Ok(self.transport_error_chunk(
+                            "upstream_stream_idle_timeout",
+                            stream_idle_timeout_message(),
+                        ));
                     }
                     if should_emit_keepalive_after_first_frame(self.saw_upstream_frame) {
                         return Ok(SseKeepAliveFrame::Comment.bytes().to_vec());
@@ -563,14 +633,10 @@ impl ChatCompletionsFromResponsesSseReader {
                     continue;
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    if let Ok(mut collector) = self.usage_collector.lock() {
-                        let hint = collector.upstream_error_hint.clone();
-                        collector.terminal_error.get_or_insert_with(|| {
-                            hint.unwrap_or_else(stream_reader_disconnected_message)
-                        });
-                    }
-                    self.finished = true;
-                    return Ok(Vec::new());
+                    return Ok(self.transport_error_chunk(
+                        "upstream_stream_disconnected",
+                        stream_reader_disconnected_message(),
+                    ));
                 }
             }
         }
@@ -579,6 +645,9 @@ impl ChatCompletionsFromResponsesSseReader {
 
 impl Read for ChatCompletionsFromResponsesSseReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         loop {
             let read = self.out_cursor.read(buf)?;
             if read > 0 {
