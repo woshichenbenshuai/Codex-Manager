@@ -10,8 +10,8 @@
 
 ## 1. 基础环境
 
-- Node.js 20
-- pnpm 9
+- Node.js 22.23.4（与 CI 和 Docker 前端构建阶段保持一致）
+- pnpm 10.30.3（使用 `apps/package.json` 的 `packageManager` 固定版本）
 - Rust stable
 - PowerShell 7+（Windows 打包 / 脚本验证）
 
