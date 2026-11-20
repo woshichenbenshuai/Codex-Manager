@@ -129,6 +129,28 @@ You can still set `CODEXMANAGER_WEB_ROOT=/path/to/out` when you intentionally wa
 
 Docker images default to `TZ=Asia/Shanghai`, and compose examples use `TZ=${TZ:-Asia/Shanghai}`: if the deployment environment already sets `TZ`, compose passes it through; otherwise it falls back to `Asia/Shanghai`. If you deploy in another region, set `TZ` or change it under `environment` to your own IANA time zone, for example `Europe/London` or `America/Los_Angeles`.
 
+### Build from source (ARM64 / AMD64)
+
+Run this command from the complete repository root on the server, including `Cargo.toml`, `apps/`, `crates/`, and `docker/`:
+
+```bash
+docker compose up -d --build
+```
+
+The root `docker-compose.yml` builds the frontend and Rust binaries with `docker/Dockerfile.all-in-one` for the Docker host's architecture. ARM64 servers do not need a `platform` override or separate Node.js, pnpm, or Rust installations. The first build downloads base images and compiles dependencies; later builds reuse the caches.
+
+Open `http://SERVER_IP:48761/` and use `http://SERVER_IP:48761/v1` as the client gateway address. Data stays bind-mounted at `./data:/data` in the original deployment directory, and that directory is excluded from the build context.
+
+To update, run these commands in the same deployment directory:
+
+```bash
+git pull
+docker compose up -d --build
+docker compose logs --tail=100 codexmanager
+```
+
+The root Compose deployment updates by pulling source and rebuilding. Image OTA updates are available through the Release Compose file below.
+
 ### GitHub Packages / GHCR
 - After a Release is published, both `codexmanager-service` and `codexmanager-web` images are pushed to GitHub Packages (GHCR).
 - Stable releases update the versioned, `stable`, and `latest` tags. Prereleases only publish their versioned tag and never replace the floating tags.
@@ -136,6 +158,7 @@ Docker images default to `TZ=Asia/Shanghai`, and compose examples use `TZ=${TZ:-
 - [`docker/docker-compose.release.yml`](../../../docker/docker-compose.release.yml) defaults to `stable`. Set `CODEXMANAGER_RELEASE_TAG` only when pinning a version.
 - Example: `CODEXMANAGER_RELEASE_TAG=v0.6.0 docker compose -f docker/docker-compose.release.yml up -d`
 - `registry.cn-hangzhou.aliyuncs.com/kilimiao/codex-manager` is not part of the current official release workflow and may be outdated. The GHCR `service` and `web` images above are the maintained prebuilt images.
+- The current release workflow only packages Linux AMD64 Docker images. ARM64 servers should build from source as described above; ARM64 binary release packages do not imply ARM64 Docker image support.
 
 ### Optional Docker OTA updates
 

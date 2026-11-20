@@ -280,6 +280,8 @@ If this project has helped you, donations are welcome!
 3. If the browser callback fails, paste the callback URL to complete parsing manually.
 4. Refresh usage and verify account status.
 
+For a Docker server, run `docker compose up -d --build` from the complete repository root. Compose builds an all-in-one image for the Docker host's architecture (ARM64 or AMD64), serves the Web UI and gateway at `http://SERVER_IP:48761/`, and persists data in `./data`. To update, run `git pull` and repeat the same command in the original deployment directory. See the [Docker deployment guide](docs/en/report/runtime-and-deployment-guide.md#docker-deployment).
+
 ## Default Data Directory
 
 - The desktop app stores its SQLite database in the application data directory as `codexmanager.db`.

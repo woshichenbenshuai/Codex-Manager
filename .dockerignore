@@ -12,6 +12,7 @@ portable
 docs
 specs
 .worktrees
+data
 *.db
 *.sqlite
 *.log
