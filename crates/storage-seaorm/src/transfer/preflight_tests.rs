@@ -128,6 +128,68 @@ async fn dry_run_reports_types_conflicts_nonempty_and_reexecutes_without_mutatio
 }
 
 #[tokio::test]
+async fn dry_run_and_import_preserve_changed_two_factor_state() {
+    let (source, archive) = tests::paths();
+    // An older snapshot need not contain the new authentication table.
+    write_settings_snapshot(
+        &archive,
+        vec![vec![
+            Cell::Text("transfer_fixture".into()),
+            Cell::Text("retained".into()),
+            Cell::Integer(1),
+        ]],
+    );
+    let pristine = empty_target().await;
+    let report = dry_run(&archive, pristine.connection()).await;
+    assert!(report.success);
+    assert!(!report.target_modified);
+    assert_eq!(
+        report
+            .tables
+            .iter()
+            .find(|table| table.table == "web_two_factor_state")
+            .unwrap()
+            .target_rows,
+        Some(1),
+        "the read-only report must retain the actual initialized row count"
+    );
+    import_snapshot(&archive, pristine.connection())
+        .await
+        .unwrap();
+    let state = crate::WebTwoFactorRepository::state(pristine.connection())
+        .await
+        .unwrap();
+    assert_eq!(state.version, 0);
+    assert_eq!(state.state_json, "{}");
+
+    for (version, state_json) in [(1_i64, "{}"), (0, "{\"pending\":true}")] {
+        let target = empty_target().await;
+        target
+            .connection()
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "UPDATE web_two_factor_state SET version = ?, state_json = ? WHERE id = 1",
+                [version.into(), state_json.into()],
+            ))
+            .await
+            .unwrap();
+        let report = dry_run(&archive, target.connection()).await;
+        assert!(has(&report, "target_not_empty"));
+        assert!(!report.target_modified);
+        assert!(import_snapshot(&archive, target.connection())
+            .await
+            .is_err());
+        let after = crate::WebTwoFactorRepository::state(target.connection())
+            .await
+            .unwrap();
+        assert_eq!(after.version, version);
+        assert_eq!(after.state_json, state_json);
+    }
+    std::fs::remove_file(archive).unwrap();
+    std::fs::remove_file(source).unwrap();
+}
+
+#[tokio::test]
 async fn dry_run_rejects_populated_unmapped_target_table() {
     let (source, archive) = tests::paths();
     tests::legacy_fixture(&source);
@@ -393,7 +455,7 @@ async fn failed_checksum_and_connection_preserve_source_and_allow_clean_restore(
     // Reports may include unmapped empty source tables with no target count.
     // Inspect every actual target table instead so failed imports cannot leave
     // rows in a mapped or an unexpected target table. Migration initializes
-    // domain lock rows; those must retain their exact initial values.
+    // domain locks and pristine 2FA state; both must retain their initial values.
     let target_tables = target
         .connection()
         .query_all(Statement::from_string(
@@ -427,6 +489,13 @@ async fn failed_checksum_and_connection_preserve_source_and_allow_clean_restore(
                 initial_target_locks,
                 "failed cutover must preserve the initialized target locks"
             );
+        } else if name == "web_two_factor_state" {
+            assert_eq!(count, 1);
+            let state = crate::WebTwoFactorRepository::state(target.connection())
+                .await
+                .unwrap();
+            assert_eq!(state.version, 0);
+            assert_eq!(state.state_json, "{}");
         } else {
             assert_eq!(
                 count, 0,

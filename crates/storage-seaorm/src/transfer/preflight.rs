@@ -364,7 +364,14 @@ pub async fn dry_run(path: &Path, db: &DatabaseConnection) -> TransferReport {
                         mapped: true,
                     });
                 }
-                if count != 0 {
+                // Import replaces only the migration's pristine 2FA singleton.
+                // Keep the actual row count visible and never mutate it in a dry run.
+                let pristine_two_factor = table.name == "web_two_factor_state"
+                    && count == 1
+                    && crate::web_two_factor::WebTwoFactorRepository::state(db)
+                        .await
+                        .is_ok_and(|state| state.version == 0 && state.state_json == "{}");
+                if count != 0 && !pristine_two_factor {
                     report.fail("target_not_empty", Some(&table.name), None, None);
                 }
             }
