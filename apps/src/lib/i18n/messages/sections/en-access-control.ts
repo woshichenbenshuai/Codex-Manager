@@ -1,6 +1,28 @@
 import type { MessageCatalog } from "../types";
 
 export const EN_ACCESS_CONTROL_MESSAGES: MessageCatalog = {
+  "两步验证（2FA）": "Two-factor authentication (2FA)",
+  "已启用。管理登录需要密码和动态验证码。": "Enabled. Administrator login requires a password and an authenticator code.",
+  "可选启用验证器，为现有管理登录增加保护。": "Optionally add an authenticator to protect your existing administrator login.",
+  "请先设置并保存登录密码，再绑定验证器。": "Set and save a login password before binding an authenticator.",
+  "绑定成功，请保存恢复码": "Authenticator enabled. Save your recovery codes.",
+  "恢复码仅显示一次，每条只能使用一次。遗失验证器时可代替动态验证码登录。": "Recovery codes are shown once and can each be used once. Use one instead of an authenticator code if you lose your device.",
+  "已复制恢复码": "Recovery codes copied",
+  "复制失败，请手动选择并保存恢复码。": "Copy failed. Select and save the recovery codes manually.",
+  "复制恢复码": "Copy recovery codes",
+  "当前登录密码": "Current login password",
+  "使用验证器扫描二维码，或手动输入下面的密钥。": "Scan the QR code with your authenticator, or enter the secret below.",
+  "验证器绑定二维码": "Authenticator setup QR code",
+  "验证器密钥": "Authenticator secret",
+  "6 位动态验证码": "6-digit authenticator code",
+  "动态验证码或恢复码": "Authenticator or recovery code",
+  "验证并启用 2FA": "Verify and enable 2FA",
+  "取消绑定": "Cancel setup",
+  "已关闭两步验证": "Two-factor authentication disabled",
+  "验证并关闭 2FA": "Verify and disable 2FA",
+  "绑定验证器": "Bind authenticator",
+  "剩余恢复码：{count}": "Recovery codes remaining: {count}",
+
   访问方式: "Access mode",
   不启用: "Disabled",
   账号系统已启用: "Account system enabled",

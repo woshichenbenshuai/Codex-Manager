@@ -127,6 +127,16 @@ You can still set `CODEXMANAGER_WEB_ROOT=/path/to/out` when you intentionally wa
 
 ## Docker deployment
 
+### Optional administrator two-factor authentication (2FA)
+
+Existing password and account login modes remain available. For a single-administrator deployment, open **Settings → Access control → Two-factor authentication (2FA)**, enter the current login password, and bind an authenticator. Scan the locally generated QR code or enter the secret manually, then confirm with a six-digit code. Enrollment takes effect only after successful verification.
+
+Save the eight recovery codes shown after enrollment. Each can replace an authenticator code once if the device is lost. Administrator Web logins then require the existing password followed by a code; other existing administrator browser sessions must authenticate again. The enrolling browser stays signed in so it can save the recovery codes. A time-step code can only succeed once, so another login immediately after enrollment needs the next 30-second code or a recovery code.
+
+To disable 2FA, enter the current password and an authenticator or recovery code in the same panel. Disable 2FA before turning off administrator login. Platform API-key authentication and the existing deployment ports are unaffected.
+
+Secrets are encrypted at rest using a key derived from the deployment's existing RPC token. Back up and migrate both `/data/codexmanager.db` and `/data/codexmanager.rpc-token`; do not regenerate the token separately while 2FA is enabled. No additional deployment environment variable is required.
+
 Docker images default to `TZ=Asia/Shanghai`, and compose examples use `TZ=${TZ:-Asia/Shanghai}`: if the deployment environment already sets `TZ`, compose passes it through; otherwise it falls back to `Asia/Shanghai`. If you deploy in another region, set `TZ` or change it under `environment` to your own IANA time zone, for example `Europe/London` or `America/Los_Angeles`.
 
 ### Build from source (ARM64 / AMD64)

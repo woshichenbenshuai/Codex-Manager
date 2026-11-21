@@ -379,6 +379,10 @@ pub(super) async fn rpc_proxy(
     if !is_json_content_type(&headers) {
         return (StatusCode::UNSUPPORTED_MEDIA_TYPE, "{}").into_response();
     }
+    let two_factor_method = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_owned))
+        .filter(|m| m.starts_with("accountManager/twoFactor/"));
     let mut request = state
         .client
         .post(&state.service_rpc_url)
@@ -405,7 +409,24 @@ pub(super) async fn rpc_proxy(
             return (StatusCode::BAD_GATEWAY, msg).into_response();
         }
     };
+    let enrollment_succeeded = two_factor_method.as_deref()
+        == Some("accountManager/twoFactor/confirm")
+        && serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v.get("result")?.get("recoveryCodes").map(|c| c.is_array()))
+            .unwrap_or(false);
     let mut out = Response::new(axum::body::Body::from(bytes));
+    if two_factor_method.is_some() {
+        out.headers_mut().insert(
+            header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+    }
+    if enrollment_succeeded {
+        if let Some(cookie) = super::two_factor_login::enrollment_cookie(&headers) {
+            out.headers_mut().append(header::SET_COOKIE, cookie);
+        }
+    }
     *out.status_mut() = status;
     out.headers_mut().insert(
         "content-type",

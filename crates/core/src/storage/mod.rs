@@ -10,7 +10,9 @@ pub use traits::*;
 
 mod account_bps;
 mod account_manager;
+mod web_two_factor;
 pub use account_bps::AccountBpsSettings;
+pub use web_two_factor::WebTwoFactorState;
 mod account_metadata;
 mod account_proxy_settings;
 mod account_reset_warmups;
@@ -2417,6 +2419,10 @@ impl Storage {
         self.apply_sql_migration(
             "147_account_bps_settings",
             include_str!("../../migrations/147_account_bps_settings.sql"),
+        )?;
+        self.apply_sql_migration(
+            "148_web_two_factor",
+            include_str!("../../migrations/148_web_two_factor.sql"),
         )?;
         self.ensure_api_key_rotation_columns()?;
         self.ensure_api_key_account_group_filter_column()?;

@@ -11,6 +11,7 @@
     "account/usage/list",
     "account/usage/aggregate",
     "accountManager/status",
+    "accountManager/twoFactor/status",
     "accountManager/session/current",
     "accountManager/users/list",
     "accountManager/apiKeyOwners/list",

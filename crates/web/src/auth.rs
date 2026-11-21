@@ -113,7 +113,7 @@ pub(super) fn parse_cookie_value(headers: &HeaderMap, cookie_name: &str) -> Opti
 ///
 /// # 返回
 /// 返回函数执行结果
-fn set_cookie_header_value(value: &str) -> Option<HeaderValue> {
+pub(super) fn set_cookie_header_value(value: &str) -> Option<HeaderValue> {
     HeaderValue::from_str(&format!(
         "{WEB_AUTH_COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Lax"
     ))
@@ -227,7 +227,14 @@ fn authenticated_rpc_actor(
     let password_hash = (mode == "password")
         .then(current_web_access_password_hash)
         .flatten();
-    rpc_actor_for_auth_mode(&mode, headers, state, password_hash.as_deref())
+    let actor = rpc_actor_for_auth_mode(&mode, headers, state, password_hash.as_deref())?;
+    if actor.is_admin()
+        && mode != "none"
+        && !super::two_factor_login::receipt_allowed(&mode, headers)
+    {
+        return None;
+    }
+    Some(actor)
 }
 
 fn rpc_actor_for_auth_mode(
@@ -572,7 +579,7 @@ fn account_login_html(error: Option<&str>, bootstrap: bool) -> String {
 ///
 /// # 返回
 /// 返回函数执行结果
-fn login_success_html() -> String {
+pub(super) fn login_success_html() -> String {
     format!(
         r#"<!doctype html>
 <html lang="zh-CN">
@@ -751,6 +758,23 @@ pub(super) async fn login_submit(
         };
         match result {
             Ok(login) => {
+                if login.user.role == "admin" {
+                    match super::two_factor_login::begin(
+                        "accounts",
+                        &login.token,
+                        Some(login.user.id.clone()),
+                    ) {
+                        Ok(Some(response)) => return response,
+                        Ok(None) => {}
+                        Err(error) => {
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                Html(account_login_html(Some(&error), bootstrap)),
+                            )
+                                .into_response()
+                        }
+                    }
+                }
                 let mut response = Html(login_success_html()).into_response();
                 if let Some(header_value) = set_cookie_header_value(&login.token) {
                     response
@@ -789,6 +813,17 @@ pub(super) async fn login_submit(
         &state.rpc_token,
         &state.web_auth_session_key,
     );
+    match super::two_factor_login::begin("password", &token, None) {
+        Ok(Some(response)) => return response,
+        Ok(None) => {}
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Html(builtin_login_html(Some(&error))),
+            )
+                .into_response()
+        }
+    }
     let mut response = Html(login_success_html()).into_response();
     if let Some(header_value) = set_cookie_header_value(&token) {
         response
@@ -820,6 +855,7 @@ pub(super) async fn logout(headers: HeaderMap) -> impl IntoResponse {
             .headers_mut()
             .append(header::SET_COOKIE, header_value);
     }
+    super::two_factor_login::clear_cookies(&mut response);
     append_no_store_headers(&mut response);
     response
 }

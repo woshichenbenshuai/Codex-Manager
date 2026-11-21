@@ -39,6 +39,13 @@ export function createAccountWebCommands(postWebRpc: WebRpcCaller): Record<strin
     service_account_proxy_latency_test_history: { rpcMethod: "account/proxy/latency-test-history" },
     service_account_proxy_diagnostics_history: { rpcMethod: "account/proxy/diagnostics-history" },
     service_account_manager_status: { rpcMethod: "accountManager/status" },
+    service_account_manager_two_factor_status: { rpcMethod: "accountManager/twoFactor/status" },
+    service_account_manager_two_factor_setup: { rpcMethod: "accountManager/twoFactor/setup" },
+    service_account_manager_two_factor_confirm: {
+      rpcMethod: "accountManager/twoFactor/confirm",
+      mapParams: (params) => { const p = asRecord(params); return { password: p?.password, setupToken: p?.setupToken, code: p?.code }; },
+    },
+    service_account_manager_two_factor_disable: { rpcMethod: "accountManager/twoFactor/disable" },
     service_account_manager_session_current: { rpcMethod: "accountManager/session/current" },
     service_account_manager_profile_update: { rpcMethod: "accountManager/profile/update" },
     service_account_manager_password_change: { rpcMethod: "accountManager/password/change" },

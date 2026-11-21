@@ -189,6 +189,9 @@ pub(crate) fn prepare_web_settings_patch(
     if target_mode == WEB_AUTH_MODE_PASSWORD && !password_configured {
         return Err("启用访问密码模式前需要先设置访问密码".into());
     }
+    if target_mode == WEB_AUTH_MODE_NONE && super::two_factor::status()?.enabled {
+        return Err("请先验证并关闭 2FA，再关闭管理登录".into());
+    }
     if target_distribution && target_mode != WEB_AUTH_MODE_ACCOUNTS {
         return Err("distribution_requires_accounts_mode".into());
     }

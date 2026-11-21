@@ -1,5 +1,85 @@
 use super::*;
 
+#[tokio::test]
+async fn logout_also_removes_second_factor_browser_proofs() {
+    let response = logout(HeaderMap::new()).await.into_response();
+    let cookies: Vec<_> = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert!(cookies[0].starts_with("codexmanager_web_auth="));
+    for name in [
+        "codexmanager_web_auth=",
+        "codexmanager_web_2fa=",
+        "codexmanager_2fa_challenge=",
+    ] {
+        assert!(cookies
+            .iter()
+            .any(|c| c.starts_with(name) && c.contains("Max-Age=0")));
+    }
+}
+
+#[test]
+fn optional_two_factor_rejects_primary_only_and_old_generation_cookies() {
+    let _guard = test_env_guard();
+    let _database = MiddlewareAuthDatabase::new();
+    codexmanager_service::set_web_access_password(Some("web-2fa-fixture-password")).unwrap();
+    codexmanager_service::set_web_auth_mode("password").unwrap();
+    let state = actor_auth_test_state();
+    let primary = build_web_auth_cookie_value(
+        &codexmanager_service::current_web_access_password_hash().unwrap(),
+        &state.rpc_token,
+        &state.web_auth_session_key,
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        HeaderValue::from_str(&format!("{WEB_AUTH_COOKIE_NAME}={primary}")).unwrap(),
+    );
+    assert!(request_is_authenticated(&headers, &state));
+    let storage = codexmanager_core_for_test();
+    let snapshot = storage.web_two_factor_state().unwrap();
+    assert!(storage
+        .compare_exchange_web_two_factor_state(
+            snapshot.version,
+            r#"{"secret":"encrypted-fixture","generation":"first"}"#
+        )
+        .unwrap());
+    assert!(!request_is_authenticated(&headers, &state));
+    headers.insert(
+        header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "{WEB_AUTH_COOKIE_NAME}={primary}; codexmanager_web_2fa=forged"
+        ))
+        .unwrap(),
+    );
+    assert!(!request_is_authenticated(&headers, &state));
+    let receipt = codexmanager_service::two_factor::current_receipt("password", &primary).unwrap();
+    headers.insert(
+        header::COOKIE,
+        HeaderValue::from_str(&format!(
+            "{WEB_AUTH_COOKIE_NAME}={primary}; codexmanager_web_2fa={receipt}"
+        ))
+        .unwrap(),
+    );
+    assert!(request_is_authenticated(&headers, &state));
+    let snapshot = storage.web_two_factor_state().unwrap();
+    assert!(storage
+        .compare_exchange_web_two_factor_state(
+            snapshot.version,
+            r#"{"secret":"encrypted-fixture","generation":"second"}"#
+        )
+        .unwrap());
+    assert!(!request_is_authenticated(&headers, &state));
+}
+
+fn codexmanager_core_for_test() -> codexmanager_core::storage::Storage {
+    codexmanager_core::storage::Storage::open(std::env::var("CODEXMANAGER_DB_PATH").unwrap())
+        .unwrap()
+}
+
 fn actor_auth_test_state() -> AppState {
     let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
     AppState {

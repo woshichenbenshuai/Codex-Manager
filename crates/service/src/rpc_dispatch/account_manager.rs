@@ -15,6 +15,24 @@ use crate::RpcActor;
 /// 返回函数执行结果
 pub(super) fn try_handle(req: &JsonRpcRequest, actor: &RpcActor) -> Option<JsonRpcResponse> {
     let result = match req.method.as_str() {
+        "accountManager/twoFactor/status" => super::value_or_error(crate::two_factor::status()),
+        "accountManager/twoFactor/setup" => super::value_or_error(crate::two_factor::begin_setup(
+            actor,
+            super::str_param(req, "password").unwrap_or(""),
+        )),
+        "accountManager/twoFactor/confirm" => {
+            super::value_or_error(crate::two_factor::confirm_setup(
+                actor,
+                super::str_param(req, "password").unwrap_or(""),
+                super::str_param(req, "setupToken").unwrap_or(""),
+                super::str_param(req, "code").unwrap_or(""),
+            ))
+        }
+        "accountManager/twoFactor/disable" => super::ok_or_error(crate::two_factor::disable(
+            actor,
+            super::str_param(req, "password").unwrap_or(""),
+            super::str_param(req, "code").unwrap_or(""),
+        )),
         "accountManager/status" => super::value_or_error(crate::app_auth_status_value()),
         "accountManager/session/current" => super::value_or_error(crate::app_session_result(actor)),
         "accountManager/profile/update" => {

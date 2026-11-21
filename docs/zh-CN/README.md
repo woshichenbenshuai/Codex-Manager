@@ -287,6 +287,8 @@ PatewayAI 专注于官方高质量模型 API 中继，完整支持 Claude、Code
 
 Docker 服务器部署：在完整源码根目录执行 `docker compose up -d --build`，Compose 会按 Docker 主机架构（ARM64 或 AMD64）构建一体镜像，Web UI 和网关地址为 `http://服务器IP:48761/`，数据保存在 `./data`。后续在原部署目录执行 `git pull` 后重复同一启动命令即可升级。详见 [Docker 部署指南](report/运行与部署指南.md#docker-部署)。
 
+可在“设置 → 访问控制”选配验证器 2FA，并保存一次性恢复码。备份部署时请同时保留数据库和 RPC token 文件，详见 [2FA 配置说明](report/运行与部署指南.md#可选的管理员两步验证2fa)。
+
 ## 默认数据目录
 - 桌面端默认会把 SQLite 数据库写到应用数据目录下，文件名固定为 `codexmanager.db`。
 - Windows：`%APPDATA%\\com.codexmanager.desktop\\codexmanager.db`

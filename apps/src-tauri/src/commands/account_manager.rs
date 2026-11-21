@@ -1,6 +1,55 @@
 use crate::commands::shared::rpc_call_in_background;
 
 #[tauri::command]
+pub async fn service_account_manager_two_factor_status(
+    addr: Option<String>,
+) -> Result<serde_json::Value, String> {
+    rpc_call_in_background("accountManager/twoFactor/status", addr, None).await
+}
+
+#[tauri::command]
+pub async fn service_account_manager_two_factor_setup(
+    addr: Option<String>,
+    password: String,
+) -> Result<serde_json::Value, String> {
+    rpc_call_in_background(
+        "accountManager/twoFactor/setup",
+        addr,
+        Some(serde_json::json!({"password": password})),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn service_account_manager_two_factor_confirm(
+    addr: Option<String>,
+    password: String,
+    setup_token: String,
+    code: String,
+) -> Result<serde_json::Value, String> {
+    rpc_call_in_background(
+        "accountManager/twoFactor/confirm",
+        addr,
+        Some(serde_json::json!({"password": password, "setupToken": setup_token, "code": code})),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn service_account_manager_two_factor_disable(
+    addr: Option<String>,
+    password: String,
+    code: String,
+) -> Result<serde_json::Value, String> {
+    rpc_call_in_background(
+        "accountManager/twoFactor/disable",
+        addr,
+        Some(serde_json::json!({"password": password, "code": code})),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn service_account_manager_status(
     addr: Option<String>,
 ) -> Result<serde_json::Value, String> {

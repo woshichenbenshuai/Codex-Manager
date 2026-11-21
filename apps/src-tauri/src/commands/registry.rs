@@ -163,6 +163,10 @@ macro_rules! invoke_handler {
             crate::commands::account::transfer::service_account_import_by_file,
             crate::commands::account::transfer::service_account_export_by_account_files,
             // account manager
+            crate::commands::account_manager::service_account_manager_two_factor_status,
+            crate::commands::account_manager::service_account_manager_two_factor_setup,
+            crate::commands::account_manager::service_account_manager_two_factor_confirm,
+            crate::commands::account_manager::service_account_manager_two_factor_disable,
             crate::commands::account_manager::service_account_manager_status,
             crate::commands::account_manager::service_account_manager_session_current,
             crate::commands::account_manager::service_account_manager_profile_update,

@@ -65,6 +65,17 @@ test("quota reset auto wake defaults on and supports independent single and bulk
   await expect(page.getByRole("heading", { name: "OpenAI 账号池" })).toBeVisible();
   const rows = page.locator(".account-pool-main-table tbody [data-account-pool-main-row]");
   await expect(rows).toHaveCount(2);
+  // Wide screens should expand quota details, with a bounded proxy column.
+  for (const width of [1600, 1920]) {
+    await page.setViewportSize({ width, height: 900 });
+    const proxy = await rows.first().locator("td").nth(4).boundingBox();
+    expect(proxy?.width).toBeLessThanOrEqual(182);
+    const quota = await rows.first().locator("td").nth(2).boundingBox();
+    expect(quota?.width).toBeGreaterThanOrEqual(398);
+    const columns = await rows.first().locator(".account-pool-quota-grid").evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" "));
+    expect(columns).toHaveLength(2);
+  }
+  await page.setViewportSize({ width: 1600, height: 900 });
   await expect(rows.nth(0).getByText("自动唤醒：开", { exact: true })).toBeVisible();
   await expect(rows.nth(1).getByText("自动唤醒：关", { exact: true })).toBeVisible();
   await page.screenshot({ path: test.info().outputPath("quota-reset-warmup-table.png"), animations: "disabled" });

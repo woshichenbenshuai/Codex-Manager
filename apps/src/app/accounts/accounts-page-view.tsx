@@ -1540,13 +1540,13 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                     onCheckedChange={toggleSelectAllVisible}
                   />
                 </TableHead>
-                <TableHead className="w-[360px] min-w-[320px] max-w-[360px] whitespace-normal">
+                <TableHead className="w-[320px] min-w-[300px] max-w-[320px] whitespace-normal">
                   {t("账号信息")}
                 </TableHead>
                 <TableHead className="min-w-[300px] text-center">
                   {t("额度详情")}
                 </TableHead>
-                <TableHead className="w-[168px]">{t("顺序")}</TableHead>
+                <TableHead className="w-[144px]">{t("顺序")}</TableHead>
                 <TableHead className="min-w-[180px]">{t("账号代理")}</TableHead>
                 <TableHead className="account-pool-status-head whitespace-normal">
                   {t("状态")}
@@ -1612,7 +1612,7 @@ export function AccountsPageView(props: AccountsPageViewProps) {
                           onCheckedChange={() => toggleSelect(account.id)}
                         />
                       </TableCell>
-                      <TableCell className="w-[360px] min-w-[320px] max-w-[360px] whitespace-normal align-top">
+                      <TableCell className="w-[320px] min-w-[300px] max-w-[320px] whitespace-normal align-top">
                         <AccountInfoCell
                           account={account}
                           isPreferred={account.preferred}

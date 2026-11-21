@@ -30,6 +30,7 @@ import { appClient } from "@/lib/api/app-client";
 import { toast } from "sonner";
 import { ShieldAlert, ShieldCheck, KeyRound, Trash2, UsersRound, WalletCards } from "lucide-react";
 import { useI18n } from "@/lib/i18n/provider";
+import { TwoFactorPanel } from "@/components/settings/two-factor-panel";
 
 interface WebPasswordModalProps {
   open: boolean;
@@ -263,7 +264,7 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="glass-card p-0 sm:max-w-[560px]">
+      <DialogContent className="glass-card max-h-[90dvh] overflow-y-auto p-0 sm:max-w-[560px]">
         <DialogHeader className="border-b px-5 py-4">
           <div className="mb-1 flex items-center gap-3">
             <div className="rounded-xl bg-primary/10 p-2 text-primary">
@@ -432,6 +433,7 @@ export function WebPasswordModal({ open, onOpenChange }: WebPasswordModalProps) 
               </CardContent>
             </Card>
           ) : null}
+          <TwoFactorPanel key={`${open}:${appSettings.webAuthMode}`} open={open} mode={appSettings.webAuthMode || "none"} disabled={!canAccessManagementRpc} />
         </div>
 
         <DialogFooter className="m-0 rounded-b-xl border-t bg-muted/40 px-5 py-4">

@@ -48,6 +48,7 @@ mod settings;
 pub mod transfer;
 mod usage_snapshots;
 mod users;
+mod web_two_factor;
 pub use account_tokens::{AccountTokenRecord, AccountTokensRepository};
 pub use accounts::{AccountRecord, AccountsRepository};
 pub use api_key_details::ApiKeyDetailsRepository;
@@ -67,6 +68,7 @@ pub use reset_credit_operations::ResetCreditOperationsRepository;
 pub use settings::{AppSetting, SettingsRepository};
 pub use usage_snapshots::{UsageSnapshotRow, UsageSnapshotsRepository};
 pub use users::UsersRepository;
+pub use web_two_factor::WebTwoFactorRepository;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {

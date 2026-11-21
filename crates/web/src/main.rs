@@ -5,6 +5,7 @@ mod embedded_ui;
 mod gateway_websocket;
 mod service_gateway;
 mod shutdown;
+mod two_factor_login;
 mod ui_assets;
 
 use std::path::{Path, PathBuf};
@@ -587,6 +588,10 @@ async fn async_main() {
         .route("/api/runtime", get(runtime_info))
         .route("/api/author-content", get(service_gateway::author_content))
         .route("/__auth_status", get(auth::auth_status))
+        .route(
+            "/__2fa",
+            post(two_factor_login::complete).layer(DefaultBodyLimit::max(4096)),
+        )
         .route("/__login", get(auth::login_page).post(auth::login_submit))
         .route("/__logout", get(auth::logout).post(auth::logout))
         .merge(protected_app)

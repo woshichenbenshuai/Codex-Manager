@@ -7,7 +7,7 @@
 use sea_orm::sea_query::{Alias, ColumnType, Query};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait, Iterable,
-    Statement, TransactionTrait, Value,
+    QueryFilter, Statement, TransactionTrait, Value,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -121,6 +121,7 @@ fn spec<E: EntityTrait>(entity: E) -> TableSpec {
 
 fn specs() -> Vec<TableSpec> {
     vec![
+        spec(crate::web_two_factor::Entity),
         spec(crate::desktop_history::api_key_profiles::Entity),
         spec(crate::desktop_history::schema_migrations::Entity),
         spec(crate::desktop_history::conversation_bindings::Entity),
@@ -453,6 +454,14 @@ pub async fn import_snapshot(
     }
     let backend = db.get_database_backend();
     let tx = db.begin().await?;
+    // A freshly migrated, unconfigured 2FA singleton is not user data. Never
+    // remove a state that has been changed, including a pending enrollment.
+    crate::web_two_factor::Entity::delete_many()
+        .filter(crate::web_two_factor::Column::Id.eq(1))
+        .filter(crate::web_two_factor::Column::Version.eq(0))
+        .filter(crate::web_two_factor::Column::StateJson.eq("{}"))
+        .exec(&tx)
+        .await?;
     for table in &supported {
         let query = Query::select()
             .expr(sea_orm::sea_query::Expr::cust("COUNT(*) AS row_count"))
@@ -569,6 +578,7 @@ pub async fn import_snapshot(
             tx.execute(Statement::from_string(backend,format!("SELECT setval(pg_get_serial_sequence('{table}','id'), COALESCE(MAX(id),1), COUNT(*)>0) FROM {table}"))).await?;
         }
     }
+    crate::web_two_factor::WebTwoFactorRepository::initialize(&tx).await?;
     tx.commit().await?;
     Ok(report)
 }

@@ -30,3 +30,6 @@ webbrowser = "0.8"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
+
+[dev-dependencies]
+codexmanager-core = { path = "../core" }

@@ -18,6 +18,7 @@ pub(crate) async fn migrate(db: &DatabaseConnection) -> Result<(), DbErr> {
         schema.create_table_from_entity(crate::aggregate_apis::secrets::Entity),
         schema.create_table_from_entity(crate::aggregate_apis::balance_secrets::Entity),
         schema.create_table_from_entity(crate::settings::Entity),
+        schema.create_table_from_entity(crate::web_two_factor::Entity),
         schema.create_table_from_entity(crate::service_health::Entity),
         schema.create_table_from_entity(crate::plugins::installs::Entity),
         schema.create_table_from_entity(crate::plugins::tasks::Entity),
@@ -98,6 +99,7 @@ pub(crate) async fn migrate(db: &DatabaseConnection) -> Result<(), DbErr> {
     ensure_account_preferred_column(db).await?;
     ensure_login_session_proxy_profile_column(db).await?;
     crate::users::initialize_domain_locks(db).await?;
+    crate::web_two_factor::WebTwoFactorRepository::initialize(db).await?;
     let mut index = Index::create();
     index
         .name("idx_api_keys_key_hash")

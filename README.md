@@ -282,6 +282,8 @@ If this project has helped you, donations are welcome!
 
 For a Docker server, run `docker compose up -d --build` from the complete repository root. Compose builds an all-in-one image for the Docker host's architecture (ARM64 or AMD64), serves the Web UI and gateway at `http://SERVER_IP:48761/`, and persists data in `./data`. To update, run `git pull` and repeat the same command in the original deployment directory. See the [Docker deployment guide](docs/en/report/runtime-and-deployment-guide.md#docker-deployment).
 
+Optional authenticator-based 2FA is available in **Settings → Access control**, with single-use recovery codes. Keep both the database and RPC token file when backing up the deployment; see the [2FA setup guide](docs/en/report/runtime-and-deployment-guide.md#optional-administrator-two-factor-authentication-2fa).
+
 ## Default Data Directory
 
 - The desktop app stores its SQLite database in the application data directory as `codexmanager.db`.

@@ -169,6 +169,7 @@ pub use app_settings::{
     DEFAULT_BIND_ADDR, DEFAULT_WEB_ADDR, DEFAULT_WEB_BIND_ADDR, SERVICE_BIND_MODE_ALL_INTERFACES,
     SERVICE_BIND_MODE_LOOPBACK, SERVICE_BIND_MODE_SETTING_KEY, WEB_ACCESS_SESSION_COOKIE_NAME,
 };
+pub use auth::two_factor;
 pub use auth::{
     api_key_belongs_to_user, app_auth_status_value, app_session_result, billing_mode_lock_status,
     bootstrap_app_admin, build_web_access_session_token, change_app_user_password, create_app_user,
